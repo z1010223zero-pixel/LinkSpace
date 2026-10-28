@@ -1,4 +1,4 @@
-import { app, BrowserWindow, shell } from 'electron'
+import { app, BrowserWindow, clipboard, shell } from 'electron'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { DeviceManager } from './device-manager'
@@ -101,6 +101,36 @@ function createWindow(): void {
   })
 }
 
+// ---------- 剪贴板同步 ----------
+//
+// 用轮询而不是 clipboard.watch()：后者在部分 Windows / Linux 环境上
+// 回调不稳定，而剪贴板同步对延迟不敏感（1 秒内到达足够），
+// 800ms 一轮的 readText 开销可以忽略。
+const CLIPBOARD_POLL_MS = 800
+let clipboardTimer: NodeJS.Timeout | null = null
+
+function startClipboardSync(): void {
+  if (clipboardTimer) return
+  host.enableClipboardSync({
+    readText: () => {
+      try {
+        return clipboard.readText()
+      } catch {
+        // 剪贴板被其他进程独占时 readText 会抛，不能因此中断同步
+        return ''
+      }
+    },
+    writeText: (t) => clipboard.writeText(t)
+  })
+  clipboardTimer = setInterval(() => host.pollClipboard(), CLIPBOARD_POLL_MS)
+}
+
+function stopClipboardSync(): void {
+  if (!clipboardTimer) return
+  clearInterval(clipboardTimer)
+  clipboardTimer = null
+}
+
 // ---------- 生命周期 ----------
 app.whenReady().then(async () => {
   const b = locateBinaries()
@@ -138,6 +168,8 @@ app.whenReady().then(async () => {
     log.error(`主机启动失败: ${String(err)}`)
   }
 
+  startClipboardSync()
+
   // 首次扫描设备
   await devices.refresh().catch((err) => log.error(`首次设备扫描失败: ${String(err)}`))
 
@@ -159,6 +191,7 @@ app.on('before-quit', (event) => {
   event.preventDefault()
   quitting = true
   log.info('应用退出，清理投屏会话')
+  stopClipboardSync()
   adapter
     .stopAll()
     .catch((err) => log.error(`清理会话失败: ${String(err)}`))

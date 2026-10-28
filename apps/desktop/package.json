@@ -15,6 +15,7 @@
     "verify:e2e": "node scripts/build-verify-e2e.mjs",
     "verify:layout": "node scripts/build-verify-layout.mjs",
     "verify:net": "node scripts/build-verify-net.mjs",
+    "verify:clipboard": "node scripts/build-verify-clipboard.mjs",
     "probe:xplat": "esbuild scripts/xplat-probe.ts --bundle --platform=node --format=cjs --outfile=out/verify/xprobe.js --external:electron --external:ws --external:bonjour-service --external:selfsigned"
   },
   "dependencies": {

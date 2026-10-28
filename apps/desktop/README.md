@@ -31,10 +31,11 @@ npm run verify:pairing     # 无头验证：配对与信任清单（13 项）
 npm run verify:e2e         # 无头验证：发现→配对→传输→取消 端到端
 npm run verify:layout      # 无头验证：设备卡片顺序持久化
 npm run verify:net         # 无头验证：局域网范围判定表
+npm run verify:clipboard   # 无头验证：剪贴板回环抑制
 npm run clean              # 删除 out/
 ```
 
-**六个 `verify` 都不需要 GUI**，可重复运行并给出断言结果，是回归测试的主要手段。
+**七个 `verify` 都不需要 GUI**，可重复运行并给出断言结果，是回归测试的主要手段。
 
 ### 监听地址与来源门禁
 

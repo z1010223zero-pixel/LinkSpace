@@ -124,8 +124,12 @@ async function main(): Promise<void> {
     await pairingPromise
     check('双方建立信任', A.trustStore.isKnown(B.id) && B.trustStore.isKnown(A.id))
     check(
-      '信任范围只含 file',
-      A.trustStore.scopeOf(B.id).join(',') === 'file',
+      // 配对默认授予 file + clipboard，但**绝不包括** control：
+      // 键鼠与投屏能让对端操作本机，必须另行授权
+      '配对默认不授予 control',
+      !A.trustStore.scopeOf(B.id).includes('control') &&
+        A.trustStore.scopeOf(B.id).includes('file') &&
+        A.trustStore.scopeOf(B.id).includes('clipboard'),
       A.trustStore.scopeOf(B.id).join(',')
     )
 
@@ -231,8 +235,46 @@ async function main(): Promise<void> {
     const aCancelled = A.transferTasks().find((t) => t.id === cancelTask.id)
     check('A 侧状态一致', aCancelled?.state === 'cancelled', aCancelled?.state)
 
-    // ---------- 6. 撤销信任后不能再传 ----------
-    console.log('\n6. 撤销信任后门禁重新生效')
+    // ---------- 6. 剪贴板同步 ----------
+    console.log('\n6. 剪贴板同步（跨节点）')
+    // 注入内存剪贴板：不碰真实系统剪贴板，测试才不会互相干扰
+    const clipA = { value: '' as string }
+    const clipB = { value: '' as string }
+    A.enableClipboardSync({
+      readText: () => clipA.value,
+      writeText: (t) => {
+        clipA.value = t
+      }
+    })
+    B.enableClipboardSync({
+      readText: () => clipB.value,
+      writeText: (t) => {
+        clipB.value = t
+      }
+    })
+
+    clipA.value = '在 A 上复制的文本'
+    A.pollClipboard()
+    await waitFor(() => (clipB.value === '在 A 上复制的文本' ? true : undefined))
+    check('A 的复制内容到达 B', clipB.value === '在 A 上复制的文本', clipB.value)
+
+    // 回环：B 收到后不管轮询多少次，都不该把同一段推回 A
+    for (let i = 0; i < 5; i++) {
+      B.pollClipboard()
+      A.pollClipboard()
+    }
+    check('B 未把收到的内容推回 A', clipA.value === '在 A 上复制的文本', clipA.value)
+
+    // 反向。必须等过抑制窗口：B 刚写入收到的内容，窗口内的变更一律忽略，
+    // 否则窗口内读到的旧值会被当成新复制，形成一次往返回环。
+    await sleep(600)
+    clipB.value = '在 B 上复制的文本'
+    B.pollClipboard()
+    await waitFor(() => (clipA.value === '在 B 上复制的文本' ? true : undefined))
+    check('反向同步同样生效', clipA.value === '在 B 上复制的文本', clipA.value)
+
+    // ---------- 7. 撤销信任后门禁重新生效 ----------
+    console.log('\n7. 撤销信任后门禁重新生效')
     B.revokeTrust(A.id)
     await waitFor(() => (!A.trustStore.isKnown(B.id) ? true : undefined))
     check('A 的信任已撤销', !A.trustStore.isKnown(B.id))

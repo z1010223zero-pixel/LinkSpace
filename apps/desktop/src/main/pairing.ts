@@ -74,7 +74,16 @@ export interface PairingCoordinatorOptions {
   caps(): string[]
   /** 本机自己的证书指纹，用于身份声明与配对确认 */
   selfFingerprint(): string
+  /**
+   * 配对成功时授予的授权范围。
+   * 默认 file + clipboard：两者都在对外通告的能力位里，且都不涉及
+   * 控制本机。control 永远不在此列——它需要用户单独授权。
+   */
+  grantScope?: TrustScope[]
 }
+
+/** 默认授予范围。control 不在其中，键鼠/投屏需用户二次授权 */
+const DEFAULT_GRANT_SCOPE: TrustScope[] = ['file', 'clipboard']
 
 const CODE_TTL_MS = 60_000
 const MAX_ATTEMPTS = 5
@@ -100,6 +109,16 @@ export class PairingCoordinator {
   private readonly announced = new Set<Connection>()
   private codeTtl: number
   private maxAttempts: number
+
+  /**
+   * 配对成功时授予的范围。
+   * control 被强制剔除：键鼠与投屏能让对端操作本机，不能靠一次配对
+   * 就交出去，必须由用户另行授权。
+   */
+  private grantScope(): TrustScope[] {
+    const s = this.opts.grantScope ?? DEFAULT_GRANT_SCOPE
+    return s.filter((x) => x !== 'control')
+  }
 
   constructor(opts: PairingCoordinatorOptions) {
     this.opts = opts
@@ -193,7 +212,7 @@ export class PairingCoordinator {
       displayName: p.displayName,
       deviceType: p.deviceType,
       fingerprint: presentedFp,
-      scope: ['file']
+      scope: this.grantScope()
     }
     this.trust.grant(entry)
     this.pending.delete(p.conn)
@@ -214,7 +233,7 @@ export class PairingCoordinator {
       displayName: p.displayName,
       deviceType: p.deviceType,
       fingerprint: presentedFp,
-      scope: ['file']
+      scope: this.grantScope()
     })
     log.info(`已与 ${p.peerId} 建立信任（用户确认配对码）`)
     this.uiPaired?.forEach((cb) => cb(this.trust.list().find((e) => e.deviceId === p.peerId)!))

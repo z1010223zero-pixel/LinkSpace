@@ -18,6 +18,7 @@ import { ControlNode, type Connection } from './control/node'
 import { PairingCoordinator, type PendingPairing } from './pairing'
 import { Discovery, type DiscoveredService } from './discovery'
 import { LayoutStore } from './layout'
+import { ClipboardSync, type ClipboardIo } from './clipboard'
 import { log } from './log'
 
 export interface HostOptions {
@@ -71,6 +72,7 @@ export class Host {
   private deviceId = ''
   private readonly trust: TrustStore
   private readonly layout: LayoutStore
+  private clipboardSync: ClipboardSync | null = null
   private readonly transfers = new TransferManager()
   private control: ControlNode | null = null
   private pairing: PairingCoordinator | null = null
@@ -93,7 +95,7 @@ export class Host {
     if (opts.dataDir) setIdentityDir(opts.dataDir)
     this.trust = new TrustStore({
       dir: opts.dataDir ?? app.getPath('userData'),
-      defaultScope: opts.defaultScope ?? ['file']
+      defaultScope: opts.defaultScope ?? ['file', 'clipboard']
     })
     this.layout = new LayoutStore({ dir: opts.dataDir ?? app.getPath('userData') })
   }
@@ -151,6 +153,7 @@ export class Host {
     this.startPairing(cert)
     this.startDiscovery(port)
     this.wireTransferBridge()
+    this.wireClipboardBridge()
 
     log.info(`LinkSpace 主机已启动，id=${this.deviceId}，端口=${port}`)
   }
@@ -490,7 +493,59 @@ export class Host {
     })
   }
 
+  /**
+   * 剪贴板同步的收口。
+   *
+   * 与传输一样，先过授权范围：只有持有 clipboard 授权的对端才能把内容
+   * 写进本机剪贴板，也只有这类对端才会收到本机的变更。剪贴板会收到
+   * 密码、令牌这类东西，范围门禁不能省。
+   */
+  private wireClipboardBridge(): void {
+    this.control!.on('clipboard.share', (conn, msg) => {
+      const p = msg.payload as { text?: string; kind?: string }
+      const peerId = conn.peerId
+      if (!peerId) return
+      if (!this.trust.hasScope(peerId, 'clipboard')) {
+        log.warn(`拒绝未授权设备的 clipboard.share：${peerId}`)
+        return
+      }
+      // 只认文本。图片与文件走传输通道，不进剪贴板
+      if (p.kind && p.kind !== 'text') return
+      this.clipboardSync?.receive(String(p.text ?? ''))
+    })
+  }
+
+  /**
+   * 启用剪贴板同步。读写由调用方注入，本类不直接依赖 Electron，
+   * 回环抑制逻辑才能在无头测试里覆盖。
+   */
+  enableClipboardSync(io: ClipboardIo): void {
+    this.clipboardSync = new ClipboardSync({
+      io,
+      send: (text) => this.broadcastClipboard(text),
+      onSkip: (reason) => log.warn(reason)
+    })
+    this.clipboardSync.start()
+  }
+
+  /** 本机剪贴板可能变了，由上层定时调用 */
+  pollClipboard(): void {
+    this.clipboardSync?.poll()
+  }
+
+  /** 广播到所有持有 clipboard 授权且已连接的对端 */
+  private broadcastClipboard(text: string): void {
+    let sent = 0
+    for (const [peerId, conn] of this.peers) {
+      if (!this.trust.hasScope(peerId, 'clipboard')) continue
+      conn.send('clipboard.share', { kind: 'text', text })
+      sent++
+    }
+    if (sent) log.info(`剪贴板已同步到 ${sent} 台设备`)
+  }
+
   async stop(): Promise<void> {
+    this.clipboardSync?.stop()
     this.discovery?.stop()
     this.control?.stop()
     this.fileServer?.server.close()
