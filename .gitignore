@@ -33,5 +33,9 @@ Thumbs.db
 *.log
 logs/
 
-# 敏感：本地存储可能含设备凭据
-userdata/
+# 本地记忆与工作区数据，不进版本库
+.workbuddy/
+
+# 构建输出
+apps/desktop/out/
+apps/desktop/node_modules/
