@@ -23,6 +23,25 @@ const env = ref<EnvInfo | null>(null)
 const notice = ref('')
 let refreshing = false
 
+/** 持久化的设备顺序。主进程返回时已排好，这里只在拖拽后本地更新 */
+const layoutOrder = ref<string[]>([])
+const dragSerial = ref('')
+const dropTarget = ref('')
+
+/**
+ * 展示顺序。主进程已按保存顺序返回，但拖拽后 devices 会被 5 秒轮询
+ * 刷新回 adb 的顺序，所以渲染侧必须自己再排一次，否则拖完立刻弹回。
+ */
+const orderedDevices = computed<DeviceView[]>(() => {
+  const rank = new Map<string, number>()
+  layoutOrder.value.forEach((s, i) => rank.set(s, i))
+  const FALLBACK = Number.MAX_SAFE_INTEGER
+  return devices.value
+    .map((d, i) => ({ d, i, rank: rank.get(d.serial) ?? FALLBACK }))
+    .sort((a, b) => (a.rank === b.rank ? a.i - b.i : a.rank - b.rank))
+    .map((x) => x.d)
+})
+
 let unsubDevices: (() => void) | null = null
 let unsubSessions: (() => void) | null = null
 let unsubTransfers: (() => void) | null = null
@@ -42,6 +61,49 @@ function sessionsFor(serial: string): SessionView[] {
 async function loadDevices(): Promise<void> {
   const list = await window.linkspace.listDevices()
   devices.value = Array.isArray(list) ? list : []
+}
+
+async function loadLayout(): Promise<void> {
+  const order = await window.linkspace.getDeviceLayout().catch(() => [])
+  layoutOrder.value = Array.isArray(order) ? order : []
+}
+
+// ---------- 卡片拖拽排序 ----------
+
+function onDragStart(serial: string): void {
+  dragSerial.value = serial
+}
+
+function onDragEnter(serial: string): void {
+  if (dragSerial.value && dragSerial.value !== serial) dropTarget.value = serial
+}
+
+function onDragEnd(): void {
+  dragSerial.value = ''
+  dropTarget.value = ''
+}
+
+/**
+ * 落位：把拖拽的卡片插到目标卡片的位置，然后把完整顺序回写主进程。
+ * 传完整列表而不是「把 A 移到 B 前面」这类增量指令——增量指令在
+ * 设备上下线并发时会算错，完整列表是幂等的。
+ */
+async function onDrop(target: string): Promise<void> {
+  const from = dragSerial.value
+  onDragEnd()
+  if (!from || from === target) return
+
+  const serials = orderedDevices.value.map((d) => d.serial)
+  const fromIdx = serials.indexOf(from)
+  const toIdx = serials.indexOf(target)
+  if (fromIdx < 0 || toIdx < 0) return
+
+  serials.splice(fromIdx, 1)
+  serials.splice(toIdx, 0, from)
+
+  layoutOrder.value = serials
+  const res = await window.linkspace.saveDeviceLayout(serials)
+  if (!res.ok) notice.value = res.error.message
 }
 
 async function loadSessions(): Promise<void> {
@@ -204,6 +266,7 @@ onMounted(async () => {
   await loadDiscovered()
   await loadPairings()
   await loadTrusted()
+  await loadLayout()
 
   unsubDevices = window.linkspace.onDevicesChanged(() => {
     void loadDevices()
@@ -291,17 +354,26 @@ onBeforeUnmount(() => {
         </div>
       </section>
 
-      <h2 class="section-title">设备</h2>
+      <h2 class="section-title">
+        设备
+        <span v-if="devices.length > 1" class="section-title__hint">拖拽卡片可调整顺序</span>
+      </h2>
 
       <div v-if="devices.length" class="device-grid">
         <DeviceCard
-          v-for="(device, index) in devices"
+          v-for="(device, index) in orderedDevices"
           :key="device.serial"
           :device="device"
           :sessions="sessionsFor(device.serial)"
           :index="index"
+          :dragging="dragSerial === device.serial"
+          :drop-hint="dropTarget === device.serial"
           @start="startMirror"
           @stop="stopMirror"
+          @drag-start="onDragStart"
+          @drag-enter="onDragEnter"
+          @drag-end="onDragEnd"
+          @drop-on="onDrop"
         />
       </div>
 

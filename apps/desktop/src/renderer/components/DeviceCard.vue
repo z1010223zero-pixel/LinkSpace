@@ -6,12 +6,35 @@ const props = defineProps<{
   device: DeviceView
   sessions: SessionView[]
   index: number
+  /** 当前正在被拖拽 */
+  dragging?: boolean
+  /** 拖拽中的卡片正悬停在本卡片上 */
+  dropHint?: boolean
 }>()
 
 const emit = defineEmits<{
   (e: 'start', serial: string, index: number): void
   (e: 'stop', id: string): void
+  (e: 'dragStart', serial: string): void
+  (e: 'dragEnter', serial: string): void
+  (e: 'dragEnd'): void
+  (e: 'dropOn', serial: string): void
 }>()
+
+/** 拖拽把手：整卡可拖会让卡内文字选不中，用头部区域做把手更稳 */
+function onDragStart(e: DragEvent): void {
+  emit('dragStart', props.device.serial)
+  if (e.dataTransfer) {
+    e.dataTransfer.effectAllowed = 'move'
+    // Firefox 不设数据就不会触发 drop
+    e.dataTransfer.setData('text/plain', props.device.serial)
+  }
+}
+
+function onDrop(e: DragEvent): void {
+  e.preventDefault()
+  emit('dropOn', props.device.serial)
+}
 
 const isOnline = computed(() => props.device.state === 'device')
 const active = computed(() =>
@@ -36,8 +59,23 @@ const displayName = computed(() => props.device.model ?? '未知设备')
 </script>
 
 <template>
-  <article class="device-card" :class="{ 'device-card--offline': !isOnline }">
-    <div class="device-card__head">
+  <article
+    class="device-card"
+    :class="{
+      'device-card--offline': !isOnline,
+      'device-card--dragging': dragging,
+      'device-card--drop': dropHint
+    }"
+    @dragover.prevent="emit('dragEnter', device.serial)"
+    @drop="onDrop"
+  >
+    <div
+      class="device-card__head"
+      draggable="true"
+      title="按住拖动可调整顺序"
+      @dragstart="onDragStart"
+      @dragend="emit('dragEnd')"
+    >
       <div class="device-card__name">{{ displayName }}</div>
       <span class="badge" :class="stateBadge.cls">
         <span class="badge__dot" />

@@ -159,6 +159,15 @@ button {
   font-weight: 600;
   color: var(--text-secondary);
   text-transform: none;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.section-title__hint {
+  font-size: 11.5px;
+  font-weight: 400;
+  color: var(--text-muted);
 }
 
 .device-grid {
@@ -182,11 +191,27 @@ button {
   opacity: 0.72;
 }
 
+/* 拖拽中：源卡片淡出，落点卡片描边——只用透明度+描边区分，不做位移，
+   位移会让 Grid 重排并触发连续的 dragenter，落点算不准 */
+.device-card--dragging {
+  opacity: 0.4;
+}
+
+.device-card--drop {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
 .device-card__head {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 8px;
+  cursor: grab;
+}
+
+.device-card__head:active {
+  cursor: grabbing;
 }
 
 .device-card__name {

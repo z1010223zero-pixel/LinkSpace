@@ -75,6 +75,11 @@ const api: LinkSpaceApi = {
       IpcResult<TransferTaskView | null>
     >,
 
+  getDeviceLayout: () => ipcRenderer.invoke('layout:get') as Promise<string[]>,
+
+  saveDeviceLayout: (order: string[]) =>
+    ipcRenderer.invoke('layout:save', order) as Promise<IpcResult<void>>,
+
   onDevicesChanged: (cb) => subscribe('devices:changed', cb),
   onSessionsChanged: (cb) => subscribe('sessions:changed', cb),
   onTransfersChanged: (cb) => subscribe('transfers:changed', cb),

@@ -17,6 +17,7 @@ import { startTransferServer, type StartedServer } from './transfer/server'
 import { ControlNode, type Connection } from './control/node'
 import { PairingCoordinator, type PendingPairing } from './pairing'
 import { Discovery, type DiscoveredService } from './discovery'
+import { LayoutStore } from './layout'
 import { log } from './log'
 
 export interface HostOptions {
@@ -63,6 +64,7 @@ export class Host {
    */
   private deviceId = ''
   private readonly trust: TrustStore
+  private readonly layout: LayoutStore
   private readonly transfers = new TransferManager()
   private control: ControlNode | null = null
   private pairing: PairingCoordinator | null = null
@@ -87,6 +89,7 @@ export class Host {
       dir: opts.dataDir ?? app.getPath('userData'),
       defaultScope: opts.defaultScope ?? ['file']
     })
+    this.layout = new LayoutStore({ dir: opts.dataDir ?? app.getPath('userData') })
   }
 
   on<K extends keyof HostEvents>(event: K, cb: Listener<K>): this {
@@ -106,6 +109,20 @@ export class Host {
 
   get trustStore(): TrustStore {
     return this.trust
+  }
+
+  get layoutStore(): LayoutStore {
+    return this.layout
+  }
+
+  /** 读取持久化的设备顺序 */
+  layoutOrder(): string[] {
+    return this.layout.get()
+  }
+
+  /** 覆盖设备顺序。传入的应是完整列表，不是增量 */
+  setLayoutOrder(order: string[]): void {
+    this.layout.set(order)
   }
 
   get transferManager(): TransferManager {

@@ -52,6 +52,8 @@ const CHANNELS = [
   'transfer:pickAndOffer',
   'transfer:info',
   'env:info',
+  'layout:get',
+  'layout:save',
   'ping'
 ] as const
 
@@ -94,10 +96,12 @@ export function registerIpc(
     error: { code: 'INTERNAL', message, retryable: false }
   })
 
-  invoke('devices:list', () => devices.view())
+  // 设备列表一律按用户保存的顺序返回：adb 的返回顺序不稳定，
+  // 不该让用户每次启动重新认一遍设备
+  invoke('devices:list', () => host.layoutStore.sort(devices.view(), (d) => d.serial))
   invoke('devices:refresh', async () => {
     const view = await devices.refresh()
-    return { ok: true as const, value: view }
+    return { ok: true as const, value: host.layoutStore.sort(view, (d) => d.serial) }
   })
 
   ipcMain.handle('scrcpy:startFor', async (_e, serial: unknown, opts: unknown) => {
@@ -248,6 +252,16 @@ export function registerIpc(
       // 就绪与否只看 scrcpy 是否真的被找到，不能拿「来源不是占位值」推断
       ready: b.scrcpyFound
     }
+  })
+
+  invoke('layout:get', () => host.layoutOrder())
+
+  ipcMain.handle('layout:save', async (_e, order: unknown) => {
+    if (!Array.isArray(order) || order.some((s) => typeof s !== 'string')) {
+      return fail('布局顺序格式不正确')
+    }
+    host.setLayoutOrder(order as string[])
+    return { ok: true as const }
   })
 
   invoke('ping', () => 'pong')

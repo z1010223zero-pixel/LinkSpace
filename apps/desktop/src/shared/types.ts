@@ -146,6 +146,10 @@ export interface LinkSpaceApi {
   listTrusted(): Promise<TrustedDevice[]>
   revokeTrust(deviceId: string): Promise<IpcResult<void>>
   pickAndOffer(peerId: string): Promise<IpcResult<TransferTaskView | null>>
+  /** 持久化的设备卡片顺序，未知设备追加在末尾 */
+  getDeviceLayout(): Promise<string[]>
+  /** 保存设备卡片顺序，应传入完整列表 */
+  saveDeviceLayout(order: string[]): Promise<IpcResult<void>>
   onDevicesChanged(cb: () => void): Unsubscribe
   onSessionsChanged(cb: () => void): Unsubscribe
   onTransfersChanged(cb: () => void): Unsubscribe
