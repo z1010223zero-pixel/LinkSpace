@@ -46,8 +46,12 @@ export class ChunkConflictError extends Error {
   }
 }
 
-export async function startTransferServer(ctx: TransferRouteContext): Promise<StartedServer> {
-  const { key, cert } = await getDeviceCert()
+export async function startTransferServer(
+  ctx: TransferRouteContext,
+  /** 外部注入的身份证书。同进程多节点时必须传，否则会共用进程级单例 */
+  identity?: { key: string; cert: string }
+): Promise<StartedServer> {
+  const { key, cert } = identity ?? (await getDeviceCert())
 
   const server = createServer({ key, cert }, (req, res) => {
     void handle(ctx, req, res)

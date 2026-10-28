@@ -2,10 +2,12 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import type {
   DeviceView,
+  DiscoveredDevice,
   EnvInfo,
   SessionView,
   TransferInfo,
-  TransferTaskView
+  TransferTaskView,
+  TrustedDevice
 } from '../shared/types'
 import DeviceCard from './components/DeviceCard.vue'
 
@@ -13,6 +15,10 @@ const devices = ref<DeviceView[]>([])
 const sessions = ref<SessionView[]>([])
 const transfers = ref<TransferTaskView[]>([])
 const transferInfo = ref<TransferInfo | null>(null)
+const discovered = ref<DiscoveredDevice[]>([])
+const pairings = ref<Array<{ id: string; peerId: string; displayName: string; deviceType: string; code: string; expiresAt: number }>>([])
+const trusted = ref<TrustedDevice[]>([])
+const codeInput = ref('')
 const env = ref<EnvInfo | null>(null)
 const notice = ref('')
 let refreshing = false
@@ -20,6 +26,8 @@ let refreshing = false
 let unsubDevices: (() => void) | null = null
 let unsubSessions: (() => void) | null = null
 let unsubTransfers: (() => void) | null = null
+let unsubDiscovered: (() => void) | null = null
+let unsubPairings: (() => void) | null = null
 let pollTimer: number | null = null
 
 const onlineCount = computed(() => devices.value.filter((d) => d.state === 'device').length)
@@ -64,6 +72,68 @@ const STATE_LABEL: Record<string, string> = {
   completed: '已完成',
   failed: '失败',
   cancelled: '已取消'
+}
+
+async function loadDiscovered(): Promise<void> {
+  const list = await window.linkspace.listDiscovered()
+  discovered.value = Array.isArray(list) ? list : []
+}
+
+async function loadPairings(): Promise<void> {
+  const list = await window.linkspace.listPendingPairings()
+  pairings.value = Array.isArray(list) ? list : []
+}
+
+async function loadTrusted(): Promise<void> {
+  const list = await window.linkspace.listTrusted()
+  trusted.value = Array.isArray(list) ? list : []
+}
+
+async function connectAndPair(svc: DiscoveredDevice): Promise<void> {
+  notice.value = ''
+  const res = await window.linkspace.connectAndPair(svc.serviceName)
+  if (!res.ok) {
+    notice.value = res.error.message
+    return
+  }
+  await loadPairings()
+}
+
+async function rejectPairing(id: string): Promise<void> {
+  await window.linkspace.rejectPairing(id)
+  await loadPairings()
+}
+
+async function revokeTrust(deviceId: string): Promise<void> {
+  await window.linkspace.revokeTrust(deviceId)
+  await loadTrusted()
+}
+
+/** 发起方：把用户输入的配对码提交给对端校验 */
+async function submitCode(d: DiscoveredDevice): Promise<void> {
+  notice.value = ''
+  const res = await window.linkspace.submitPairingCode(d.serviceName, codeInput.value.trim())
+  if (!res.ok) {
+    notice.value = res.error.message
+    return
+  }
+  codeInput.value = ''
+  await loadTrusted()
+  await loadDiscovered()
+}
+
+async function sendFile(peerId: string): Promise<void> {
+  notice.value = ''
+  const res = await window.linkspace.pickAndOffer(peerId)
+  if (!res.ok) notice.value = res.error.message
+  else await loadTransfers()
+}
+
+function typeLabel(t: string): string {
+  if (t === 'win') return '电脑'
+  if (t === 'android-phone') return '手机'
+  if (t === 'android-tablet') return '平板'
+  return t
 }
 
 async function cancelTransfer(id: string): Promise<void> {
@@ -120,6 +190,9 @@ onMounted(async () => {
   await loadDevices()
   await loadSessions()
   await loadTransfers()
+  await loadDiscovered()
+  await loadPairings()
+  await loadTrusted()
 
   unsubDevices = window.linkspace.onDevicesChanged(() => {
     void loadDevices()
@@ -130,6 +203,13 @@ onMounted(async () => {
   })
   unsubTransfers = window.linkspace.onTransfersChanged(() => {
     void loadTransfers()
+  })
+  unsubDiscovered = window.linkspace.onDiscoveredChanged(() => {
+    void loadDiscovered()
+  })
+  unsubPairings = window.linkspace.onPairingsChanged(() => {
+    void loadPairings()
+    void loadTrusted()
   })
 
   // 事件之外的兜底轮询：设备插拔时 adb 不会主动通知
@@ -143,6 +223,8 @@ onBeforeUnmount(() => {
   unsubDevices?.()
   unsubSessions?.()
   unsubTransfers?.()
+  unsubDiscovered?.()
+  unsubPairings?.()
   if (pollTimer !== null) window.clearInterval(pollTimer)
 })
 </script>
@@ -181,6 +263,22 @@ onBeforeUnmount(() => {
       </div>
 
       <div v-if="notice" class="banner banner--warn">{{ notice }}</div>
+
+      <section v-if="pairings.length" class="sessions">
+        <h2 class="section-title">待确认的配对请求</h2>
+        <div v-for="p in pairings" :key="p.id" class="session-row">
+          <span class="badge badge--warn">配对</span>
+          <span class="session-row__id">
+            {{ p.displayName }}（{{ typeLabel(p.deviceType) }}）请求配对
+          </span>
+          <span class="topbar__spacer" />
+          <span class="pairing-code">{{ p.code }}</span>
+          <button class="btn btn--sm btn--danger" @click="rejectPairing(p.id)">拒绝</button>
+        </div>
+        <div class="pairing-hint">
+          请让对方输入上面这 6 位配对码。配对码只在<span strong>本方屏幕</span>显示，不会通过网络传递。
+        </div>
+      </section>
 
       <h2 class="section-title">设备</h2>
 
@@ -225,6 +323,49 @@ onBeforeUnmount(() => {
           >
             取消
           </button>
+        </div>
+      </section>
+
+      <section v-if="discovered.length" class="sessions">
+        <h2 class="section-title">局域网内的其他设备</h2>
+        <div v-for="d in discovered" :key="d.serviceName" class="session-row">
+          <span class="badge" :class="d.paired ? 'badge--ok' : 'badge--neutral'">
+            {{ d.paired ? '已配对' : '未配对' }}
+          </span>
+          <span class="session-row__id">
+            {{ d.displayName }}（{{ typeLabel(d.deviceType) }}）
+            <span class="device-card__serial">{{ d.host }}:{{ d.port }} · {{ d.caps.join(',') }}</span>
+          </span>
+          <span class="session-row__spacer" />
+          <input
+            v-model="codeInput"
+            class="code-field"
+            maxlength="6"
+            placeholder="6 位码"
+            inputmode="numeric"
+          />
+          <button class="btn btn--sm" :disabled="codeInput.length !== 6" @click="submitCode(d)">
+            提交配对码
+          </button>
+          <button class="btn btn--sm" @click="connectAndPair(d)">发起配对</button>
+        </div>
+        <div class="pairing-hint">
+          先点「发起配对」，再把<b>对方屏幕</b>上显示的 6 位配对码输入后提交。
+          配对码不会通过网络传递，只能人眼抄录。
+        </div>
+      </section>
+
+      <section v-if="trusted.length" class="sessions">
+        <h2 class="section-title">已信任的设备</h2>
+        <div v-for="t in trusted" :key="t.deviceId" class="session-row">
+          <span class="badge badge--ok">信任</span>
+          <span class="session-row__id">
+            {{ t.displayName }}（{{ typeLabel(t.deviceType) }}）
+            <span class="device-card__serial">授权范围：{{ t.scope.join(',') }}</span>
+          </span>
+          <span class="session-row__spacer" />
+          <button class="btn btn--sm" @click="sendFile(t.deviceId)">发送文件</button>
+          <button class="btn btn--sm btn--danger" @click="revokeTrust(t.deviceId)">撤销信任</button>
         </div>
       </section>
 

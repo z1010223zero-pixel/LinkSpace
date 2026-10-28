@@ -2,14 +2,19 @@
 //
 // 渲染进程与主进程之间唯一的通信入口。所有 channel 在此白名单登记，
 // 未登记的 channel 一律拒绝——避免 renderer 被注入后直接触达系统能力。
+//
+// 注意：渲染层拿到的都是**快照**（普通对象），不接触 Host、Connection
+// 这类活对象。活对象无法结构化克隆，也不该跨进程边界暴露。
 
-import { ipcMain, BrowserWindow } from 'electron'
+import { ipcMain, BrowserWindow, dialog } from 'electron'
 import { DeviceManager } from './device-manager'
 import { ScrcpyAdapter } from './scrcpy-adapter'
 import type { StartOptions } from '../shared/types'
 import { locateBinaries } from './platform'
-import { TransferManager } from './transfer/manager'
-import { getDeviceCert } from './transfer/identity'
+import type { Host } from './host'
+import type { DiscoveredService } from './discovery'
+import type { PendingPairing } from './pairing'
+import type { TransferTask } from './transfer/manager'
 import { log } from './log'
 
 export interface EnvInfo {
@@ -22,8 +27,9 @@ export interface EnvInfo {
 export interface TransferInfo {
   /** 本机传输服务监听端口，0 表示未启动 */
   port: number
-  /** 本机身份证书指纹，配对时供用户人工核对 */
+  /** 本机身份证书指纹，配对时供人工核对 */
   fingerprint: string
+  deviceId: string
 }
 
 const CHANNELS = [
@@ -32,21 +38,43 @@ const CHANNELS = [
   'scrcpy:startFor',
   'scrcpy:stopFor',
   'scrcpy:sessions',
+  'discovery:list',
+  'discovery:connect',
+  'pairing:list',
+  'pairing:reject',
+  'pairing:submitCode',
+  'trust:list',
+  'trust:revoke',
   'transfer:list',
+  'transfer:acceptFor',
   'transfer:cancelFor',
+  'transfer:pickAndOffer',
   'transfer:info',
   'env:info',
   'ping'
 ] as const
 
-const EVENTS = ['devices:changed', 'sessions:changed', 'transfers:changed'] as const
+const EVENTS = [
+  'devices:changed',
+  'sessions:changed',
+  'discovered:changed',
+  'pairings:changed',
+  'transfers:changed'
+] as const
+
+/** 渲染层可见的运行时快照来源 */
+export interface RuntimeSource {
+  discovered: DiscoveredService[]
+  pendingPairings: PendingPairing[]
+  transfers: TransferTask[]
+}
 
 export function registerIpc(
   getWindow: () => BrowserWindow | null,
   devices: DeviceManager,
   adapter: ScrcpyAdapter,
-  transfers: TransferManager,
-  getTransferPort: () => number
+  host: Host,
+  runtime: RuntimeSource
 ): void {
   const invoke = <T>(channel: string, handler: () => Promise<T> | T): void => {
     ipcMain.handle(channel, async () => {
@@ -60,17 +88,19 @@ export function registerIpc(
     })
   }
 
+  const fail = (message: string) => ({
+    ok: false as const,
+    error: { code: 'INTERNAL', message, retryable: false }
+  })
+
   invoke('devices:list', () => devices.view())
   invoke('devices:refresh', async () => {
     const view = await devices.refresh()
     return { ok: true as const, value: view }
   })
 
-  // 带参数的方法单独注册：通用包装只处理无参调用，参数在此校验
   ipcMain.handle('scrcpy:startFor', async (_e, serial: unknown, opts: unknown) => {
-    if (typeof serial !== 'string' || !serial) {
-      return { ok: false as const, error: { code: 'INTERNAL', message: '缺少设备序列号', retryable: false } }
-    }
+    if (typeof serial !== 'string' || !serial) return fail('缺少设备序列号')
     const options = (opts ?? {}) as StartOptions
     const result = await adapter.start(serial, options)
     broadcast(getWindow, 'sessions:changed')
@@ -78,9 +108,7 @@ export function registerIpc(
   })
 
   ipcMain.handle('scrcpy:stopFor', async (_e, id: unknown) => {
-    if (typeof id !== 'string' || !id) {
-      return { ok: false as const, error: { code: 'INTERNAL', message: '缺少会话 ID', retryable: false } }
-    }
+    if (typeof id !== 'string' || !id) return fail('缺少会话 ID')
     const result = await adapter.stop(id)
     broadcast(getWindow, 'sessions:changed')
     return result
@@ -88,21 +116,103 @@ export function registerIpc(
 
   invoke('scrcpy:sessions', () => adapter.list())
 
-  invoke('transfer:list', () => transfers.list())
+  // ---------- 发现与配对 ----------
 
-  invoke('transfer:info', async (): Promise<TransferInfo> => {
-    const { fingerprint } = await getDeviceCert()
-    return { port: getTransferPort(), fingerprint }
+  invoke('discovery:list', () => runtime.discovered)
+
+  ipcMain.handle('discovery:connect', async (_e, serviceName: unknown) => {
+    if (typeof serviceName !== 'string') return fail('缺少服务名')
+    const svc = runtime.discovered.find((d) => d.serviceName === serviceName)
+    if (!svc) return fail('该设备已不在线')
+    try {
+      const conn = await host.connect(svc)
+      await host.requestPairing(conn)
+      return { ok: true as const }
+    } catch (err) {
+      return fail(err instanceof Error ? err.message : String(err))
+    }
+  })
+
+  ipcMain.handle('pairing:submitCode', async (_e, serviceName: unknown, code: unknown) => {
+    if (typeof serviceName !== 'string' || typeof code !== 'string') return fail('参数不完整')
+    const conn = host.connectionFor(serviceName)
+    if (!conn) return fail('连接不存在，请重新发现设备')
+    const result = host.submitCode(conn, code)
+    return result.ok ? { ok: true as const } : fail(result.error ?? '提交失败')
+  })
+
+  ipcMain.handle('pairing:reject', async (_e, id: unknown) => {
+    if (typeof id !== 'string') return fail('缺少配对 ID')
+    const p = host.pendingPairings().find((x) => x.id === id)
+    if (p) host.rejectPairing(p, '用户拒绝')
+    runtime.pendingPairings = host.pendingPairings()
+    broadcast(getWindow, 'pairings:changed')
+    return { ok: true as const }
+  })
+
+  invoke('pairing:list', () => host.pendingPairings())
+
+  invoke('trust:list', () => host.trustedDevices())
+
+  ipcMain.handle('trust:revoke', async (_e, deviceId: unknown) => {
+    if (typeof deviceId !== 'string') return fail('缺少设备 ID')
+    host.revokeTrust(deviceId)
+    broadcast(getWindow, 'pairings:changed')
+    return { ok: true as const }
+  })
+
+  // ---------- 文件传输 ----------
+
+  invoke('transfer:list', () => host.transferTasks())
+
+  ipcMain.handle('transfer:acceptFor', async (_e, id: unknown, saveDir: unknown) => {
+    if (typeof id !== 'string' || typeof saveDir !== 'string') return fail('参数不完整')
+    try {
+      await host.acceptTransfer(id, saveDir)
+      broadcast(getWindow, 'transfers:changed')
+      return { ok: true as const }
+    } catch (err) {
+      return fail(err instanceof Error ? err.message : String(err))
+    }
   })
 
   ipcMain.handle('transfer:cancelFor', async (_e, id: unknown) => {
-    if (typeof id !== 'string' || !id) {
-      return { ok: false as const, error: { code: 'INTERNAL', message: '缺少任务 ID', retryable: false } }
-    }
-    await transfers.cancel(id)
+    if (typeof id !== 'string' || !id) return fail('缺少任务 ID')
+    await host.cancelTransfer(id)
     broadcast(getWindow, 'transfers:changed')
     return { ok: true as const }
   })
+
+  // 文件选择放在主进程：渲染进程没有文件系统访问权
+  ipcMain.handle('transfer:pickAndOffer', async (_e, peerId: unknown) => {
+    if (typeof peerId !== 'string') return fail('缺少对端 ID')
+    const win = getWindow()
+    if (!win) return fail('窗口不存在')
+    const picked = await dialog.showOpenDialog(win, {
+      title: '选择要发送的文件',
+      properties: ['openFile', 'multiSelections']
+    })
+    if (picked.canceled || picked.filePaths.length === 0) {
+      return { ok: true as const, value: null }
+    }
+    try {
+      const { stat } = await import('node:fs/promises')
+      const files = await Promise.all(
+        picked.filePaths.map(async (p) => {
+          const s = await stat(p)
+          const name = p.split(/[\\/]/).pop() ?? p
+          return { name, path: p, size: s.size }
+        })
+      )
+      const task = await host.offerFiles(peerId, files)
+      broadcast(getWindow, 'transfers:changed')
+      return { ok: true as const, value: task }
+    } catch (err) {
+      return fail(err instanceof Error ? err.message : String(err))
+    }
+  })
+
+  invoke('transfer:info', async (): Promise<TransferInfo> => host.identityInfo())
 
   invoke('env:info', (): EnvInfo => {
     const b = locateBinaries()
@@ -119,7 +229,6 @@ export function registerIpc(
   // 事件转发
   devices.on('changed', () => broadcast(getWindow, 'devices:changed'))
   adapter.on('changed', () => broadcast(getWindow, 'sessions:changed'))
-  transfers.on('changed', () => broadcast(getWindow, 'transfers:changed'))
 
   log.info(`IPC 已注册：${CHANNELS.length} 个 channel，${EVENTS.length} 类事件`)
 }

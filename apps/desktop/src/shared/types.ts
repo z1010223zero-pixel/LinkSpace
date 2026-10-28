@@ -80,6 +80,39 @@ export interface TransferInfo {
   port: number
   /** 本机身份证书指纹，配对时供用户人工核对 */
   fingerprint: string
+  deviceId: string
+}
+
+// ---------- 发现与配对 ----------
+
+export interface DiscoveredDevice {
+  serviceName: string
+  idPrefix: string
+  displayName: string
+  deviceType: 'win' | 'android-phone' | 'android-tablet'
+  caps: string[]
+  host: string
+  port: number
+  paired: boolean
+}
+
+export interface PendingPairingView {
+  id: string
+  peerId: string
+  displayName: string
+  deviceType: string
+  /** 6 位配对码，只应显示在接收方界面上 */
+  code: string
+  expiresAt: number
+}
+
+export interface TrustedDevice {
+  deviceId: string
+  displayName: string
+  deviceType: string
+  fingerprint: string
+  scope: string[]
+  trustedAt: number
 }
 
 export interface IpcError {
@@ -103,7 +136,17 @@ export interface LinkSpaceApi {
   listTransfers(): Promise<TransferTaskView[]>
   cancelTransfer(id: string): Promise<IpcResult<void>>
   transferInfo(): Promise<TransferInfo>
+  listDiscovered(): Promise<DiscoveredDevice[]>
+  connectAndPair(serviceName: string): Promise<IpcResult<void>>
+  listPendingPairings(): Promise<PendingPairingView[]>
+  rejectPairing(id: string): Promise<IpcResult<void>>
+  submitPairingCode(serviceName: string, code: string): Promise<IpcResult<void>>
+  listTrusted(): Promise<TrustedDevice[]>
+  revokeTrust(deviceId: string): Promise<IpcResult<void>>
+  pickAndOffer(peerId: string): Promise<IpcResult<TransferTaskView | null>>
   onDevicesChanged(cb: () => void): Unsubscribe
   onSessionsChanged(cb: () => void): Unsubscribe
   onTransfersChanged(cb: () => void): Unsubscribe
+  onDiscoveredChanged(cb: () => void): Unsubscribe
+  onPairingsChanged(cb: () => void): Unsubscribe
 }

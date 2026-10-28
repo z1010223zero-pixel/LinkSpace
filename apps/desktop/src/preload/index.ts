@@ -6,13 +6,16 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type {
   DeviceView,
+  DiscoveredDevice,
   EnvInfo,
   IpcResult,
   LinkSpaceApi,
+  PendingPairingView,
   SessionView,
   StartOptions,
   TransferInfo,
   TransferTaskView,
+  TrustedDevice,
   Unsubscribe
 } from '../shared/types'
 
@@ -45,9 +48,35 @@ const api: LinkSpaceApi = {
 
   transferInfo: () => ipcRenderer.invoke('transfer:info') as Promise<TransferInfo>,
 
+  listDiscovered: () => ipcRenderer.invoke('discovery:list') as Promise<DiscoveredDevice[]>,
+
+  connectAndPair: (serviceName: string) =>
+    ipcRenderer.invoke('discovery:connect', serviceName) as Promise<IpcResult<void>>,
+
+  listPendingPairings: () =>
+    ipcRenderer.invoke('pairing:list') as Promise<PendingPairingView[]>,
+
+  rejectPairing: (id: string) =>
+    ipcRenderer.invoke('pairing:reject', id) as Promise<IpcResult<void>>,
+
+  submitPairingCode: (serviceName: string, code: string) =>
+    ipcRenderer.invoke('pairing:submitCode', serviceName, code) as Promise<IpcResult<void>>,
+
+  listTrusted: () => ipcRenderer.invoke('trust:list') as Promise<TrustedDevice[]>,
+
+  revokeTrust: (deviceId: string) =>
+    ipcRenderer.invoke('trust:revoke', deviceId) as Promise<IpcResult<void>>,
+
+  pickAndOffer: (peerId: string) =>
+    ipcRenderer.invoke('transfer:pickAndOffer', peerId) as Promise<
+      IpcResult<TransferTaskView | null>
+    >,
+
   onDevicesChanged: (cb) => subscribe('devices:changed', cb),
   onSessionsChanged: (cb) => subscribe('sessions:changed', cb),
-  onTransfersChanged: (cb) => subscribe('transfers:changed', cb)
+  onTransfersChanged: (cb) => subscribe('transfers:changed', cb),
+  onDiscoveredChanged: (cb) => subscribe('discovered:changed', cb),
+  onPairingsChanged: (cb) => subscribe('pairings:changed', cb)
 }
 
 contextBridge.exposeInMainWorld('linkspace', api)

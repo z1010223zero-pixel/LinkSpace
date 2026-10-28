@@ -6,9 +6,10 @@ import { ScrcpyAdapter } from './scrcpy-adapter'
 import { registerIpc } from './ipc'
 import { locateBinaries } from './platform'
 import { log } from './log'
-import { TransferManager } from './transfer/manager'
-import { startTransferServer, type StartedServer } from './transfer/server'
-import { getDeviceCert } from './transfer/identity'
+import { Host } from './host'
+import type { DiscoveredService } from './discovery'
+import type { PendingPairing } from './pairing'
+import type { TransferTask } from './transfer/manager'
 
 // ---------- 单实例 ----------
 if (!app.requestSingleInstanceLock()) {
@@ -33,11 +34,17 @@ app.disableHardwareAcceleration()
 
 const adapter = new ScrcpyAdapter()
 const devices = new DeviceManager(adapter)
-const transfers = new TransferManager()
+const host = new Host({ displayName: 'LinkSpace Desktop', deviceType: 'win' })
 
 let mainWindow: BrowserWindow | null = null
 let quitting = false
-let transferServer: StartedServer | null = null
+
+// 供 IPC 读取的运行时状态（渲染层只拿快照，不直接摸 Host）
+const runtime = {
+  discovered: [] as DiscoveredService[],
+  pendingPairings: [] as PendingPairing[],
+  transfers: [] as TransferTask[]
+}
 
 /** electron-vite 的 preload 输出扩展名随配置而变，这里做兼容探测 */
 function resolvePreload(): string {
@@ -90,22 +97,36 @@ app.whenReady().then(async () => {
   const b = locateBinaries()
   log.info(`LinkSpace 启动，scrcpy=${b.scrcpy}（来源 ${b.source}）`)
 
-  registerIpc(() => mainWindow, devices, adapter, transfers, () => transferServer?.port ?? 0)
+  registerIpc(() => mainWindow, devices, adapter, host, runtime)
   createWindow()
 
-  // 启动本机文件传输服务。端口由系统分配，真实设备上经 mDNS 通告
-  // （发现与配对尚未实现，见 docs/roadmap.md 阶段 2）。
+  // 启动主机：证书 → 传输服务 → 控制通道（同端口）→ 配对 → mDNS 发现
   try {
-    transferServer = await startTransferServer({
-      resolveIncoming: (id) => transfers.resolveIncoming(id),
-      resolveOutgoing: (id) => transfers.resolveOutgoing(id),
-      // 未实现配对前没有可信设备清单，这里一律拒绝，避免开一个无鉴权的口子
-      isKnownDevice: () => false
-    })
-    const { fingerprint } = await getDeviceCert()
-    log.info(`本机传输指纹 ${fingerprint}`)
+    await host.start()
+    host
+      .on('discovered', (svc) => {
+        runtime.discovered = runtime.discovered.filter((d) => d.serviceName !== svc.serviceName)
+        runtime.discovered.push(svc)
+        broadcast('discovered:changed')
+      })
+      .on('lost', (svc) => {
+        runtime.discovered = runtime.discovered.filter((d) => d.serviceName !== svc.serviceName)
+        broadcast('discovered:changed')
+      })
+      .on('pairRequested', () => {
+        runtime.pendingPairings = host.pendingPairings()
+        broadcast('pairings:changed')
+      })
+      .on('transferOffered', () => {
+        runtime.transfers = host.transferTasks()
+        broadcast('transfers:changed')
+      })
+      .on('transferChanged', () => {
+        runtime.transfers = host.transferTasks()
+        broadcast('transfers:changed')
+      })
   } catch (err) {
-    log.error(`文件传输服务启动失败: ${String(err)}`)
+    log.error(`主机启动失败: ${String(err)}`)
   }
 
   // 首次扫描设备
@@ -133,7 +154,7 @@ app.on('before-quit', (event) => {
     .stopAll()
     .catch((err) => log.error(`清理会话失败: ${String(err)}`))
     .finally(() => {
-      transferServer?.server.close()
+      void host.stop()
       app.exit(0)
     })
 })
@@ -141,6 +162,11 @@ app.on('before-quit', (event) => {
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
 })
+
+function broadcast(channel: string): void {
+  const win = mainWindow
+  if (win && !win.isDestroyed()) win.webContents.send(channel)
+}
 
 process.on('uncaughtException', (err) => {
   log.error(`未捕获异常: ${err.message}`)

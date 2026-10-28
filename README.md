@@ -22,15 +22,17 @@
 
 - [x] 设备身份证书与 TLS 数据面（自签 + 指纹）
 - [x] 分块传输核心：进度 / 取消 / 断点续传 / 整体 SHA-256 校验 / 不覆盖命名
-- [x] 文件传输无头环路测试，21 项断言全过（含 1 GB，≈68.5 MB/s）
-- [ ] 局域网设备发现（mDNS）与配对授权 ← 下一步
-- [ ] 控制通道（WebSocket）：`transfer.offer` / `accept` / `cancel` 真正打通
+- [x] 局域网设备发现（mDNS，`_linkspace._tcp`）
+- [x] 配对与信任清单：配对码人工确认、信任持久化、随时撤销
+- [x] 控制通道（WebSocket over TLS，与文件传输共用端口）
+- [x] 四组无头验证全部通过，其中端到端测试跑通「发现 → 配对 → 传输 → 取消」
 - [ ] 传输服务仅绑定局域网网卡（当前为 `0.0.0.0`）
+- [ ] Android 客户端（Kotlin）尚未开始，目前只能 Windows ↔ Windows
 - [ ] scrcpy 人工验证项（鼠标键盘 / 中文输入 / 剪贴板 / 断网）
 - [ ] Windows IddCx 虚拟显示器验证（阻塞：本机未装 VS + WDK）
 - [ ] 发行路线确定（开源 vs 保留闭源选项）
 
-文件传输的已验证范围与缺口见 [`docs/mvp-acceptance.md`](docs/mvp-acceptance.md) 第 4.11 节。
+已验证范围与缺口见 [`docs/mvp-acceptance.md`](docs/mvp-acceptance.md) 第 4.11–4.12 节。
 跑桌面端见 [`apps/desktop/README.md`](apps/desktop/README.md)（含 5 个本机环境踩坑与解法）。
 
 ---

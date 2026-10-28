@@ -68,6 +68,11 @@ export interface TransferTask {
 
 export interface TransferManagerEvents {
   changed: [TransferTask]
+  /**
+   * 发送方取消了任务。上层应把它转发成一条 transfer.cancel 控制消息，
+   * 否则接收方的 .part 不会被清理——取消只做了一半。
+   */
+  cancelRequested: [{ id: string; peerId: string }]
 }
 
 export class TransferManager extends EventEmitter {
@@ -363,6 +368,11 @@ export class TransferManager extends EventEmitter {
   async finalize(id: string, digests?: Record<string, string>): Promise<TransferTask> {
     const task = this.tasks.get(id)
     if (!task) throw new Error('任务不存在')
+    // 取消/失败的任务不得落盘。complete 消息可能乱序到达（取消与完成
+    // 几乎同时发生时就会），此时必须拒绝，否则半成品会变成正式文件。
+    if (task.state === 'cancelled' || task.state === 'failed') {
+      throw new Error(`任务 ${id} 状态为 ${task.state}，不能落盘`)
+    }
 
     for (const file of task.files) {
       const entry = this.incoming.get(`${id}:${file.name}`)
