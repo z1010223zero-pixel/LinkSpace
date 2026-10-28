@@ -217,7 +217,7 @@ export interface AdapterError {
 
 | ID | 决策 | 理由 | 复审条件 |
 |---|---|---|---|
-| ADR-001 | 桌面端采用 Electron + Vue 3 + TS | 便于管理子进程、多窗口、系统托盘；生态成熟 | 若原型内存占用或包体积显著超标，评估 Tauri |
+| ADR-001 | 桌面端采用 Electron + Vue 3 + TS | 便于管理子进程、多窗口、系统托盘；生态成熟 | 已复审（2026-10-28）：内存 340 MB、空闲 CPU 可忽略，继续采用 Electron。若后续加入文件传输/WebRTC 后内存显著增长，再评估 Tauri |
 | ADR-002 | 第一版投屏以子进程方式调用官方 scrcpy | 先验证功能闭环，避免重写视频与输入引擎 | 需要嵌入窗口、自定义 UI 或多路合屏时复审 |
 | ADR-003 | 控制通道与文件通道复用同一 HTTPS 端口 | 减少防火墙规则与端口冲突 | 文件吞吐影响控制消息实时性时拆分 |
 | ADR-004 | 发现用 mDNS，UDP 广播作为降级方案 | mDNS 是标准做法且携带 TXT 元数据 | 目标网络组播被禁时启用降级路径 |
@@ -231,8 +231,9 @@ export interface AdapterError {
 
 在动手写代码前需要回答，答案回写到本文件：
 
-1. **发行许可证**：开源优先还是保留闭源商业选项？直接决定 3.2  TwinDesk、3.3 Input Leap 的代码能否复用。见 `docs/license-inventory.md`。
-2. **Electron 是否最终采用**：以原型实测（内存、启动时间、窗口交互、包体积）为准，不预设结论。
+1. **发行许可证**：开源优先还是保留闭源商业选项？直接决定 3.2  TwinDesk、3.3 Input Leap 的代码能否复用。见 `docs/license-inventory.md`。→ **仍未定，阻塞 `modules/input-sharing`。**
+2. ~~**Electron 是否最终采用**~~ → **已定：采用 Electron 37.10.3**。原型实测内存 340 MB、空闲 CPU 极低，且已验证能管理 scrcpy 子进程生命周期。踩坑与规避见 `apps/desktop/README.md`。
 3. **媒体通道选型**：扩展屏幕若走 WebRTC，与 scrcpy 自有传输如何共存？还是统一走自研低延迟传输？
 4. **Android 端是否需要常驻前台服务**：影响后台保活与系统兼容性工作量。
 5. **mDNS 实现**：Node 侧库（如 bonjour-service）还是由 windows-helper 实现？影响跨平台移植成本。
+6. **GPU 崩溃根因**：本机 Electron 的 GPU 子进程必然崩溃，已用 `--in-process-gpu` 规避。怀疑与 ToDesk 虚拟显示驱动有关，需在干净机器上验证后才能移除该开关。

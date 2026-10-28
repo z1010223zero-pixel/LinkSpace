@@ -1,0 +1,27 @@
+{
+  "name": "linkspace-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "LinkSpace 桌面端 —— 局域网多设备协作工作空间",
+  "main": "./out/main/index.js",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "build": "electron-vite build",
+    "typecheck": "vue-tsc --noEmit",
+    "clean": "node -e \"fs.rmSync('out',{recursive:true,force:true})\"",
+    "verify": "node scripts/build-verify.mjs && node out/verify/verify.js"
+  },
+  "dependencies": {
+    "vue": "^3.5.44"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "@vitejs/plugin-vue": "^6.0.1",
+    "electron": "37.10.3",
+    "electron-vite": "^6.0.0",
+    "esbuild": "^0.28.2",
+    "typescript": "~5.9.3",
+    "vite": "^8.3.5",
+    "vue-tsc": "^3.3.13"
+  }
+}

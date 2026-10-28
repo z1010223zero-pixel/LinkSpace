@@ -10,16 +10,18 @@
 
 ## 当前状态
 
-**阶段 0：技术尽调。** 骨架与文档已建立，尚未编写业务代码。
+**阶段 1：桌面原型 —— 已完成（2026-10-28）**
 
 - [x] 项目结构与设计文档
 - [x] 第三方许可证核实（主要项）
 - [x] scrcpy 环境搭建与自动化验证（采集 / 无线 / 多设备 / 退出码）
+- [x] Electron 桌面原型：设备列表界面 + 投屏会话管理（`apps/desktop`）
+- [x] ADR-001 复审：Electron 37.10.3，340 MB 内存，继续采用
 - [ ] scrcpy 人工验证项（鼠标键盘 / 中文输入 / 剪贴板 / 断网）
 - [ ] Windows IddCx 虚拟显示器验证（阻塞：本机未装 VS + WDK）
 - [ ] 发行路线确定（开源 vs 保留闭源选项）
 
-验证细节见 [`docs/technical-validation.md`](docs/technical-validation.md)。
+跑桌面端见 [`apps/desktop/README.md`](apps/desktop/README.md)（含 5 个本机环境踩坑与解法）。
 
 ---
 

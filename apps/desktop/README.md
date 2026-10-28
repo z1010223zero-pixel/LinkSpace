@@ -1,34 +1,151 @@
-# apps/desktop — Windows 桌面端
+# apps/desktop — LinkSpace Windows 桌面端
 
-Electron + Vue 3 + TypeScript。
+Electron + Vue 3 + TypeScript。当前是**可运行的原型**：能扫描局域网 Android 设备、启动/停止投屏会话。
 
-## 职责
+---
 
-- 设备工作空间界面：设备卡片、拖拽布局、在线状态
-- 发起配对、管理信任与授权范围
-- 启动/停止投屏与文件传输任务
-- 管理子进程生命周期（scrcpy、adb、windows-helper）
+## 运行方式
 
-## 边界
+```bash
+cd apps/desktop
 
-- **渲染进程不创建子进程、不调用系统 API**（架构约束 C3）。一切系统能力经主进程 IPC。
-- 不包含传输协议的实现细节，只消费 `modules/*` 暴露的能力。
-- 不解析 scrcpy 视频流。
+# 1. 安装依赖。--ignore-scripts 是必要的：electron 的 postinstall 下载
+#    二进制很慢且容易中断，改为下一步手动下载。
+npm install --ignore-scripts
 
-## 进程结构
+# 2. 下载 electron 二进制（国内镜像，约 13 秒）
+ELECTRON_MIRROR="https://npmmirror.com/mirrors/electron/" node node_modules/electron/install.js
 
-```
-main process  设备注册表 / HTTPS 服务 / mDNS / IPC 网关 / 子进程池
-renderer      Vue 应用（可多窗口）
+# 3. 启动
+npm run dev
 ```
 
-详见 `docs/architecture.md` 第 3 节。
+其他命令：
 
-## 状态
+```bash
+npm run typecheck   # vue-tsc 类型检查
+npm run build       # electron-vite 构建
+npm run verify      # 无头验证：adb 枚举 + 会话启动/停止 + 进程清理
+npm run clean       # 删除 out/
+```
 
-未开始。启动前需完成阶段 0 的 Electron 选型确认（ADR-001）。
+**`npm run verify` 不需要 GUI**，可重复运行并给出断言结果，是回归测试的主要手段。
 
-## 待定
+---
 
-- 构建工具：electron-vite / electron-builder 待定
-- 是否使用 TypeScript 严格模式：建议是
+## 目录结构
+
+```
+src/
+├── main/                  主进程
+│   ├── index.ts           入口：窗口、单实例、生命周期清理
+│   ├── platform.ts        定位 scrcpy / adb 可执行文件
+│   ├── adb.ts             adb 设备枚举（只读）
+│   ├── scrcpy-adapter.ts  投屏会话适配器（L4）
+│   ├── device-manager.ts  设备与会话聚合（L2）
+│   ├── ipc.ts             IPC 网关（channel 白名单）
+│   ├── log.ts             脱敏日志
+│   └── verify-entry.ts    无头验证入口
+├── preload/index.ts       渲染进程桥，只暴露白名单 API
+├── renderer/              Vue 3 界面
+│   ├── App.vue
+│   ├── components/DeviceCard.vue
+│   └── style.css
+└── shared/types.ts        主进程与渲染进程的类型契约
+scripts/
+├── dev.mjs                启动包装（见踩坑 1）
+└── build-verify.mjs       打包并运行无头验证
+```
+
+---
+
+## 踩坑记录（本机环境，均已解决）
+
+### 1. `ELECTRON_RUN_AS_NODE=1` 会让 electron.exe 退化成 Node
+
+**现象**：启动即崩，报 `TypeError: Cannot read properties of undefined (reading 'requestSingleInstanceLock')`，且栈里是 `Node.js v24.22.1`。
+
+**原因**：宿主环境（WorkBuddy 本身是 Electron 应用）会向子进程传递 `ELECTRON_RUN_AS_NODE=1`，`electron.exe` 收到后表现为纯 Node，`require('electron')` 返回的是 npm 包里的路径字符串，`app` 等 API 全部 undefined。
+
+**注意**：把这个变量设成空字符串**无效**，Electron 判断的是变量是否存在。
+
+**解法**：`scripts/dev.mjs` 在启动前 `delete process.env.ELECTRON_RUN_AS_NODE`。`npm run dev` 已改为走这个包装脚本。
+
+### 2. GPU 子进程必然崩溃，拖垮整个应用
+
+**现象**：主进程正常工作（scrcpy 定位、IPC 注册、adb 枚举都成功），随后
+`GPU process exited unexpectedly: exit_code=-1073741819` 反复出现，最后
+`FATAL: GPU process isn't usable. Goodbye.` 整个应用退出。
+
+**已排除的可能**：
+- Electron 版本：37 和 45 都复现（**不是版本问题**）
+- userData 路径：package.json 的 name 原为 `@linkspace/desktop`，导致路径含 `@` 和 `/`；改成干净路径后仍复现
+- 沙箱：非沙箱启动同样复现
+- 命令行开关：`--disable-gpu`、`--disable-gpu-compositing`、`--single-process` 均无效或引发新问题（single-process 会静默退出）
+
+**当前解法**：`--in-process-gpu`，让 GPU 服务跑在主进程内，不再单独拉起 GPU 子进程。**这是针对本机图形环境的规避，不是通用配置。**
+
+**怀疑的根因**：本机装有 ToDesk 远程控制软件，其 `Todesk Virtual Display Adapter` 与第三个状态为 Error 的 `Virtual Display Driver` 可能干扰 Chromium 的 GPU 初始化。未最终确认——如果在没有装 ToDesk 的机器上正常，即可证实。
+
+**后续**：拿到干净机器上的表现后，应移除该开关并恢复多进程 GPU。届时把结论回写到本文件。
+
+### 3. electron 二进制需要手动下载
+
+`npm install` 不会自动下载 electron 二进制（postinstall 被跳过或超时被杀）。必须显式执行：
+
+```bash
+ELECTRON_MIRROR="https://npmmirror.com/mirrors/electron/" node node_modules/electron/install.js
+```
+
+默认源（GitHub）在本机会被超时中断，务必用国内镜像。
+
+### 4. electron 必须保持 external
+
+`electron.vite.config.ts` 中若未显式声明 `rollupOptions.external: ['electron']`，electron 会被打进 bundle，`require('electron')` 变成读 `node_modules/electron/index.js`（返回路径字符串），同样导致 API 全 undefined。这与踩坑 1 现象相同但原因不同，排查时注意区分。
+
+### 5. package.json 的 name 不要带 npm scope
+
+`@linkspace/desktop` 会让 `userData` 变成 `%APPDATA%\@linkspace/desktop`（含 `@` 和 `/`），其下的 `GPUPersistentCache` 会报「另一个程序正在使用此文件」。已改为 `linkspace-desktop`，并在 `index.ts` 中额外 `app.setPath('userData', ...)` 双保险。
+
+---
+
+## 实测数据（2026-10-28）
+
+| 项 | 数值 |
+|---|---|
+| Electron | 37.10.3 |
+| 启动后进程 | 3 个（main / renderer / utility） |
+| 内存合计 | 约 340 MB（主进程 180 MB + 62 MB + 101 MB） |
+| 空闲 CPU | 极低（累计 1.5s / 0.4s / 0.5s） |
+| 主窗口 | 标题 `LinkSpace`，正常创建 |
+| 退出清理 | electron 0 残留、scrcpy 0 残留 |
+| adb 枚举 | 2 台设备（真机无线 + 模拟器） |
+
+**ADR-001 复审依据**：内存 340 MB 对 Electron 应用属正常水平，空闲 CPU 可忽略，**继续采用 Electron，不转向 Tauri**。若后续加入文件传输、WebRTC 等重负载后内存显著增长，需重新评估。
+
+---
+
+## 已验证 / 未验证
+
+**已验证（自动化）**：
+- adb 设备枚举与解析
+- 投屏会话启动（无窗口模式）、状态流转
+- 同设备重复启动被拒绝（`SESSION_EXISTS`）
+- 会话停止、进程树清理、无残留
+- 错误场景：设备不存在 → 退出码 1 且 stderr 可解析
+- 窗口标题/位置参数、硬件解码（见 `modules/scrcpy-adapter/README.md`）
+
+**未验证（需人工操作手机）**：
+- 鼠标键盘控制、中文输入法、剪贴板同步
+- 断网恢复
+- UI 上的按钮点击（界面已能显示，但交互未人工走查）
+- 启动投屏后直接退出应用（会话清理的 GUI 路径）
+
+---
+
+## 已知限制
+
+- 设备布局拖拽、文件传输、剪贴板同步未实现（属后续阶段）
+- `platform.ts` 中保留了「已知 winget 安装路径」作为开发期兜底，**正式分发时必须移除**，改为随安装包提供 scrcpy
+- 无设置界面，所有参数硬编码
+- 日志只输出到控制台，未落盘（脱敏规则已写在 `log.ts` 注释中）
