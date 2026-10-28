@@ -17,6 +17,13 @@ export interface Binaries {
   scrcpy: string
   adb: string
   source: 'env' | 'resources' | 'path' | 'winget'
+  /**
+   * scrcpy 可执行文件是否真实存在。
+   * scrcpy 字段在「只找到 adb」等场景下是占位值，调用方（IPC 的
+   * ready 判定）必须以本字段为准，不能拿 scrcpy 路径做 existsSync
+   * 之外的健康推断——占位值指向 adb 时 existsSync 反而是通过的。
+   */
+  scrcpyFound: boolean
 }
 
 let cached: Binaries | null = null
@@ -56,7 +63,8 @@ export function locateBinaries(): Binaries {
     cached = {
       scrcpy: envScrcpy,
       adb: envAdb && existsSync(envAdb) ? envAdb : guessAdbBeside(envScrcpy) ?? envScrcpy,
-      source: 'env'
+      source: 'env',
+      scrcpyFound: true
     }
     return cached
   }
@@ -66,7 +74,12 @@ export function locateBinaries(): Binaries {
     const dir = join(process.resourcesPath, 'scrcpy')
     const scrcpy = findInDir(dir, 'scrcpy')
     if (scrcpy) {
-      cached = { scrcpy, adb: findInDir(dir, 'adb') ?? guessAdbBeside(scrcpy) ?? scrcpy, source: 'resources' }
+      cached = {
+        scrcpy,
+        adb: findInDir(dir, 'adb') ?? guessAdbBeside(scrcpy) ?? scrcpy,
+        source: 'resources',
+        scrcpyFound: true
+      }
       return cached
     }
   }
@@ -75,17 +88,22 @@ export function locateBinaries(): Binaries {
   for (const dir of pathEntries()) {
     const scrcpy = findInDir(dir, 'scrcpy')
     if (scrcpy) {
-      cached = { scrcpy, adb: findInDir(dir, 'adb') ?? guessAdbBeside(scrcpy) ?? scrcpy, source: 'path' }
+      cached = {
+        scrcpy,
+        adb: findInDir(dir, 'adb') ?? guessAdbBeside(scrcpy) ?? scrcpy,
+        source: 'path',
+        scrcpyFound: true
+      }
       return cached
     }
   }
 
-  // 4. PATH 中的 adb
+  // 4. PATH 中的 adb：scrcpy 未找到，占位值必须是一个不存在的路径，
+  // 让 existsSync 检查与 scrcpyFound 都能正确报告缺失
   for (const dir of pathEntries()) {
     const adb = findInDir(dir, 'adb')
     if (adb) {
-      // scrcpy 缺失时以 adb 路径占位，状态检查会报缺失
-      cached = { scrcpy: adb, adb, source: 'path' }
+      cached = { scrcpy: 'scrcpy', adb, source: 'path', scrcpyFound: false }
       return cached
     }
   }
@@ -94,13 +112,18 @@ export function locateBinaries(): Binaries {
   for (const dir of knownWingetDirs()) {
     const scrcpy = findInDir(dir, 'scrcpy')
     if (scrcpy) {
-      cached = { scrcpy, adb: findInDir(dir, 'adb') ?? scrcpy, source: 'winget' }
+      cached = {
+        scrcpy,
+        adb: findInDir(dir, 'adb') ?? scrcpy,
+        source: 'winget',
+        scrcpyFound: true
+      }
       return cached
     }
   }
 
   // 全部失败：返回占位，调用方需处理缺失
-  cached = { scrcpy: 'scrcpy', adb: 'adb', source: 'winget' }
+  cached = { scrcpy: 'scrcpy', adb: 'adb', source: 'winget', scrcpyFound: false }
   return cached
 }
 

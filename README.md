@@ -26,7 +26,8 @@
 - [x] 配对与信任清单：配对码人工确认、信任持久化、随时撤销
 - [x] 控制通道（WebSocket over TLS，与文件传输共用端口）
 - [x] 四组无头验证全部通过，其中端到端测试跑通「发现 → 配对 → 传输 → 取消」
-- [ ] 传输服务仅绑定局域网网卡（当前为 `0.0.0.0`）
+- [x] 代码审查与安全修复（2026-10-29，见 [`docs/desktop-review-2026-10-29.md`](docs/desktop-review-2026-10-29.md)）：数据面 token/块摘要实际生效、配对指纹锚定到 TLS 证书、路径穿越修复、UI 配对与接收链路打通
+- [ ] 传输服务仅绑定局域网网卡（已实现自动收窄：唯一局域网 IPv4 时绑定之，多网卡回落 `0.0.0.0`，可用 `LINKSPACE_BIND_IP` 指定）
 - [ ] Android 客户端（Kotlin）尚未开始，目前只能 Windows ↔ Windows
 - [ ] scrcpy 人工验证项（鼠标键盘 / 中文输入 / 剪贴板 / 断网）
 - [ ] Windows IddCx 虚拟显示器验证（阻塞：本机未装 VS + WDK）
@@ -71,6 +72,7 @@ docs/                   设计文档
 | [`docs/license-inventory.md`](docs/license-inventory.md) | 依赖许可证核实结论与合规检查表 |
 | [`docs/roadmap.md`](docs/roadmap.md) | 阶段划分、门限与转向判据 |
 | [`docs/technical-validation.md`](docs/technical-validation.md) | 第 1 周验证清单与记录模板 |
+| [`docs/desktop-review-2026-10-29.md`](docs/desktop-review-2026-10-29.md) | 桌面端代码审查与修复报告（安全缺口 / 修复方式 / 验证结论） |
 
 ---
 

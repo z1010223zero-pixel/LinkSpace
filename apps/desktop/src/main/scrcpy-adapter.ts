@@ -78,9 +78,11 @@ export class ScrcpyAdapter extends EventEmitter {
   }
 
   async start(serial: string, opts: StartOptions = {}): Promise<Result<ScrcpySession>> {
-    const { scrcpy } = locateBinaries()
+    const { scrcpy, scrcpyFound } = locateBinaries()
 
-    if (!existsSync(scrcpy)) {
+    // 双重保险：scrcpyFound 是 locateBinaries 的权威判定，
+    // existsSync 兜住环境变量注入后文件又被移走的情形
+    if (!scrcpyFound || !existsSync(scrcpy)) {
       return this.fail('BINARY_MISSING', '未找到 scrcpy 可执行文件，请先安装或配置路径')
     }
 
@@ -91,7 +93,7 @@ export class ScrcpyAdapter extends EventEmitter {
     }
 
     const id = `scr-${++this.seq}-${randomUUID().slice(0, 8)}`
-    const args = buildArgs(serial, opts)
+    const args = buildArgs(serial, sanitizeOptions(opts))
 
     log.info(`启动投屏会话 ${id} 设备 ${shortSerial(serial)}`)
 
@@ -268,6 +270,29 @@ export class ScrcpyAdapter extends EventEmitter {
 
   private fail(code: AdapterErrorCode, message: string): { ok: false; error: AdapterError } {
     return { ok: false, error: { code, message, retryable: code !== 'BINARY_MISSING' } }
+  }
+}
+
+/**
+ * 过滤来自渲染层的启动参数。IPC 传来的字段类型不可信：
+ * 非法数字会变成 `--max-size=NaN` 直通 scrcpy，标题也可能超长。
+ * 不认识的类型一律丢弃，而不是猜测转换。
+ */
+function sanitizeOptions(opts: StartOptions): StartOptions {
+  const num = (v: unknown): number | undefined =>
+    typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : undefined
+  return {
+    maxSize: num(opts.maxSize),
+    windowTitle:
+      typeof opts.windowTitle === 'string' && opts.windowTitle.trim()
+        ? opts.windowTitle.trim().slice(0, 120)
+        : undefined,
+    windowX: typeof opts.windowX === 'number' && Number.isFinite(opts.windowX) ? opts.windowX : undefined,
+    windowY: typeof opts.windowY === 'number' && Number.isFinite(opts.windowY) ? opts.windowY : undefined,
+    windowWidth: num(opts.windowWidth),
+    showTouches: opts.showTouches === true,
+    stayAwake: opts.stayAwake === true,
+    noWindow: opts.noWindow === true
   }
 }
 

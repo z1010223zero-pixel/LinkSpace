@@ -46,6 +46,7 @@ const CHANNELS = [
   'trust:list',
   'trust:revoke',
   'transfer:list',
+  'transfer:accept',
   'transfer:acceptFor',
   'transfer:cancelFor',
   'transfer:pickAndOffer',
@@ -176,6 +177,30 @@ export function registerIpc(
     }
   })
 
+  // 接收方确认入口：保存目录在主进程里选，渲染层只给任务 id
+  ipcMain.handle('transfer:accept', async (_e, id: unknown) => {
+    if (typeof id !== 'string' || !id) return fail('缺少任务 ID')
+    const win = getWindow()
+    if (!win) return fail('窗口不存在')
+    const task = host.transferTasks().find((t) => t.id === id)
+    if (!task) return fail('任务不存在')
+    const picked = await dialog.showOpenDialog(win, {
+      title: `选择保存位置（${task.files.map((f) => f.name).join('、')}）`,
+      buttonLabel: '保存到这里',
+      properties: ['openDirectory', 'createDirectory']
+    })
+    if (picked.canceled || picked.filePaths.length === 0) {
+      return { ok: true as const, value: null }
+    }
+    try {
+      await host.acceptTransfer(id, picked.filePaths[0])
+      broadcast(getWindow, 'transfers:changed')
+      return { ok: true as const, value: picked.filePaths[0] }
+    } catch (err) {
+      return fail(err instanceof Error ? err.message : String(err))
+    }
+  })
+
   ipcMain.handle('transfer:cancelFor', async (_e, id: unknown) => {
     if (typeof id !== 'string' || !id) return fail('缺少任务 ID')
     await host.cancelTransfer(id)
@@ -220,7 +245,8 @@ export function registerIpc(
       scrcpyPath: b.scrcpy,
       adbPath: b.adb,
       scrcpySource: b.source,
-      ready: b.source !== 'winget' || b.scrcpy !== 'scrcpy'
+      // 就绪与否只看 scrcpy 是否真的被找到，不能拿「来源不是占位值」推断
+      ready: b.scrcpyFound
     }
   })
 

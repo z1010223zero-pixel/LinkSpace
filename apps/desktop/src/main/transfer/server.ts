@@ -14,24 +14,68 @@
 import { createHash } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { Agent, createServer, request, type Server } from 'node:https'
+import { networkInterfaces } from 'node:os'
 import type { AddressInfo } from 'node:net'
 import { existsSync } from 'node:fs'
 import { getDeviceCert } from './identity'
-import { appendChunk, readChunk, writtenBytes } from './chunker'
+import { readChunk, writtenBytes } from './chunker'
 import { log, shortSerial } from '../log'
 
 export interface TransferRouteContext {
   /** 该 transferId 是否已被本机接受，以及其落盘路径 */
   resolveIncoming(transferId: string): { path: string; expectedSize: number } | null
+  /**
+   * 追加一块数据到已接受的任务。实现在管理器内串行化并在锁内重查
+   * 任务存在性，取消与写入因此不会竞态。返回 null = 任务已不存在；
+   * conflict = 偏移不衔接（值为对端已确认偏移）。
+   */
+  appendIncoming(
+    transferKey: string,
+    offset: number,
+    body: Buffer
+  ): Promise<{ conflict?: number; committedOffset: number } | null>
   /** 对端请求拉取（下载方向）：本机是否同意提供该文件 */
   resolveOutgoing(transferId: string): { path: string } | null
-  /** 对端设备身份，用于拒绝未授权访问 */
-  isKnownDevice(deviceId: string): boolean
+  /**
+   * 数据面鉴权：设备在信任清单中且持有 file 授权，且 token 与该任务匹配。
+   * 三项缺一不可——device 门禁挡未配对设备，token 门禁把每台已配对设备
+   * 限制在它自己的传输任务里（否则任何已配对设备都能读写其他任务的分块）。
+   */
+  verifyTransfer(transferKey: string, deviceId: string, token: string): boolean
 }
 
 export interface StartedServer {
   server: Server
   port: number
+}
+
+export interface TransferServerOptions {
+  /**
+   * 监听地址。缺省时自动选择：环境变量 LINKSPACE_BIND_IP > 唯一非内部
+   * IPv4 > 0.0.0.0。多网卡机器无法断定哪个是「局域网网卡」，保持全监听
+   * 并在日志里提示，安全上由 TLS + 信任清单兜底。
+   */
+  bind?: string | { addr: string; note: string }
+}
+
+/**
+ * 解析默认监听地址。多网卡时返回 0.0.0.0 并给出提示语。
+ */
+export function resolveBindAddress(): { addr: string; note: string } {
+  const override = process.env.LINKSPACE_BIND_IP
+  if (override) return { addr: override, note: `环境变量 LINKSPACE_BIND_IP=${override}` }
+  const v4 = new Set<string>()
+  for (const list of Object.values(networkInterfaces())) {
+    for (const ni of list ?? []) {
+      if (ni.family === 'IPv4' && !ni.internal) v4.add(ni.address)
+    }
+  }
+  const all = [...v4]
+  if (all.length === 1) return { addr: all[0], note: `自动绑定局域网地址 ${all[0]}` }
+  if (all.length > 1) {
+    return { addr: '0.0.0.0', note: `检测到多个网卡（${all.join(', ')}），回落 0.0.0.0；可用 LINKSPACE_BIND_IP 收窄` }
+  }
+  return { addr: '0.0.0.0', note: '未检测到局域网 IPv4，回落 0.0.0.0' }
 }
 
 /**
@@ -46,23 +90,37 @@ export class ChunkConflictError extends Error {
   }
 }
 
+/** 单个分块请求体上限。默认块 4 MiB，放宽到 32 MiB 容忍对端自定义块大小 */
+const MAX_CHUNK_BODY = 32 * 1024 * 1024
+/** GET 单块读取上限，防止 length 参数打爆内存 */
+const MAX_READ_CHUNK = 32 * 1024 * 1024
+
 export async function startTransferServer(
   ctx: TransferRouteContext,
   /** 外部注入的身份证书。同进程多节点时必须传，否则会共用进程级单例 */
-  identity?: { key: string; cert: string }
+  identity?: { key: string; cert: string },
+  opts: TransferServerOptions = {}
 ): Promise<StartedServer> {
   const { key, cert } = identity ?? (await getDeviceCert())
+  // 归一化成对象形式：调用方可以只传地址字符串，也可以连说明一起传
+  const bind =
+    typeof opts.bind === 'string'
+      ? { addr: opts.bind, note: `显式绑定 ${opts.bind}` }
+      : (opts.bind ?? resolveBindAddress())
 
-  const server = createServer({ key, cert }, (req, res) => {
+  // requestCert 让服务端拿到对端证书（控制通道据此做指纹锚定），
+  // rejectUnauthorized: false 是必须的：对端全是自签证书，链验证必然失败，
+  // 真正的判定由上层按指纹与信任清单完成
+  const server = createServer({ key, cert, requestCert: true, rejectUnauthorized: false }, (req, res) => {
     void handle(ctx, req, res)
   })
 
   return new Promise((resolve, reject) => {
     server.once('error', reject)
     // 端口 0 = 让系统分配，真实端口经 mDNS 通告（见 architecture.md 第 4 节）
-    server.listen(0, '0.0.0.0', () => {
+    server.listen(0, bind.addr, () => {
       const addr = server.address() as AddressInfo
-      log.info(`文件传输服务已监听 0.0.0.0:${addr.port}`)
+      log.info(`文件传输服务已监听 ${bind.addr}:${addr.port}（${bind.note}）`)
       resolve({ server, port: addr.port })
     })
   })
@@ -80,6 +138,15 @@ async function handle(
     return
   }
 
+  // 路径里可能带畸形百分号编码，解析失败按 400 处理而不是让异常逃逸
+  let transferKey: string
+  try {
+    transferKey = decodeURIComponent(match[1])
+  } catch {
+    res.writeHead(400).end('bad transfer id')
+    return
+  }
+
   const deviceId = String(req.headers['x-device-id'] ?? '')
   const token = String(req.headers['x-transfer-token'] ?? '')
 
@@ -87,17 +154,17 @@ async function handle(
     res.writeHead(401).end('missing credentials')
     return
   }
-  if (!ctx.isKnownDevice(deviceId)) {
-    log.warn(`拒绝未授权设备的传输请求: ${shortSerial(deviceId)}`)
-    res.writeHead(403).end('unknown device')
+  // 唯一闸门：设备信任 + 授权范围 + 任务 token。三者由上层统一判定
+  if (!ctx.verifyTransfer(transferKey, deviceId, token)) {
+    log.warn(`拒绝未授权的数据面请求: ${shortSerial(deviceId)}`)
+    res.writeHead(403).end('unauthorized')
     return
   }
 
-  const transferId = decodeURIComponent(match[1])
   const offset = Number(url.searchParams.get('offset') ?? '0')
 
   if (req.method === 'POST') {
-    const target = ctx.resolveIncoming(transferId)
+    const target = ctx.resolveIncoming(transferKey)
     if (!target) {
       res.writeHead(404).end('unknown transfer')
       return
@@ -107,13 +174,22 @@ async function handle(
       return
     }
 
-    // 流式接收，不把整块缓冲在内存里
+    // 流式接收，不把整块缓冲在内存里；同时限制总量防止内存被打爆
     const chunks: Buffer[] = []
     let received = 0
+    let tooLarge = false
     for await (const piece of req) {
-      const buf = piece as Buffer
-      chunks.push(buf)
-      received += buf.length
+      received += (piece as Buffer).length
+      if (received > MAX_CHUNK_BODY) {
+        tooLarge = true
+        break
+      }
+      chunks.push(piece as Buffer)
+    }
+    if (tooLarge) {
+      req.destroy()
+      res.writeHead(413).end('chunk too large')
+      return
     }
     const body = Buffer.concat(chunks)
     const written = await writtenBytes(target.path)
@@ -139,16 +215,42 @@ async function handle(
       return
     }
 
+    // 块级摘要校验（protocol.md 第 5 节）：与声明的 X-Chunk-Digest 不符
+    // 的块不落盘，由发送方重传，而不是把坏字节写进 .part
+    const declaredDigest = String(req.headers['x-chunk-digest'] ?? '')
+    if (!declaredDigest || declaredDigest.toLowerCase() !== sha256Hex(body)) {
+      log.warn(`分块摘要校验失败：${transferKey}@${offset}`)
+      res.writeHead(400, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ ok: false, error: 'digest mismatch', committedOffset: written }))
+      return
+    }
+
     try {
-      await appendChunk(target.path, body)
-      const nowWritten = await writtenBytes(target.path)
+      // 追加经管理器串行化并在锁内重查：取消并发到达时，
+      // 排队写入放弃、在途写入排空后再删 .part，不会留下残局
+      const result = await ctx.appendIncoming(transferKey, offset, body)
+      if (!result) {
+        res.writeHead(404).end('unknown transfer')
+        return
+      }
+      if (result.conflict !== undefined) {
+        res.writeHead(409, { 'Content-Type': 'application/json' })
+        res.end(
+          JSON.stringify({
+            ok: false,
+            committedOffset: result.conflict,
+            expectedSize: target.expectedSize
+          })
+        )
+        return
+      }
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(
         JSON.stringify({
           ok: true,
           received,
           /** 接收方已确认的连续偏移，供断点续传 */
-          committedOffset: nowWritten,
+          committedOffset: result.committedOffset,
           expectedSize: target.expectedSize
         })
       )
@@ -160,12 +262,17 @@ async function handle(
   }
 
   if (req.method === 'GET') {
-    const source = ctx.resolveOutgoing(transferId)
+    const source = ctx.resolveOutgoing(transferKey)
     if (!source || !existsSync(source.path)) {
       res.writeHead(404).end('unknown transfer')
       return
     }
-    const length = Number(url.searchParams.get('length') ?? String(4 * 1024 * 1024))
+    const requested = Number(url.searchParams.get('length') ?? String(4 * 1024 * 1024))
+    if (!Number.isFinite(requested) || requested <= 0) {
+      res.writeHead(400).end('bad length')
+      return
+    }
+    const length = Math.min(requested, MAX_READ_CHUNK)
     try {
       const data = await readChunk(source.path, offset, length)
       res.writeHead(200, {
@@ -278,7 +385,9 @@ export async function sendChunk(
   auth: { deviceId: string; token: string }
 ): Promise<SendChunkResult> {
   const { status, body } = await requestJson(host, port, transferId, offset, data, auth, {
-    'X-Chunk-Size': String(data.length)
+    'X-Chunk-Size': String(data.length),
+    // 接收方据此校验块完整性（protocol.md 第 5 节），不符返回 400
+    'X-Chunk-Digest': sha256Hex(data)
   })
 
   if (status === 409) {

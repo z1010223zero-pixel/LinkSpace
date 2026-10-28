@@ -12,8 +12,8 @@
 
 import { randomUUID } from 'node:crypto'
 import type { Connection, ControlNode, Envelope } from './control/node'
-import { generatePairingCode } from './control/node'
-import type { TrustEntry, TrustStore } from './transfer/trust'
+import { generatePairingCode, normalizeFingerprint } from './control/node'
+import { ALL_SCOPES, type TrustEntry, type TrustScope, type TrustStore } from './transfer/trust'
 import { log } from './log'
 
 export interface AnnouncePayload {
@@ -78,6 +78,8 @@ export interface PairingCoordinatorOptions {
 
 const CODE_TTL_MS = 60_000
 const MAX_ATTEMPTS = 5
+/** 同时挂起的配对请求上限。超出即拒绝，防止未认证连接刷 UI */
+const MAX_PENDING = 8
 
 export class PairingCoordinator {
   private readonly trust: TrustStore
@@ -183,11 +185,14 @@ export class PairingCoordinator {
       return { ok: false, error: `配对码不正确（第 ${p.attempts} 次）` }
     }
 
+    // 入库的指纹以 TLS 会话的实际证书为准（发起方连入时已出示），
+    // announce 里的自报指纹只配当拿不到证书时的退路
+    const presentedFp = p.conn.tlsFingerprint ?? normalizeFingerprint(p.fingerprint)
     const entry: Omit<TrustEntry, 'trustedAt'> = {
       deviceId: p.peerId,
       displayName: p.displayName,
       deviceType: p.deviceType,
-      fingerprint: p.fingerprint,
+      fingerprint: presentedFp,
       scope: ['file']
     }
     this.trust.grant(entry)
@@ -208,7 +213,7 @@ export class PairingCoordinator {
       deviceId: p.peerId,
       displayName: p.displayName,
       deviceType: p.deviceType,
-      fingerprint: p.fingerprint,
+      fingerprint: presentedFp,
       scope: ['file']
     })
     log.info(`已与 ${p.peerId} 建立信任（用户确认配对码）`)
@@ -312,14 +317,52 @@ export class PairingCoordinator {
     const p = msg.payload
     if (typeof p?.displayName !== 'string' || !Array.isArray(p?.caps)) return
     const peerId = msg.from
-    conn.peerId = peerId
-    this.peers.set(conn, {
-      deviceId: peerId,
-      displayName: p.displayName,
-      deviceType: p.deviceType,
-      caps: p.caps,
-      fingerprint: p.fingerprint
-    })
+    const claimedFp = typeof p.fingerprint === 'string' ? normalizeFingerprint(p.fingerprint) : ''
+    const actualFp = conn.tlsFingerprint
+
+    // 自称的指纹与 TLS 会话实际使用的证书不符：连接那头根本不持有它
+    // 声称的身份，多说什么都是假的，直接断开。
+    if (actualFp && claimedFp && actualFp !== claimedFp) {
+      log.warn(`对端 ${peerId} 声称的指纹与 TLS 证书不符，断开连接`)
+      conn.send('pair.error', { code: 'NOT_TRUSTED', message: '指纹与证书不符' })
+      conn.close(4006, 'fingerprint mismatch')
+      return
+    }
+
+    // 已信任的设备重新连入：与信任清单比对。此时以 TLS 证书为准
+    // （可取得时），证书拿不到才退回对方自称的指纹——那已是最后的防线。
+    // 不符说明身份被替换或中间人，必须断开而不是留在连接表里：
+    // 留下的连接会以被冒用设备的 ID 占据 peers 表，后续 offer 会发给冒用者。
+    const known = this.trust.fingerprintOf(peerId)
+    if (known) {
+      const presented = actualFp ?? claimedFp
+      if (!presented || presented !== normalizeFingerprint(known)) {
+        log.warn(`对端 ${peerId} 指纹与信任清单不符，可能被替换或存在中间人，断开连接`)
+        conn.send('pair.error', { code: 'NOT_TRUSTED', message: '设备指纹与已存记录不符，请撤销后重新配对' })
+        conn.close(4006, 'fingerprint mismatch')
+        return
+      }
+      log.info(`对端 ${peerId} 已在信任清单中`)
+      this.peers.set(conn, {
+        deviceId: peerId,
+        displayName: p.displayName,
+        deviceType: p.deviceType,
+        caps: p.caps,
+        fingerprint: presented
+      })
+      conn.peerId = peerId
+      this.uiPaired?.forEach((cb) => cb(this.trust.list().find((e) => e.deviceId === peerId)!))
+    } else {
+      this.peers.set(conn, {
+        deviceId: peerId,
+        displayName: p.displayName,
+        deviceType: p.deviceType,
+        caps: p.caps,
+        fingerprint: claimedFp
+      })
+      conn.peerId = peerId
+    }
+
     // 回应自己的身份声明，让对方也知道我们是谁。
     // 每个连接只回一次，否则两边会无限互弹 announce。
     if (!this.announced.has(conn)) {
@@ -331,16 +374,6 @@ export class PairingCoordinator {
         fingerprint: this.opts.selfFingerprint()
       } satisfies AnnouncePayload)
     }
-
-    // 若已信任且指纹一致，直接视为已配对；不一致说明设备身份被替换，必须重新配对
-    const known = this.trust.fingerprintOf(peerId)
-    if (known && known === p.fingerprint) {
-      log.info(`对端 ${peerId} 已在信任清单中`)
-      this.uiPaired?.forEach((cb) => cb(this.trust.list().find((e) => e.deviceId === peerId)!))
-    } else if (known && known !== p.fingerprint) {
-      log.warn(`对端 ${peerId} 指纹与信任清单不符，可能被替换或存在中间人`)
-      conn.send('pair.error', { code: 'NOT_TRUSTED', message: '设备指纹与已存记录不符，请撤销后重新配对' })
-    }
   }
 
   private handlePairRequest(conn: Connection, _msg: Envelope<PairRequestPayload>): void {
@@ -351,6 +384,13 @@ export class PairingCoordinator {
     }
     if (this.pending.has(conn)) {
       conn.send('pair.error', { code: 'RESOURCE_BUSY', message: '已有配对请求在处理' })
+      return
+    }
+    // 配对请求不需要任何前置授权就能发起，必须设总量上限，
+    // 否则任意未认证连接都能无限刷出配对码污染接收方 UI
+    if (this.pending.size >= MAX_PENDING) {
+      log.warn(`挂起配对请求已达上限 ${MAX_PENDING}，拒绝新请求`)
+      conn.send('pair.error', { code: 'RESOURCE_BUSY', message: '配对请求过多，请稍后再试' })
       return
     }
 
@@ -432,12 +472,20 @@ export class PairingCoordinator {
       resolve(new Error('对端 approve 消息缺少必要字段'))
       return
     }
+    // 入库指纹以 TLS 会话实际证书为准——approve 载荷里的指纹是对方
+    // 自报的，若与证书不符，证书说了算（证书拿不到才用自报值）
+    const presentedFp = conn.tlsFingerprint ?? normalizeFingerprint(p.fingerprint)
+    // scope 必须按白名单过滤：payload 由对端构造，直接收下会被塞进
+    // 未经授权的 control 等能力位
+    const scope = (Array.isArray(p.scope) ? p.scope : []).filter((s): s is TrustScope =>
+      (ALL_SCOPES as string[]).includes(s)
+    )
     const entry: Omit<TrustEntry, 'trustedAt'> = {
       deviceId: p.deviceId,
       displayName: p.displayName,
       deviceType: p.deviceType,
-      fingerprint: p.fingerprint,
-      scope: (Array.isArray(p.scope) ? p.scope : ['file']) as TrustEntry['scope']
+      fingerprint: presentedFp,
+      scope
     }
     this.trust.grant(entry)
     log.info(`配对成功，已信任 ${p.deviceId}`)
@@ -454,8 +502,25 @@ export class PairingCoordinator {
     }
   }
 
-  private handlePairRevoke(_conn: Connection, msg: Envelope<{ deviceId?: string }>): void {
+  private handlePairRevoke(conn: Connection, msg: Envelope<{ deviceId?: string }>): void {
     const deviceId = msg.payload?.deviceId ?? msg.from
+    // 撤销消息的语义是「我撤销你对我的信任」，因此只接受撤销方
+    // 撤销它自己的身份，且连接必须完成过身份声明。否则任何能连上
+    // 控制通道的设备都能伪造一条消息，定向删除本机对第三方的信任。
+    if (deviceId !== msg.from || deviceId !== conn.peerId) {
+      log.warn(`拒绝来源与内容不符的撤销请求（声称撤销 ${deviceId}）`)
+      return
+    }
+    // 已信任设备的撤销，还必须由持有对应证书的连接发出：
+    // 指纹锚定不上就当没收到，防止冒用 deviceId 的连接清掉信任
+    const stored = this.trust.fingerprintOf(deviceId)
+    if (stored) {
+      const presented = conn.tlsFingerprint
+      if (!presented || presented !== normalizeFingerprint(stored)) {
+        log.warn(`撤销请求的 TLS 指纹与信任条目不符，已忽略`)
+        return
+      }
+    }
     this.trust.revoke(deviceId)
     this.uiRevoked?.forEach((cb) => cb(deviceId))
     log.info(`对端撤销了信任：${deviceId}`)

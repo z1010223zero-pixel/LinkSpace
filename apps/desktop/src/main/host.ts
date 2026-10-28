@@ -10,7 +10,7 @@
 import { randomUUID } from 'node:crypto'
 import type { Server } from 'node:https'
 import { app } from 'electron'
-import { getDeviceCert, type DeviceCert } from './transfer/identity'
+import { getDeviceCert, setIdentityDir, deviceIdOfCert, type DeviceCert } from './transfer/identity'
 import { TrustStore, type TrustEntry, type TrustScope } from './transfer/trust'
 import { TransferManager, type TransferFile, type TransferTask } from './transfer/manager'
 import { startTransferServer, type StartedServer } from './transfer/server'
@@ -56,7 +56,12 @@ export interface HostEvents {
 type Listener<K extends keyof HostEvents> = (...args: HostEvents[K]) => void
 
 export class Host {
-  private readonly deviceId = `dev_${randomUUID().replace(/-/g, '').slice(0, 16)}`
+  /**
+   * 设备 ID 由证书派生，start() 时赋值。
+   * 曾经是每进程随机 UUID——证书持久化而 ID 随机，导致重启后对端
+   * 信任清单全部失效（数据面 403）。Android 侧一开始就是派生的。
+   */
+  private deviceId = ''
   private readonly trust: TrustStore
   private readonly transfers = new TransferManager()
   private control: ControlNode | null = null
@@ -66,6 +71,8 @@ export class Host {
   private listeners: { [K in keyof HostEvents]?: Listener<K>[] } = {}
   /** 已连接的对端：deviceId → Connection */
   private readonly peers = new Map<string, Connection>()
+  /** 发起连接时记住的服务名 → 连接，供 UI 按发现列表里的服务名找回连接 */
+  private readonly serviceConns = new Map<string, Connection>()
   /** 对端可达端点。只有主动连出去时才知道对方的监听端口 */
   private readonly endpoints = new Map<string, { host: string; port: number }>()
   /** 已连接但身份尚未声明完成的端点，announce 到达后提升到 endpoints */
@@ -73,6 +80,9 @@ export class Host {
   private started = false
 
   constructor(private readonly opts: HostOptions) {
+    // dataDir 必须同时管住信任清单与身份证书：只设一半会让身份退回到
+    // 进程级单例，同进程多个 Host 会共用同一张证书、同一个指纹。
+    if (opts.dataDir) setIdentityDir(opts.dataDir)
     this.trust = new TrustStore({
       dir: opts.dataDir ?? app.getPath('userData'),
       defaultScope: opts.defaultScope ?? ['file']
@@ -112,6 +122,7 @@ export class Host {
     this.started = true
 
     const cert = this.opts.cert ?? (await getDeviceCert())
+    this.deviceId = deviceIdOfCert(cert.cert)
     const port = await this.startFileServer(cert)
     this.startControl(cert)
     this.startPairing(cert)
@@ -121,14 +132,17 @@ export class Host {
     log.info(`LinkSpace 主机已启动，id=${this.deviceId}，端口=${port}`)
   }
 
-  /** 传输服务。信任判定只认 TrustStore，没有旁路 */
+  /** 传输服务。信任判定只认 TrustStore 与任务 token，没有旁路 */
   private async startFileServer(cert: DeviceCert): Promise<number> {
     this.fileServer = await startTransferServer(
       {
       resolveIncoming: (id) => this.transfers.resolveIncoming(id),
       resolveOutgoing: (id) => this.transfers.resolveOutgoing(id),
-        isKnownDevice: (deviceId) =>
-          this.trust.isKnown(deviceId) && this.trust.hasScope(deviceId, 'file')
+        appendIncoming: (key, offset, body) => this.transfers.appendIncoming(key, offset, body),
+        verifyTransfer: (transferKey, deviceId, token) =>
+          this.trust.isKnown(deviceId) &&
+          this.trust.hasScope(deviceId, 'file') &&
+          this.transfers.verifyToken(transferKey, token)
       },
       cert
     )
@@ -138,11 +152,6 @@ export class Host {
   private startControl(cert: DeviceCert): void {
     this.control = new ControlNode({ deviceId: this.deviceId, tls: cert })
 
-    // 身份声明一到就把连接登记到 peers 表，否则 offerFiles 会以「未连接」拒绝。
-    // 必须在 PairingCoordinator 之后注册：它负责把 conn.peerId 填上。
-    this.control.on('device.announce', (conn) => {
-      if (conn.peerId) this.peers.set(conn.peerId, conn)
-    })
     // 控制通道与文件传输共用同一个端口与证书（ADR-003）
     this.control.attach(this.fileServer!.server as Server)
     this.control.startHeartbeat((conn) => {
@@ -153,6 +162,9 @@ export class Host {
       if (conn.peerId) this.peers.delete(conn.peerId)
       this.endpoints.delete(conn.peerId)
       this.pendingEndpoints.delete(conn)
+      for (const [name, c] of this.serviceConns) {
+        if (c === conn) this.serviceConns.delete(name)
+      }
     })
   }
 
@@ -216,6 +228,9 @@ export class Host {
   async connect(svc: DiscoveredService): Promise<Connection> {
     const conn = await this.control!.connect(svc.host, svc.port)
     this.pendingEndpoints.set(conn, { host: svc.host, port: svc.port })
+    // 服务名 → 连接：UI 提交配对码时只知道服务名，不能靠
+    // 「服务名里碰巧包含 deviceId 前缀」这种巧合来找回连接
+    this.serviceConns.set(svc.serviceName, conn)
     this.pairing!.introduce(conn)
     return conn
   }
@@ -257,8 +272,12 @@ export class Host {
 
   /** 按 mDNS 服务名找回已建立的连接（发起方提交配对码用） */
   connectionFor(serviceName: string): Connection | null {
+    const direct = this.serviceConns.get(serviceName)
+    if (direct) return direct
+    // 兜底：直连注入场景（跨平台联调脚本）没有走 connect()，没有服务名记录。
+    // 服务名形如 LinkSpace-<displayName>，若发布方把 id 前缀嵌进了名字，
+    // 仍可按前缀匹配
     for (const conn of this.peers.values()) {
-      // 服务名形如 LinkSpace-<displayName>，对端 ID 存在 conn.peerId 上
       if (conn.peerId && serviceName.includes(conn.peerId.slice(0, 12))) return conn
     }
     return null
@@ -287,11 +306,12 @@ export class Host {
   async acceptTransfer(id: string, saveDir: string): Promise<TransferTask> {
     const task = this.transfers.get(id)
     if (!task) throw new Error('任务不存在')
-    // token 由接收方生成，经控制通道交还发送方作为数据面凭证
+    // token 由接收方生成，经控制通道交还发送方作为数据面凭证。
+    // saveDir 只在本机使用，不出网——本机文件系统布局不喂给对端
     const token = randomUUID()
     const accepted = await this.transfers.accept(id, saveDir, { token })
     const conn = this.peers.get(task.peerId)
-    conn?.send('transfer.accept', { transferId: id, saveDir, token })
+    conn?.send('transfer.accept', { transferId: id, token })
     this.emit('transferChanged', accepted)
     return accepted
   }
@@ -321,25 +341,52 @@ export class Host {
    * 把控制消息接到传输管理器上。
    * 这一段是「取消只清理本端」这个缺口的修复点：
    * 发送方取消 → transfer.cancel → 接收方 manager.cancel → .part 被删。
+   *
+   * 所有消息都先核对「连接身份 == 任务对端」：传输任务的细节
+   * （transferId、token）只对当事双方可见，其他已配对设备乃至
+   * 任何能连上控制通道的连接，都不该能对别人的任务做任何操作。
    */
   private wireTransferBridge(): void {
     const control = this.control!
 
+    // offer 的 id 由发送方生成，约束字符集：组合键 `${id}:${name}` 靠
+    // 第一个冒号切分出任务 id，id 里混进冒号就会歧义；也避免怪字符
+    // 进入数据面 URL
+    const TRANSFER_ID_RE = /^[A-Za-z0-9_-]{1,64}$/
+
     control.on('transfer.offer', (conn, msg) => {
       const p = msg.payload as { transferId?: string; files?: { name: string; size: number }[] }
       if (!p.transferId || !Array.isArray(p.files)) return
-      const transferId = p.transferId
+      if (!TRANSFER_ID_RE.test(p.transferId)) {
+        log.warn('收到非法 transferId 的 transfer.offer，已忽略')
+        return
+      }
       const peerId = conn.peerId
+      if (!peerId) {
+        log.warn('收到未声明身份连接的 transfer.offer，已忽略')
+        return
+      }
+      // offer 必须来自持有 file 授权的已配对设备：不设这道闸，
+      // 任何能连上控制通道的连接都能在本机创建垃圾传输任务
+      if (!this.trust.hasScope(peerId, 'file')) {
+        log.warn(`拒绝未授权设备的 transfer.offer`)
+        conn.send('transfer.reject', { transferId: p.transferId, reason: 'not authorized' })
+        return
+      }
+      const transferId = p.transferId
       this.peers.set(peerId, conn)
       void this.transfers
         .offer(
           peerId,
-          p.files.map((f) => ({ name: f.name, size: f.size })),
+          p.files.map((f) => ({ name: String(f.name ?? ''), size: Number(f.size ?? -1) })),
           transferId,
           'receive'
         )
         .then((task) => this.emit('transferOffered', task))
-        .catch((err) => log.error(`接收 offer 失败: ${String(err)}`))
+        .catch((err) => {
+          log.error(`接收 offer 失败: ${String(err)}`)
+          conn.send('transfer.reject', { transferId, reason: 'invalid offer' })
+        })
     })
 
     control.on('transfer.accept', (conn, msg) => {
@@ -347,9 +394,11 @@ export class Host {
       if (!p.transferId) return
       const transferId = p.transferId
       this.peers.set(conn.peerId, conn)
+      const task = this.transfers.get(transferId)
+      // 只有本任务的对端才能交还 token，其他连接的 accept 一律无视
+      if (!task || task.direction !== 'send' || task.peerId !== conn.peerId) return
       // token 由接收方生成，必须挂到发送方任务上，否则数据面鉴权失败
       this.transfers.attachToken(transferId, String(p.token ?? ''))
-      const task = this.transfers.get(transferId)
       if (task) {
         const ep = this.endpoints.get(conn.peerId)
         if (!ep) {
@@ -376,22 +425,31 @@ export class Host {
       }
     })
 
-    control.on('transfer.reject', (_conn, msg) => {
+    control.on('transfer.reject', (conn, msg) => {
       const p = msg.payload as { transferId?: string; reason?: string }
-      if (p.transferId) this.transfers.reject(p.transferId, p.reason ?? 'rejected')
+      if (!p.transferId) return
+      const task = this.transfers.get(p.transferId)
+      if (!task || task.peerId !== conn.peerId) return
+      this.transfers.reject(p.transferId, p.reason ?? 'rejected')
     })
 
     // 取消的真实闭环：删掉本端的 .part
-    control.on('transfer.cancel', (_conn, msg) => {
+    control.on('transfer.cancel', (conn, msg) => {
       const p = msg.payload as { transferId?: string }
       if (!p.transferId) return
+      const task = this.transfers.get(p.transferId)
+      if (!task || task.peerId !== conn.peerId) return
       void this.transfers.cancel(p.transferId)
     })
 
     // 接收方：发送方推完了，带着整体摘要过来。校验通过才落盘。
-    control.on('transfer.complete', (_conn, msg) => {
+    control.on('transfer.complete', (conn, msg) => {
       const p = msg.payload as { transferId?: string; digests?: Record<string, string> }
       if (!p.transferId) return
+      const task = this.transfers.get(p.transferId)
+      // 伪造的 complete 会让接收方按假摘要比对后删掉 .part，等于让
+      // 旁观连接拥有弄坏别人传输的能力，必须核对来源与本任务对端一致
+      if (!task || task.direction !== 'receive' || task.peerId !== conn.peerId) return
       void this.transfers
         .finalize(p.transferId, p.digests)
         .then((task) => this.emit('transferChanged', task))

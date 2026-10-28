@@ -19,11 +19,13 @@ import { rename, rm } from 'node:fs/promises'
 import { basename } from 'node:path'
 import {
   DEFAULT_CHUNK_SIZE,
+  appendChunk,
   ensureFile,
   hashBuffer,
   hashFile,
   partPathFor,
   readChunk,
+  sanitizeFileName,
   uniquePath,
   writtenBytes
 } from './chunker'
@@ -84,6 +86,12 @@ export class TransferManager extends EventEmitter {
   /** 已接受但尚未完成的 token，用于数据面鉴权 */
   private tokens = new Map<string, string>()
   /**
+   * 数据面写入串行化：transferKey → 排队尾 Promise。
+   * 取消与写入并发时（Windows 上打开中的句柄会让 rm 进入
+   * delete-pending），必须让取消等在途写入排空后再删文件。
+   */
+  private writes = new Map<string, Promise<void>>()
+  /**
    * 已被取消的任务 id。
    * cleanup() 不能清这个集合：push 的异常分支要靠它区分「用户取消」
    * 和「真的出错」，否则取消会被误报成 failed。
@@ -123,6 +131,12 @@ export class TransferManager extends EventEmitter {
     direction: 'send' | 'receive' = 'send'
   ): Promise<TransferTask> {
     if (files.length === 0) throw new Error('没有要传输的文件')
+    if (files.length > 512) throw new Error(`单次传输文件数过多: ${files.length}`)
+    for (const f of files) {
+      if (!Number.isFinite(f.size) || f.size < 0) {
+        throw new Error(`文件大小非法: ${f.name}`)
+      }
+    }
 
     const isSend = direction === 'send'
     if (isSend) {
@@ -133,24 +147,28 @@ export class TransferManager extends EventEmitter {
       }
     }
 
+    // 名字来自网络对端，必须先收敛到基础名再做任何路径拼接，
+    // 否则 `..\..\x` 会把写入点挪到保存目录之外
+    const cleanFiles = files.map((f) => ({ ...f, name: sanitizeFileName(f.name) }))
+
     const id = transferId ?? `tr-${++this.seq}-${randomUUID().slice(0, 8)}`
     const task: TransferTask = {
       id,
       direction: isSend ? 'send' : 'receive',
       peerId,
       state: 'offered',
-      files,
-      totalSize: files.reduce((sum, f) => sum + f.size, 0),
+      files: cleanFiles,
+      totalSize: cleanFiles.reduce((sum, f) => sum + f.size, 0),
       transferred: 0,
       createdAt: Date.now()
     }
     this.tasks.set(id, task)
     if (isSend) {
-      for (const f of files) {
+      for (const f of cleanFiles) {
         this.outgoing.set(`${id}:${f.name}`, { path: f.path! })
       }
     }
-    log.info(`创建传输任务 ${id}，${files.length} 个文件，共 ${task.totalSize} 字节`)
+    log.info(`创建传输任务 ${id}，${cleanFiles.length} 个文件，共 ${task.totalSize} 字节`)
     this.emit('changed', task)
     return task
   }
@@ -231,6 +249,11 @@ export class TransferManager extends EventEmitter {
     this.emit('changed', task)
 
     try {
+      // 已完成文件的累计字节。progress 显示的是跨文件的总量，
+      // 当前文件的进度要叠加在这个基数上，否则每换一个文件进度就归零、
+      // 而按「其余文件大小求和」的旧算法会把没传的文件也提前计入
+      let completedBytes = 0
+
       for (const file of task.files) {
         const path = file.path!
         const transferKey = `${id}:${file.name}`
@@ -272,17 +295,16 @@ export class TransferManager extends EventEmitter {
           }
           if (!done) throw lastErr instanceof Error ? lastErr : new Error(String(lastErr))
 
-          task.transferred = offset
+          task.transferred = completedBytes + offset
           this.emit('changed', task)
-          onProgress?.(offset, file.size)
+          onProgress?.(task.transferred, task.totalSize)
         }
 
         // 整体摘要：随 complete 交给接收方比对，是内容一致性的最终判据
         const localDigest = await hashFile(path)
         file.digest = localDigest
-        task.transferred = task.files
-          .filter((f) => f !== file)
-          .reduce((s, f) => s + f.size, 0) + file.size
+        completedBytes += file.size
+        task.transferred = completedBytes
         this.emit('changed', task)
         log.info(`文件 ${basename(file.name)} 推送完成，摘要 ${localDigest.slice(0, 12)}…`)
       }
@@ -317,10 +339,15 @@ export class TransferManager extends EventEmitter {
       task.state = 'cancelled'
       task.finishedAt = Date.now()
     }
-    // 先删临时文件，再清映射（cleanup 会删掉 incoming，之后就找不到路径了）
+    // 先摘除路由（排队中的写入会因查不到条目而中止），再等在途的
+    // 最后一笔写入结束，最后删文件。顺序反了的话 Windows 会因为
+    // 文件句柄未关而删不掉，留下「已取消但 .part 还在」的残局
     for (const file of task.files) {
-      const entry = this.incoming.get(`${id}:${file.name}`)
+      const key = `${id}:${file.name}`
+      const entry = this.incoming.get(key)
+      this.incoming.delete(key)
       if (entry) {
+        await (this.writes.get(key) ?? Promise.resolve()).catch(() => {})
         await rm(entry.partPath, { force: true }).catch(() => {
           /* 文件可能本就不存在 */
         })
@@ -338,6 +365,39 @@ export class TransferManager extends EventEmitter {
     log.info(`取消传输任务 ${id}`)
     this.emit('changed', task)
     this.cleanup(id)
+  }
+
+  /**
+   * 数据面写入入口（供传输服务调用）：校验偏移衔接后追加落盘。
+   * 同一任务的写入在此串行化，并在锁内重查任务是否仍存在——
+   * 取消摘除路由后，还没开始的写入直接放弃，已开始的写完即止。
+   * 返回 null 表示任务已不存在；conflict 表示偏移不衔接。
+   */
+  async appendIncoming(
+    transferKey: string,
+    offset: number,
+    body: Buffer
+  ): Promise<{ conflict?: number; committedOffset: number } | null> {
+    const prev = this.writes.get(transferKey) ?? Promise.resolve()
+    let release!: () => void
+    const gate = new Promise<void>((r) => (release = r))
+    const tail = prev.then(() => gate)
+    this.writes.set(transferKey, tail)
+    await prev
+    try {
+      const entry = this.incoming.get(transferKey)
+      if (!entry) return null
+      const written = await writtenBytes(entry.partPath)
+      if (offset !== written) {
+        log.warn(`分块偏移冲突：请求 ${offset}，已写入 ${written}`)
+        return { conflict: written, committedOffset: written }
+      }
+      await appendChunk(entry.partPath, body)
+      return { committedOffset: await writtenBytes(entry.partPath) }
+    } finally {
+      release()
+      if (this.writes.get(transferKey) === tail) this.writes.delete(transferKey)
+    }
   }
 
   /** 调试/测试用：读取某任务 .part 当前已写入的字节数 */
@@ -410,9 +470,14 @@ export class TransferManager extends EventEmitter {
     return this.outgoing.get(transferId) ?? null
   }
 
-  /** 供服务端校验数据面令牌 */
-  verifyToken(transferId: string, token: string): boolean {
-    return this.tokens.get(transferId) === token
+  /**
+   * 供服务端校验数据面令牌。
+   * 数据面 URL 携带的是 `${transferId}:${fileName}` 组合键，
+   * transferId 生成时限定为不含冒号的字符集，取第一个冒号前缀即任务 id。
+   */
+  verifyToken(transferKey: string, token: string): boolean {
+    const id = transferKey.slice(0, transferKey.indexOf(':'))
+    return id.length > 0 && this.tokens.get(id) === token
   }
 
   /** 便捷方法：计算一个 Buffer 的摘要（测试用） */

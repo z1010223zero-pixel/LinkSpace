@@ -71,13 +71,22 @@ async function setup(): Promise<Harness> {
   const receiver = new TransferManager({ chunkSize })
   const sender = new TransferManager({ chunkSize })
 
-  // 接收方只认这一个已授权设备
+  // 接收方只认这一个已授权设备；token 交由接收方管理器按任务校验
+  // （正是真实链路上 host.verifyTransfer 的接线方式）
   const knownDevices = new Set(['dev-sender-001'])
-  const { server, port } = await startTransferServer({
-    resolveIncoming: (id: string) => receiver.resolveIncoming(id),
-    resolveOutgoing: (id: string) => receiver.resolveOutgoing(id),
-    isKnownDevice: (id: string) => knownDevices.has(id)
-  })
+  const { server, port } = await startTransferServer(
+    {
+      resolveIncoming: (id: string) => receiver.resolveIncoming(id),
+      resolveOutgoing: (id: string) => receiver.resolveOutgoing(id),
+      appendIncoming: (key: string, offset: number, body: Buffer) =>
+        receiver.appendIncoming(key, offset, body),
+      verifyTransfer: (key: string, id: string, token: string) =>
+        knownDevices.has(id) && receiver.verifyToken(key, token)
+    },
+    undefined,
+    // 环路测试固定走回环地址，不参与自动绑定局域网网卡
+    { bind: '127.0.0.1' }
+  )
 
   return {
     workDir,

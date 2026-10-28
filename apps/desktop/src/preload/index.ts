@@ -43,6 +43,9 @@ const api: LinkSpaceApi = {
 
   listTransfers: () => ipcRenderer.invoke('transfer:list') as Promise<TransferTaskView[]>,
 
+  acceptTransfer: (id: string) =>
+    ipcRenderer.invoke('transfer:accept', id) as Promise<IpcResult<string | null>>,
+
   cancelTransfer: (id: string) =>
     ipcRenderer.invoke('transfer:cancelFor', id) as Promise<IpcResult<void>>,
 

@@ -134,6 +134,8 @@ export interface LinkSpaceApi {
   listSessions(): Promise<SessionView[]>
   envInfo(): Promise<EnvInfo>
   listTransfers(): Promise<TransferTaskView[]>
+  /** 接收方：弹目录选择框并接受传输，value 为所选目录（取消时为 null） */
+  acceptTransfer(id: string): Promise<IpcResult<string | null>>
   cancelTransfer(id: string): Promise<IpcResult<void>>
   transferInfo(): Promise<TransferInfo>
   listDiscovered(): Promise<DiscoveredDevice[]>

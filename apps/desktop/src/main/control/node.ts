@@ -13,12 +13,38 @@
 
 import { createHash, randomFillSync, randomUUID } from 'node:crypto'
 import type { Server as HttpsServer } from 'node:https'
+import type { TLSSocket } from 'node:tls'
 import { WebSocketServer, WebSocket } from 'ws'
 
 export const PROTOCOL_VERSION = 1
 export const HEARTBEAT_INTERVAL_MS = 5000
 export const HEARTBEAT_TIMEOUT_MS = 15_000
 export const MAX_CLOCK_SKEW_MS = 60_000
+
+/** 指纹统一成 64 位小写十六进制再比较，兼容冒号分隔与纯 hex 两种写法 */
+export function normalizeFingerprint(fp: string): string {
+  return fp.replace(/:/g, '').toLowerCase()
+}
+
+/**
+ * 取 TLS 会话对端证书的 SHA-256 指纹（去冒号小写）。
+ * 客户端连接上返回服务端证书，服务端连接上返回客户端证书（需服务端
+ * 以 requestCert 开启双向索证）。对端未出示证书时返回 null。
+ * 这是把「对方自称的身份」锚定到「加密会话实际使用的密钥」的唯一途径，
+ * 没有它，announce 里的指纹只是一段可任意伪造的字符串。
+ */
+function tlsFingerprintOf(ws: WebSocket): string | null {
+  try {
+    const socket = (ws as unknown as { _socket?: TLSSocket })._socket
+    if (!socket || typeof socket.getPeerCertificate !== 'function') return null
+    const cert = socket.getPeerCertificate()
+    // 未出示证书时 Node 返回空对象而非 null
+    if (!cert || Object.keys(cert).length === 0 || !cert.fingerprint256) return null
+    return normalizeFingerprint(cert.fingerprint256)
+  } catch {
+    return null
+  }
+}
 
 export interface Envelope<T = unknown> {
   v: number
@@ -34,6 +60,11 @@ export interface Connection {
   /** 对端 deviceId，announce 之后才可用 */
   peerId: string
   readonly remoteAddress: string
+  /**
+   * 对端 TLS 证书指纹（SHA-256，去冒号小写）。连接建立时取自底层
+   * TLSSocket，之后不再变化。null 表示对端未出示证书。
+   */
+  readonly tlsFingerprint: string | null
   /** 最后一次收到消息的时间，用于心跳超时判定 */
   lastSeen: number
   send<T>(type: string, payload: T): void
@@ -95,7 +126,12 @@ export class ControlNode {
   /** 独立监听（测试用：不依赖已有 HTTPS 服务） */
   async listen(port = 0): Promise<number> {
     const { createServer } = await import('node:https')
-    const server: HttpsServer = createServer(this.opts.tls)
+    // requestCert 与数据面服务保持一致：向对端索要证书用于指纹锚定
+    const server: HttpsServer = createServer({
+      ...this.opts.tls,
+      requestCert: true,
+      rejectUnauthorized: false
+    })
     this.wss = new WebSocketServer({ noServer: true })
     server.on('upgrade', (req, socket, head) => {
       if (!req.url?.startsWith('/linkspace/v1/control')) {
@@ -116,7 +152,10 @@ export class ControlNode {
   connect(host: string, port: number): Promise<Connection> {
     return new Promise((resolve, reject) => {
       const ws = new WebSocket(`wss://${host}:${port}/linkspace/v1/control`, {
-        rejectUnauthorized: false
+        rejectUnauthorized: false,
+        // 主动出示本机证书：对端服务端开了 requestCert，据此锚定我们的身份
+        cert: this.opts.tls.cert,
+        key: this.opts.tls.key
       })
       const timer = setTimeout(() => {
         ws.terminate()
@@ -147,6 +186,7 @@ export class ControlNode {
     const conn: Connection = {
       peerId: '',
       remoteAddress: '',
+      tlsFingerprint: tlsFingerprintOf(ws),
       lastSeen: Date.now(),
       send<T>(type: string, payload: T) {
         if (ws.readyState !== WebSocket.OPEN) return

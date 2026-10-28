@@ -30,6 +30,19 @@ export function fingerprintOfCert(certPem: string): string {
   return createHash('sha256').update(der).digest('hex').replace(/(.{2})(?=.)/g, '$1:')
 }
 
+/**
+ * 从证书派生的稳定设备 ID。
+ *
+ * 设备 ID **不能每进程随机生成**：证书是持久化的，ID 随机的话，
+ * 同一台设备重启后就换了身份，对端信任清单里的条目全部失效，
+ * 表现为「明明配对过，数据面却被 403」。必须与证书同生命周期。
+ */
+export function deviceIdOfCert(certPem: string): string {
+  const body = certPem.replace(/-----(BEGIN|END)[^-]+-----/g, '').replace(/\s+/g, '')
+  const der = Buffer.from(body, 'base64')
+  return `dev_${createHash('sha256').update(der).digest('hex').slice(0, 16)}`
+}
+
 let cached: DeviceCert | null = null
 let overrideDir: string | null = null
 
@@ -88,6 +101,8 @@ export async function getDeviceCert(): Promise<DeviceCert> {
   )
 
   mkdirSync(dir, { recursive: true })
+  // mode 0o600 只在 POSIX 上生效；Windows 下权限由 userData 目录的
+  // ACL 决定（默认仅本用户可读），这是原型阶段可接受的基线
   writeFileSync(keyPath, pems.private, { mode: 0o600 })
   writeFileSync(certPath, pems.cert)
 

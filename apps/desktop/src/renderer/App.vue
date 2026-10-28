@@ -142,6 +142,17 @@ async function cancelTransfer(id: string): Promise<void> {
   else await loadTransfers()
 }
 
+/** 接收方：选保存目录并接受传输 */
+async function acceptTransfer(id: string): Promise<void> {
+  notice.value = ''
+  const res = await window.linkspace.acceptTransfer(id)
+  if (!res.ok) {
+    notice.value = res.error.message
+    return
+  }
+  await loadTransfers()
+}
+
 async function refresh(): Promise<void> {
   if (refreshing) return
   refreshing = true
@@ -317,6 +328,13 @@ onBeforeUnmount(() => {
           </span>
           <span class="badge badge--neutral">{{ STATE_LABEL[t.state] ?? t.state }}</span>
           <button
+            v-if="t.direction === 'receive' && t.state === 'offered'"
+            class="btn btn--sm"
+            @click="acceptTransfer(t.id)"
+          >
+            选择位置接收
+          </button>
+          <button
             v-if="t.state === 'offered' || t.state === 'accepted'"
             class="btn btn--sm btn--danger"
             @click="cancelTransfer(t.id)"
@@ -392,7 +410,7 @@ onBeforeUnmount(() => {
         传输端口 {{ transferInfo.port }} · 指纹 {{ transferInfo.fingerprint.slice(0, 17) }}…
       </span>
       <span class="topbar__spacer" />
-      <span>设备发现与配对尚未实现</span>
+      <span v-if="discovered.length">局域网内 {{ discovered.length }} 台可配对设备</span>
     </footer>
   </div>
 </template>

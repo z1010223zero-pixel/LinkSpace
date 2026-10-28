@@ -12,7 +12,6 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { setIdentityDir, getDeviceCert } from './transfer/identity'
 import { TrustStore } from './transfer/trust'
-import { startTransferServer } from './transfer/server'
 import { ControlNode } from './control/node'
 import { PairingCoordinator, type PendingPairing } from './pairing'
 
@@ -44,14 +43,10 @@ async function makeNode(id: string, displayName: string): Promise<Node> {
 
   const trust = new TrustStore({ dir: join(dir, 'trust') })
 
-  const { port } = await startTransferServer({
-    resolveIncoming: () => null,
-    resolveOutgoing: () => null,
-    isKnownDevice: () => false
-  })
-
   const control = new ControlNode({ deviceId: id, tls: { key: cert.key, cert: cert.cert } })
-  await control.listen(port)
+  // 配对测试只走控制通道，端口由系统分配；
+  // 数据面（文件传输服务）不在本测试范围内
+  const port = await control.listen()
 
   const pairing = new PairingCoordinator({
     deviceId: id,

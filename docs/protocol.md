@@ -74,10 +74,17 @@
 | `pair.challenge` | 接收方 → 发起方 | `{ expiresAt }` | 提示发起方「去要配对码」。⚠️ **不携带配对码本身**：配对码若经网络传输，任何能连上的人都可直接拿到，配对口令形同虚设。码只显示在接收方屏幕，由人工抄录到发起端 |
 | `pair.approve` | 接收方 → 发起方 | `{ deviceId, trustScope }` | 用户确认后发送。⚠️ `deviceId` 是**发送方自己**的 id（让对端知道是谁批准的），不是被批准的设备 id |
 | `pair.reject` | 接收方 → 发起方 | `{ reason }` | 用户拒绝或超时 |
-| `pair.revoke` | 双向 | `{ deviceId }` | 撤销信任，立即生效。⚠️ `deviceId` 是**撤销方自己**的 id（让对端知道该删掉谁的信任条目） |
+| `pair.revoke` | 双向 | `{ deviceId }` | 撤销信任，立即生效。⚠️ `deviceId` 是**撤销方自己**的 id（让对端知道该删掉谁的信任条目）。⚠️ **来源校验**：接收方必须核对 `deviceId == from == conn.peerId`，且该连接的 TLS 证书指纹与信任条目一致；拿不到证书或指纹不符一律忽略。否则任何能连上控制通道的设备都能伪造撤销、定向删除第三方信任 |
 | `pair.error` | 双向 | `{ code, message }` | 配对失败，code 见第 7 节 |
 
 `trustScope` 显式列出本次授权的能力（如 `["file", "clipboard"]`），控制类能力默认不在其中，需二次授权。这实现了方案 2.2 的「单独管理每台设备的控制权限」。
+
+**指纹锚定**（实现期定型）：announce / approve 载荷里的指纹是**自报**值，不能单独作为信任依据。双方在 TLS 连接建立后取对端证书的实际 SHA-256 指纹：
+
+- 自报指纹与实际证书不符 → 立即断开（对方在声称自己不持有的身份）。
+- 已信任设备重连时，实际证书指纹与信任条目不符 → 断开并告警（身份被替换或中间人），不允许该连接留在连接表里。
+- 配对落库的指纹一律写**实际证书指纹**，自报值只作拿不到证书时的退路。
+- 双向索证：客户端连出时出示本机证书，服务端以 requestCert 索取连入方证书，据此双向核验。对端无法出示证书的互操作场景，退化为自报指纹比对并记录告警。
 
 ### 4.2 连接维护
 
@@ -113,14 +120,16 @@
 
 | 类型 | 方向 | payload | 说明 |
 |---|---|---|---|
-| `transfer.offer` | 发送方 → 接收方 | `{ transferId, files: [{name, size, mime}], totalSize }` | 请求传输 |
-| `transfer.accept` | 接收方 → 发送方 | `{ transferId, saveDir }` | **用户确认保存路径后**发送 |
+| `transfer.offer` | 发送方 → 接收方 | `{ transferId, files: [{name, size, mime}], totalSize }` | 请求传输。⚠️ `transferId` 限定 `[A-Za-z0-9_-]{1,64}`（数据面 URL 与 `${id}:${name}` 组合键依赖该约束）；接收方只接受持有 file 授权设备发来的 offer |
+| `transfer.accept` | 接收方 → 发送方 | `{ transferId, token }` | **用户确认保存路径后**发送。`token` 由接收方生成（randomUUID），是数据面唯一凭证；保存目录是本机路径，不出网 |
 | `transfer.reject` | 接收方 → 发送方 | `{ transferId, reason }` | 拒绝或路径不可写 |
 | `transfer.chunk` | 双向 | HTTP 分块体，非 WS 消息 | 见第 5 节 |
 | `transfer.progress` | 接收方 → 发送方 | `{ transferId, receivedBytes }` | 节流推送（≥200ms） |
-| `transfer.complete` | 接收方 → 发送方 | `{ transferId, digest }` | 校验通过后发送 |
+| `transfer.complete` | 接收方 → 发送方 | `{ transferId, digests }` | 校验通过后发送。`digests` 是文件名 → 整体 SHA-256 的映射（多文件任务每文件一项） |
 | `transfer.cancel` | 双向 | `{ transferId, reason }` | 取消，已写入部分按策略处理 |
 | `transfer.error` | 双向 | `{ transferId, code, message }` | 失败，可重试的错误在 `code` 中标识 |
+
+**消息来源门禁**（实现期定型）：`transfer.accept / reject / cancel / complete` 都必须核对「连接身份 == 任务对端」，不匹配一律忽略。传输任务的 id 与 token 只对当事双方可见，其他连接（包括其他已配对设备）不得对别人的任务做任何操作。文件名由发送方经网络提供，接收方必须先收敛为基础名（剥掉任何路径成分）再拼接保存路径，含非法名（清洗后为空 / `.` / `..`）直接拒绝整个 offer。
 
 ---
 
@@ -153,10 +162,26 @@ GET    /linkspace/v1/transfer/:transferId/chunk?offset=N&length=M
   发送方据此从断点继续，而不是从 0 重传。
 - 接收方校验 `offset === 已写入字节`，不符返回 **409** 并带上当前偏移。
   直接追加会静默产生损坏文件，必须让发送方重新对齐。
+- **数据面鉴权**：每个请求必须带 `X-Device-Id` 与 `X-Transfer-Token`，
+  接收方核对「设备在信任清单且持有 file 授权」+「token 与该任务匹配」
+  两道闸。token 在 `transfer.accept` 时由接收方生成，把每台已配对设备
+  限制在它自己的任务里——没有 token 门禁，任何已配对设备都能探测并
+  污染其他任务的 `.part`。
+- **块级摘要必须校验**：非空 POST 必须携带与 body 一致的
+  `X-Chunk-Digest`（SHA-256 hex），不符返回 **400** 由发送方重传该块；
+  缺头视为非法请求。
+- **请求体上限**：单块 POST 体上限 32 MiB，超出返回 **413**；
+  GET 的 `length` 上限同为 32 MiB。
+- **取消与写入不竞态**：同一任务的分块写入串行化，取消时先摘除任务
+  路由、等在途写入排空，再删 `.part`（Windows 上打开中的句柄会让
+  删除进入 delete-pending，留下「已取消但 .part 还在」的残局）。
 - `transfer.complete` 携带每个文件的整体 SHA-256（文件名 → 摘要），
   接收方 `finalize` 前比对；大小或摘要不符一律删除 `.part` 并报错。
 - `finalize` 拒绝 `cancelled` / `failed` 状态的任务：取消与完成几乎同时
   发生时 complete 可能乱序到达，此时不能把半成品变成正式文件。
+- **配对请求挂起上限**：同时挂起的 `pair.request` 超过 8 个即返回
+  `RESOURCE_BUSY`——配对请求不需要任何前置授权就能发起，没有上限
+  的话任意连接都能刷出配对码污染接收方 UI。
 
 **覆盖策略**：同名文件默认重命名（`name (1).ext`），显式询问后才覆盖。不允许静默覆盖。
 

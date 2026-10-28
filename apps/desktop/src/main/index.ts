@@ -67,6 +67,8 @@ function createWindow(): void {
     show: false,
     webPreferences: {
       preload: resolvePreload(),
+      // preload 以 ESM(.mjs) 输出，而沙箱化 preload 只支持 CJS，因此
+      // 保持关闭沙箱；隔离由 contextIsolation + IPC 白名单承担
       sandbox: false,
       contextIsolation: true,
       nodeIntegration: false
@@ -78,6 +80,13 @@ function createWindow(): void {
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     shell.openExternal(url)
     return { action: 'deny' }
+  })
+
+  // 渲染层被注入后最常见的逃逸路径是导航到攻击者页面（preload 随之
+  // 被重新注入到新页面）。一律拦下，外链交给系统浏览器
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    event.preventDefault()
+    if (/^https?:/i.test(url)) void shell.openExternal(url)
   })
 
   const rendererUrl = process.env.ELECTRON_RENDERER_URL

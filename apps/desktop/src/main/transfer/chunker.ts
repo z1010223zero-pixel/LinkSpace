@@ -90,6 +90,25 @@ export async function writtenBytes(path: string): Promise<number> {
 }
 
 /**
+ * 清洗来自对端的文件名：剥掉全部路径成分，只留基础名。
+ *
+ * 文件名由发送方经网络提供（transfer.offer），不清洗的话
+ * `join(saveDir, name)` 会被 `..\` 序列拼出 saveDir 之外的写入路径。
+ * 手工按两种分隔符切分而不是用 path.basename：对端可能在别的平台上
+ * 发送，分隔符习惯与本机不同。
+ * 清洗后为空、为 . 或 .. 的名字直接拒绝整个 offer，而不是猜一个名字。
+ */
+export function sanitizeFileName(name: string): string {
+  const base = name.replace(/\\/g, '/').split('/').pop() ?? ''
+  const cleaned = base.trim()
+  if (!cleaned || cleaned === '.' || cleaned === '..') {
+    throw new Error(`非法文件名: ${JSON.stringify(name)}`)
+  }
+  // NTFS 文件名上限 255 个 UTF-16 码元，超长只会让落盘失败，提前截断
+  return cleaned.slice(0, 255)
+}
+
+/**
  * 生成不覆盖的保存路径：name (1).ext、name (2).ext …
  * 默认重命名而非询问，覆盖必须显式确认（方案 14.5、protocol.md 第 5 节）。
  */
