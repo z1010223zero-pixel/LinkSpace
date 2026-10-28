@@ -1,6 +1,7 @@
 # LinkSpace 通信协议 v0（草案）
 
-> 状态：草案，未实现。字段在实现中定型后回写本文件。
+> 状态：**已实现主体**（2026-10-28）。以下标注 ⚠️ 的三处是相对草案的**有意修正**，
+> 实现时发现原设计存在安全问题或语义错误，已在代码中改掉并在此记录原因。
 > 兼容性承诺：v1 发布前不保证兼容，v1 之后按第 8 节的版本协商规则演进。
 
 ---
@@ -70,10 +71,10 @@
 |---|---|---|---|
 | `device.announce` | 双向 | `{ displayName, deviceType, caps, pubkeyFingerprint }` | 建立连接后首次发送，声明身份与能力 |
 | `pair.request` | 发起方 → 接收方 | `{ displayName, deviceType, pubkeyFingerprint, pairingCode? }` | 配对码由接收方生成并展示 |
-| `pair.challenge` | 接收方 → 发起方 | `{ pairingCode, expiresAt }` | 要求用户输入配对码 |
-| `pair.approve` | 接收方 → 发起方 | `{ deviceId, trustScope }` | 用户确认后发送，含授权范围 |
+| `pair.challenge` | 接收方 → 发起方 | `{ expiresAt }` | 提示发起方「去要配对码」。⚠️ **不携带配对码本身**：配对码若经网络传输，任何能连上的人都可直接拿到，配对口令形同虚设。码只显示在接收方屏幕，由人工抄录到发起端 |
+| `pair.approve` | 接收方 → 发起方 | `{ deviceId, trustScope }` | 用户确认后发送。⚠️ `deviceId` 是**发送方自己**的 id（让对端知道是谁批准的），不是被批准的设备 id |
 | `pair.reject` | 接收方 → 发起方 | `{ reason }` | 用户拒绝或超时 |
-| `pair.revoke` | 双向 | `{ deviceId }` | 撤销信任，立即生效 |
+| `pair.revoke` | 双向 | `{ deviceId }` | 撤销信任，立即生效。⚠️ `deviceId` 是**撤销方自己**的 id（让对端知道该删掉谁的信任条目） |
 | `pair.error` | 双向 | `{ code, message }` | 配对失败，code 见第 7 节 |
 
 `trustScope` 显式列出本次授权的能力（如 `["file", "clipboard"]`），控制类能力默认不在其中，需二次授权。这实现了方案 2.2 的「单独管理每台设备的控制权限」。
@@ -145,6 +146,17 @@ GET    /linkspace/v1/transfer/:transferId/chunk?offset=N&length=M
 6. 任一方 `transfer.cancel` 或连接中断 → 进入恢复流程。
 
 **恢复**：接收方记录已确认的连续偏移 `committedOffset`。重连后从该偏移继续，无需重传整个文件。断点信息仅存于内存 + 传输临时目录，不写敏感历史。
+
+**已实现的补充规则**（实现中定型）：
+
+- 空体 POST 到 chunk 路由视为**偏移探针**，只回报 `committedOffset`，不写盘。
+  发送方据此从断点继续，而不是从 0 重传。
+- 接收方校验 `offset === 已写入字节`，不符返回 **409** 并带上当前偏移。
+  直接追加会静默产生损坏文件，必须让发送方重新对齐。
+- `transfer.complete` 携带每个文件的整体 SHA-256（文件名 → 摘要），
+  接收方 `finalize` 前比对；大小或摘要不符一律删除 `.part` 并报错。
+- `finalize` 拒绝 `cancelled` / `failed` 状态的任务：取消与完成几乎同时
+  发生时 complete 可能乱序到达，此时不能把半成品变成正式文件。
 
 **覆盖策略**：同名文件默认重命名（`name (1).ext`），显式询问后才覆盖。不允许静默覆盖。
 

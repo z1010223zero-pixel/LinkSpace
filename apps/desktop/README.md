@@ -27,6 +27,8 @@ npm run typecheck          # vue-tsc 类型检查
 npm run build              # electron-vite 构建
 npm run verify             # 无头验证：adb 枚举 + 会话启动/停止 + 进程清理
 npm run verify:transfer    # 无头验证：文件传输环路（加 -- --large 跑 1GB）
+npm run verify:pairing     # 无头验证：配对与信任清单（13 项）
+npm run verify:e2e         # 无头验证：发现→配对→传输→取消 端到端
 npm run clean              # 删除 out/
 ```
 
@@ -172,7 +174,10 @@ ELECTRON_MIRROR="https://npmmirror.com/mirrors/electron/" node node_modules/elec
   事件抛给上层，接收方清理依赖这条消息送达。真实链路上需经控制通道传输。
 - **块级摘要只在发送侧计算**：接收侧未校验，目前靠整体 SHA-256 兜底
   （验收项 4.6 未完成）。
+- **只能 Windows ↔ Windows**：Android 客户端（Kotlin）尚未开始
 - 设备布局拖拽、剪贴板同步未实现（属后续阶段）
+- 传输服务绑定 `0.0.0.0`，应改为仅局域网网卡
+- 界面里的「发送文件」用系统文件选择框，尚无拖拽发送
 - `platform.ts` 中保留了「已知 winget 安装路径」作为开发期兜底，**正式分发时必须移除**，改为随安装包提供 scrcpy
 - 无设置界面，所有参数硬编码
 - 日志只输出到控制台，未落盘（脱敏规则已写在 `log.ts` 注释中）
