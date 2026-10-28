@@ -5,7 +5,8 @@
 
 import { ipcMain, BrowserWindow } from 'electron'
 import { DeviceManager } from './device-manager'
-import { ScrcpyAdapter, StartOptions } from './scrcpy-adapter'
+import { ScrcpyAdapter } from './scrcpy-adapter'
+import type { StartOptions } from '../shared/types'
 import { locateBinaries } from './platform'
 import { log } from './log'
 

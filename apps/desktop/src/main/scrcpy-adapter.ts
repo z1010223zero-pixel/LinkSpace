@@ -16,6 +16,8 @@ import { EventEmitter } from 'node:events'
 import { existsSync } from 'node:fs'
 import { locateBinaries } from './platform'
 import { log, shortSerial } from './log'
+// StartOptions 必须来自共享契约，避免主进程与渲染层两处定义漂移
+import type { StartOptions } from '../shared/types'
 
 export type SessionState = 'starting' | 'running' | 'stopping' | 'stopped' | 'error'
 
@@ -43,19 +45,6 @@ export interface ScrcpySession {
   stoppedAt?: number
   exitCode?: number | null
   error?: AdapterError
-}
-
-export interface StartOptions {
-  maxSize?: number
-  /** 窗口标题，用于多会话标识 */
-  windowTitle?: string
-  windowX?: number
-  windowY?: number
-  windowWidth?: number
-  /** 是否显示触摸点（调试用） */
-  showTouches?: boolean
-  /** 屏幕保持常亮 */
-  stayAwake?: boolean
 }
 
 type Result<T> = { ok: true; value: T } | { ok: false; error: AdapterError }
