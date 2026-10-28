@@ -39,6 +39,32 @@ TwinDesk 是**最接近本项目定位**的参考实现（Electron、无云、�
 
 ---
 
+### 1.3 scrcpy 5.0.1 发行包实际组件（实测 2026-10-28）
+
+逐文件列出官方 Windows 发行包内容，作为再分发时的合规依据：
+
+| 文件 | 组件 | 版本 | 许可证 | 状态 |
+|---|---|---|---|---|
+| `scrcpy.exe` | scrcpy | 5.0.1 | Apache-2.0 | ✅ 已确认（LICENSE.txt 随包） |
+| `scrcpy-server` | scrcpy Android 端 | 5.0.1 | Apache-2.0 | ✅ 同源，733930 B，运行时推送到设备 |
+| `adb.exe` | Android Debug Bridge | 1.0.41 | Apache-2.0 | ✅ |
+| `AdbWinApi.dll` / `AdbWinUsbApi.dll` | ADB Windows API | — | Apache-2.0 | ✅ |
+| `SDL3.dll` | **SDL 3**（不是 SDL2） | 3.4.18 | zlib | ⚠️ 方案第四章写的是 SDL2，实际已升级为 SDL3 |
+| `libusb-1.0.dll` | libusb | 1.0 | LGPL-2.1 | ⚠️ 需随包附许可证 |
+| `avcodec-63.dll` | FFmpeg libavcodec | 63.1.102 | **取决于构建选项** | ⚠️ 待确认 |
+| `avformat-63.dll` | FFmpeg libavformat | 63 | 同上 | ⚠️ 待确认 |
+| `avutil-61.dll` | FFmpeg libavutil | 61 | 同上 | ⚠️ 待确认 |
+| `swresample-7.dll` | FFmpeg swresample | 7 | 同上 | ⚠️ 待确认 |
+
+**两个关键发现**：
+
+1. **发行包内只有一份 Apache-2.0 的 LICENSE.txt，不含 FFmpeg / SDL3 / libusb 的许可证文本。** 再分发 LinkSpace 时必须自行补齐这些组件的许可证与版权声明，否则构成合规缺口。
+2. **FFmpeg 的 LGPL/GPL 取决于构建选项。** scrcpy 官方发行版通常按 LGPL 配置构建（不含 x264 等 GPL-only 组件），但**必须核实后才能确定**，不能默认。核实方法：查看 scrcpy 官方构建配置或发布说明；或检查 avcodec 是否导出 GPL-only 编解码器。
+
+动态链接（均为 `.dll`）对再分发相对友好，但仍需履行署名与许可证随附义务。
+
+---
+
 ## 2. 发行路线决策（待定，阻塞多项工作）
 
 | 路线 | 允许的复用范围 | 代价 |
@@ -58,12 +84,8 @@ TwinDesk 是**最接近本项目定位**的参考实现（Electron、无云、�
 
 - [ ] **Input Leap LICENSE 全文**：读取仓库根目录 LICENSE，确认实际条款与例外（其历史上含 GPL-2 与例外声明）。
 - [ ] **deskflow 许可证细节**：确认是否有例外条款或双许可选项。
-- [ ] **scrcpy 发行包的实际依赖**：官方 Windows 发行版内含 FFmpeg、SDL2、libusb、ADB。需逐个记录：
-      - 组件版本
-      - 许可证（注意 FFmpeg 的 LGPL/GPL 取决于**构建选项**）
-      - 链接方式（动态/静态）
-      - 再分发条件
-- [ ] **scrcpy server（Android 端 apk）**：随发行版分发的 `scrcpy-server` 的许可证与来源版本。
+- [x] **scrcpy 发行包的实际依赖**：已核实，见下方 1.3
+- [x] **scrcpy server（Android 端）**：随发行版分发，733930 字节，与 scrcpy 同源（Apache-2.0）
 - [ ] **Electron 依赖树**：`node_modules` 全部直接/传递依赖的许可证（用 `license-checker` 或 `pnpm licenses list` 生成）。
 - [ ] **Vue 及前端依赖**：同上。
 - [ ] **Android 端依赖**：Kotlin/Compose 相关库逐个记录。

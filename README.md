@@ -13,10 +13,13 @@
 **阶段 0：技术尽调。** 骨架与文档已建立，尚未编写业务代码。
 
 - [x] 项目结构与设计文档
-- [x] 第三方许可证初步核实
-- [ ] scrcpy 投屏/控制/无线/多设备验证
-- [ ] Windows IddCx 虚拟显示器验证
+- [x] 第三方许可证核实（主要项）
+- [x] scrcpy 环境搭建与自动化验证（采集 / 无线 / 多设备 / 退出码）
+- [ ] scrcpy 人工验证项（鼠标键盘 / 中文输入 / 剪贴板 / 断网）
+- [ ] Windows IddCx 虚拟显示器验证（阻塞：本机未装 VS + WDK）
 - [ ] 发行路线确定（开源 vs 保留闭源选项）
+
+验证细节见 [`docs/technical-validation.md`](docs/technical-validation.md)。
 
 ---
 
