@@ -19,6 +19,7 @@ import type { AddressInfo } from 'node:net'
 import { existsSync } from 'node:fs'
 import { getDeviceCert } from './identity'
 import { readChunk, writtenBytes } from './chunker'
+import { inboundAllowed, isLanAddress } from '../net-scope'
 import { log, shortSerial } from '../log'
 
 export interface TransferRouteContext {
@@ -59,23 +60,57 @@ export interface TransferServerOptions {
 }
 
 /**
- * 解析默认监听地址。多网卡时返回 0.0.0.0 并给出提示语。
+ * 解析默认监听地址。
+ *
+ * 优先级：环境变量 LINKSPACE_BIND_IP > 唯一的局域网 IPv4 > 全部私有地址
+ * 里挑一个 > 回环。
+ *
+ * 关键变化：过去「多网卡」直接回落 0.0.0.0，等于把所有网卡（含 VPN、
+ * 虚拟网卡、可能可路由的地址）全部暴露。现在只要还能挑出一个私有地址，
+ * 就绑到具体地址；实在挑不出来才退回回环——那时本来也不在局域网上，
+ * 不该把端口开出去。
+ *
+ * 注意绑死单一地址在多网卡机器上仍有代价：mDNS 通告的地址可能不是监听的
+ * 那张网卡，对端会连不上。所以同时保留 0.0.0.0 的可选路径——由
+ * resolveBindAddress().note 说明，并始终叠加来源地址门禁（见 net-scope）。
  */
 export function resolveBindAddress(): { addr: string; note: string } {
   const override = process.env.LINKSPACE_BIND_IP
   if (override) return { addr: override, note: `环境变量 LINKSPACE_BIND_IP=${override}` }
+
   const v4 = new Set<string>()
   for (const list of Object.values(networkInterfaces())) {
     for (const ni of list ?? []) {
       if (ni.family === 'IPv4' && !ni.internal) v4.add(ni.address)
     }
   }
-  const all = [...v4]
-  if (all.length === 1) return { addr: all[0], note: `自动绑定局域网地址 ${all[0]}` }
-  if (all.length > 1) {
-    return { addr: '0.0.0.0', note: `检测到多个网卡（${all.join(', ')}），回落 0.0.0.0；可用 LINKSPACE_BIND_IP 收窄` }
+
+  const lan = [...v4].filter(isRoutableLanAddress)
+  if (lan.length === 1) {
+    return { addr: lan[0], note: `自动绑定局域网地址 ${lan[0]}` }
   }
-  return { addr: '0.0.0.0', note: '未检测到局域网 IPv4，回落 0.0.0.0' }
+  if (lan.length > 1) {
+    // 挑不出唯一的那张：监听全部地址，但入站一律过局域网门禁。
+    // 这是可访问性与暴露面的折中——门禁保证即便监听 0.0.0.0，
+    // 非局域网来源也进不来。
+    return {
+      addr: '0.0.0.0',
+      note: `检测到多个局域网地址（${lan.join(', ')}），监听全部并启用来源门禁；可用 LINKSPACE_BIND_IP 收窄`
+    }
+  }
+  return {
+    addr: '127.0.0.1',
+    note: '未检测到局域网 IPv4，仅监听回环——此时本设备对局域网不可见，可设 LINKSPACE_BIND_IP 覆盖'
+  }
+}
+
+/** 网卡地址是否为「可对外提供服务的局域网地址」，排除回环与链路本地 */
+function isRoutableLanAddress(ip: string): boolean {
+  if (!isLanAddress(ip)) return false
+  const o = ip.split('.').map(Number)
+  if (o[0] === 127) return false
+  if (o[0] === 169 && o[1] === 254) return false
+  return true
 }
 
 /**
@@ -113,6 +148,17 @@ export async function startTransferServer(
   // 真正的判定由上层按指纹与信任清单完成
   const server = createServer({ key, cert, requestCert: true, rejectUnauthorized: false }, (req, res) => {
     void handle(ctx, req, res)
+  })
+
+  // 来源地址门禁：在 TLS 握手完成、进入业务处理之前就掐断非局域网连接。
+  // 放在 secureConnection 而不是 request 上，是为了让 WebSocket 升级
+  // 之外的普通连接也尽早断开，少一次完整的握手开销。
+  // 注意这不会阻止后续 request 事件——它只是提前关掉 socket。
+  server.on('secureConnection', (socket) => {
+    if (!inboundAllowed(socket.remoteAddress)) {
+      log.warn(`拒绝非局域网来源的连接：${socket.remoteAddress ?? '(未知)'}（设 LINKSPACE_ALLOW_WAN=1 可放行）`)
+      socket.destroy()
+    }
   })
 
   return new Promise((resolve, reject) => {

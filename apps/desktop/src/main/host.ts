@@ -35,6 +35,12 @@ export interface HostOptions {
    * 两个 Host 共用一份缓存就会拿到同一张证书、同一个指纹。
    */
   cert?: DeviceCert
+  /**
+   * 数据面监听地址。留空时由 resolveBindAddress() 自动选局域网地址。
+   * 无头测试必须显式传 '127.0.0.1'：它们在同一进程内经回环互连，
+   * 而自动选择会绑到真实网卡，回环就访问不到了。
+   */
+  bind?: string
 }
 
 export interface HostEvents {
@@ -161,7 +167,8 @@ export class Host {
           this.trust.hasScope(deviceId, 'file') &&
           this.transfers.verifyToken(transferKey, token)
       },
-      cert
+      cert,
+      this.opts.bind ? { bind: this.opts.bind } : {}
     )
     return this.fileServer.port
   }

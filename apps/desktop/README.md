@@ -29,10 +29,25 @@ npm run verify             # 无头验证：adb 枚举 + 会话启动/停止 + �
 npm run verify:transfer    # 无头验证：文件传输环路（加 -- --large 跑 1GB）
 npm run verify:pairing     # 无头验证：配对与信任清单（13 项）
 npm run verify:e2e         # 无头验证：发现→配对→传输→取消 端到端
+npm run verify:layout      # 无头验证：设备卡片顺序持久化
+npm run verify:net         # 无头验证：局域网范围判定表
 npm run clean              # 删除 out/
 ```
 
-**四个 `verify` 都不需要 GUI**，可重复运行并给出断言结果，是回归测试的主要手段。
+**六个 `verify` 都不需要 GUI**，可重复运行并给出断言结果，是回归测试的主要手段。
+
+### 监听地址与来源门禁
+
+数据面与控制面共用同一个 TLS 端口，默认按以下顺序选监听地址：
+
+1. 环境变量 `LINKSPACE_BIND_IP`
+2. 唯一的局域网 IPv4（自动挑）
+3. 多个局域网地址时监听 `0.0.0.0`
+4. 一个都没有时只监听回环（此时本设备对局域网不可见）
+
+无论最终绑到哪个地址，**入站一律校验来源地址**：不属于 RFC1918 / 链路本地 /
+IPv6 ULA 范围的连接在 TLS 握手阶段直接断开。设 `LINKSPACE_ALLOW_WAN=1`
+可放行（跨网段调试用，日志会留痕）。理由见 `docs/threat-model.md` T0。
 
 ### 跨平台验证（Windows ↔ Android 真机）
 

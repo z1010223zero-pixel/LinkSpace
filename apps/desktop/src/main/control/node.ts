@@ -13,8 +13,29 @@
 
 import { createHash, randomFillSync, randomUUID } from 'node:crypto'
 import type { Server as HttpsServer } from 'node:https'
+import type { Duplex } from 'node:stream'
 import type { TLSSocket } from 'node:tls'
 import { WebSocketServer, WebSocket } from 'ws'
+import { inboundAllowed } from '../net-scope'
+import { log } from '../log'
+
+/**
+ * WebSocket 升级阶段的来源地址门禁。
+ *
+ * 数据面在 secureConnection 上已经拦过一次，但 upgrade 走的是另一条路：
+ * http.Server 的 upgrade 事件不经过 request 处理链，也不保证
+ * secureConnection 先到达。这里必须再判一次，否则非局域网来源仍能
+ * 通过控制通道建立长连接——门禁只要有一条路没堵住就等于没有。
+ */
+function guardInbound(socket: Duplex): boolean {
+  const remote = (socket as TLSSocket).remoteAddress
+  if (!inboundAllowed(remote)) {
+    log.warn(`拒绝非局域网来源的控制连接：${remote ?? '(未知)'}（设 LINKSPACE_ALLOW_WAN=1 可放行）`)
+    socket.destroy()
+    return false
+  }
+  return true
+}
 
 export const PROTOCOL_VERSION = 1
 export const HEARTBEAT_INTERVAL_MS = 5000
@@ -115,6 +136,7 @@ export class ControlNode {
   attach(httpServer: HttpsServer): void {
     this.wss = new WebSocketServer({ noServer: true })
     httpServer.on('upgrade', (req, socket, head) => {
+      if (!guardInbound(socket)) return
       if (!req.url?.startsWith('/linkspace/v1/control')) {
         socket.destroy()
         return
@@ -134,6 +156,7 @@ export class ControlNode {
     })
     this.wss = new WebSocketServer({ noServer: true })
     server.on('upgrade', (req, socket, head) => {
+      if (!guardInbound(socket)) return
       if (!req.url?.startsWith('/linkspace/v1/control')) {
         socket.destroy()
         return

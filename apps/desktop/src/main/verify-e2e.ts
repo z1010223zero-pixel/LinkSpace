@@ -74,13 +74,18 @@ async function main(): Promise<void> {
     displayName: 'E2E-Alpha',
     deviceType: 'win',
     dataDir: dirA,
-    cert: certA
+    cert: certA,
+    // 必须监听全部地址：本测试真走 mDNS，对端拿到的是本机局域网地址
+    // （如 192.168.x.x），绑死回环会让对端连不上。来源地址门禁仍然生效——
+    // 192.168.x.x 属于局域网，不会被拦。
+    bind: '0.0.0.0'
   })
   const B = new Host({
     displayName: 'E2E-Beta',
     deviceType: 'android-phone',
     dataDir: dirB,
-    cert: certB
+    cert: certB,
+    bind: '0.0.0.0'
   })
 
   // 收集事件
@@ -130,7 +135,8 @@ async function main(): Promise<void> {
       displayName: 'E2E-Gamma',
       deviceType: 'win',
       dataDir: join(workDir, 'C'),
-      cert: await makeCert()
+      cert: await makeCert(),
+      bind: '0.0.0.0'
     })
     await mkdir(join(workDir, 'C'), { recursive: true })
     await C.start()
