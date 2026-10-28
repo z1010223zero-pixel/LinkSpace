@@ -9,9 +9,11 @@
     "build": "electron-vite build",
     "typecheck": "vue-tsc --noEmit",
     "clean": "node -e \"fs.rmSync('out',{recursive:true,force:true})\"",
-    "verify": "node scripts/build-verify.mjs && node out/verify/verify.js"
+    "verify": "node scripts/build-verify.mjs && node out/verify/verify.js",
+    "verify:transfer": "node scripts/build-verify-transfer.mjs && node out/verify/verify-transfer.js"
   },
   "dependencies": {
+    "selfsigned": "^5.5.0",
     "vue": "^3.5.44"
   },
   "devDependencies": {

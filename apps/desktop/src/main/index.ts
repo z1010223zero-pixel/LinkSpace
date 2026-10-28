@@ -6,6 +6,9 @@ import { ScrcpyAdapter } from './scrcpy-adapter'
 import { registerIpc } from './ipc'
 import { locateBinaries } from './platform'
 import { log } from './log'
+import { TransferManager } from './transfer/manager'
+import { startTransferServer, type StartedServer } from './transfer/server'
+import { getDeviceCert } from './transfer/identity'
 
 // ---------- 单实例 ----------
 if (!app.requestSingleInstanceLock()) {
@@ -30,9 +33,11 @@ app.disableHardwareAcceleration()
 
 const adapter = new ScrcpyAdapter()
 const devices = new DeviceManager(adapter)
+const transfers = new TransferManager()
 
 let mainWindow: BrowserWindow | null = null
 let quitting = false
+let transferServer: StartedServer | null = null
 
 /** electron-vite 的 preload 输出扩展名随配置而变，这里做兼容探测 */
 function resolvePreload(): string {
@@ -85,8 +90,23 @@ app.whenReady().then(async () => {
   const b = locateBinaries()
   log.info(`LinkSpace 启动，scrcpy=${b.scrcpy}（来源 ${b.source}）`)
 
-  registerIpc(() => mainWindow, devices, adapter)
+  registerIpc(() => mainWindow, devices, adapter, transfers, () => transferServer?.port ?? 0)
   createWindow()
+
+  // 启动本机文件传输服务。端口由系统分配，真实设备上经 mDNS 通告
+  // （发现与配对尚未实现，见 docs/roadmap.md 阶段 2）。
+  try {
+    transferServer = await startTransferServer({
+      resolveIncoming: (id) => transfers.resolveIncoming(id),
+      resolveOutgoing: (id) => transfers.resolveOutgoing(id),
+      // 未实现配对前没有可信设备清单，这里一律拒绝，避免开一个无鉴权的口子
+      isKnownDevice: () => false
+    })
+    const { fingerprint } = await getDeviceCert()
+    log.info(`本机传输指纹 ${fingerprint}`)
+  } catch (err) {
+    log.error(`文件传输服务启动失败: ${String(err)}`)
+  }
 
   // 首次扫描设备
   await devices.refresh().catch((err) => log.error(`首次设备扫描失败: ${String(err)}`))
@@ -112,7 +132,10 @@ app.on('before-quit', (event) => {
   adapter
     .stopAll()
     .catch((err) => log.error(`清理会话失败: ${String(err)}`))
-    .finally(() => app.exit(0))
+    .finally(() => {
+      transferServer?.server.close()
+      app.exit(0)
+    })
 })
 
 app.on('window-all-closed', () => {

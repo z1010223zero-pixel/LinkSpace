@@ -17,10 +17,20 @@
 - [x] scrcpy 环境搭建与自动化验证（采集 / 无线 / 多设备 / 退出码）
 - [x] Electron 桌面原型：设备列表界面 + 投屏会话管理（`apps/desktop`）
 - [x] ADR-001 复审：Electron 37.10.3，340 MB 内存，继续采用
+
+**阶段 2：文件共享与配对 —— 进行中**
+
+- [x] 设备身份证书与 TLS 数据面（自签 + 指纹）
+- [x] 分块传输核心：进度 / 取消 / 断点续传 / 整体 SHA-256 校验 / 不覆盖命名
+- [x] 文件传输无头环路测试，21 项断言全过（含 1 GB，≈68.5 MB/s）
+- [ ] 局域网设备发现（mDNS）与配对授权 ← 下一步
+- [ ] 控制通道（WebSocket）：`transfer.offer` / `accept` / `cancel` 真正打通
+- [ ] 传输服务仅绑定局域网网卡（当前为 `0.0.0.0`）
 - [ ] scrcpy 人工验证项（鼠标键盘 / 中文输入 / 剪贴板 / 断网）
 - [ ] Windows IddCx 虚拟显示器验证（阻塞：本机未装 VS + WDK）
 - [ ] 发行路线确定（开源 vs 保留闭源选项）
 
+文件传输的已验证范围与缺口见 [`docs/mvp-acceptance.md`](docs/mvp-acceptance.md) 第 4.11 节。
 跑桌面端见 [`apps/desktop/README.md`](apps/desktop/README.md)（含 5 个本机环境踩坑与解法）。
 
 ---

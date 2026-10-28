@@ -8,6 +8,8 @@ import { DeviceManager } from './device-manager'
 import { ScrcpyAdapter } from './scrcpy-adapter'
 import type { StartOptions } from '../shared/types'
 import { locateBinaries } from './platform'
+import { TransferManager } from './transfer/manager'
+import { getDeviceCert } from './transfer/identity'
 import { log } from './log'
 
 export interface EnvInfo {
@@ -17,22 +19,34 @@ export interface EnvInfo {
   ready: boolean
 }
 
+export interface TransferInfo {
+  /** 本机传输服务监听端口，0 表示未启动 */
+  port: number
+  /** 本机身份证书指纹，配对时供用户人工核对 */
+  fingerprint: string
+}
+
 const CHANNELS = [
   'devices:list',
   'devices:refresh',
   'scrcpy:startFor',
   'scrcpy:stopFor',
   'scrcpy:sessions',
+  'transfer:list',
+  'transfer:cancelFor',
+  'transfer:info',
   'env:info',
   'ping'
 ] as const
 
-const EVENTS = ['devices:changed', 'sessions:changed'] as const
+const EVENTS = ['devices:changed', 'sessions:changed', 'transfers:changed'] as const
 
 export function registerIpc(
   getWindow: () => BrowserWindow | null,
   devices: DeviceManager,
-  adapter: ScrcpyAdapter
+  adapter: ScrcpyAdapter,
+  transfers: TransferManager,
+  getTransferPort: () => number
 ): void {
   const invoke = <T>(channel: string, handler: () => Promise<T> | T): void => {
     ipcMain.handle(channel, async () => {
@@ -74,6 +88,22 @@ export function registerIpc(
 
   invoke('scrcpy:sessions', () => adapter.list())
 
+  invoke('transfer:list', () => transfers.list())
+
+  invoke('transfer:info', async (): Promise<TransferInfo> => {
+    const { fingerprint } = await getDeviceCert()
+    return { port: getTransferPort(), fingerprint }
+  })
+
+  ipcMain.handle('transfer:cancelFor', async (_e, id: unknown) => {
+    if (typeof id !== 'string' || !id) {
+      return { ok: false as const, error: { code: 'INTERNAL', message: '缺少任务 ID', retryable: false } }
+    }
+    await transfers.cancel(id)
+    broadcast(getWindow, 'transfers:changed')
+    return { ok: true as const }
+  })
+
   invoke('env:info', (): EnvInfo => {
     const b = locateBinaries()
     return {
@@ -89,6 +119,7 @@ export function registerIpc(
   // 事件转发
   devices.on('changed', () => broadcast(getWindow, 'devices:changed'))
   adapter.on('changed', () => broadcast(getWindow, 'sessions:changed'))
+  transfers.on('changed', () => broadcast(getWindow, 'transfers:changed'))
 
   log.info(`IPC 已注册：${CHANNELS.length} 个 channel，${EVENTS.length} 类事件`)
 }

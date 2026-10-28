@@ -47,6 +47,41 @@ export interface EnvInfo {
   ready: boolean
 }
 
+// ---------- 文件传输 ----------
+
+export type TransferState =
+  | 'offered' // 已发起，等待对端确认
+  | 'accepted' // 对端已接受，准备/正在传输
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+
+export interface TransferFileView {
+  name: string
+  size: number
+  savePath?: string
+}
+
+export interface TransferTaskView {
+  id: string
+  direction: 'send' | 'receive'
+  peerId: string
+  state: TransferState
+  files: TransferFileView[]
+  totalSize: number
+  transferred: number
+  createdAt: number
+  finishedAt?: number
+  error?: string
+}
+
+export interface TransferInfo {
+  /** 本机传输服务监听端口，0 表示未启动 */
+  port: number
+  /** 本机身份证书指纹，配对时供用户人工核对 */
+  fingerprint: string
+}
+
 export interface IpcError {
   code: string
   message: string
@@ -65,6 +100,10 @@ export interface LinkSpaceApi {
   stopMirror(id: string): Promise<IpcResult<void>>
   listSessions(): Promise<SessionView[]>
   envInfo(): Promise<EnvInfo>
+  listTransfers(): Promise<TransferTaskView[]>
+  cancelTransfer(id: string): Promise<IpcResult<void>>
+  transferInfo(): Promise<TransferInfo>
   onDevicesChanged(cb: () => void): Unsubscribe
   onSessionsChanged(cb: () => void): Unsubscribe
+  onTransfersChanged(cb: () => void): Unsubscribe
 }

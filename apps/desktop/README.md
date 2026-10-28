@@ -1,6 +1,6 @@
 # apps/desktop — LinkSpace Windows 桌面端
 
-Electron + Vue 3 + TypeScript。当前是**可运行的原型**：能扫描局域网 Android 设备、启动/停止投屏会话。
+Electron + Vue 3 + TypeScript。当前是**可运行的原型**：能扫描局域网 Android 设备、启动/停止投屏会话，并内置了局域网文件传输服务（发现与配对尚未实现）。
 
 ---
 
@@ -23,13 +23,21 @@ npm run dev
 其他命令：
 
 ```bash
-npm run typecheck   # vue-tsc 类型检查
-npm run build       # electron-vite 构建
-npm run verify      # 无头验证：adb 枚举 + 会话启动/停止 + 进程清理
-npm run clean       # 删除 out/
+npm run typecheck          # vue-tsc 类型检查
+npm run build              # electron-vite 构建
+npm run verify             # 无头验证：adb 枚举 + 会话启动/停止 + 进程清理
+npm run verify:transfer    # 无头验证：文件传输环路（加 -- --large 跑 1GB）
+npm run clean              # 删除 out/
 ```
 
-**`npm run verify` 不需要 GUI**，可重复运行并给出断言结果，是回归测试的主要手段。
+**两个 `verify` 都不需要 GUI**，可重复运行并给出断言结果，是回归测试的主要手段。
+
+传输测试的可选参数：
+
+```bash
+npm run verify:transfer -- --large              # 追加 1 GB 大文件用例
+npm run verify:transfer -- --chunk=4194304      # 用生产默认 4MiB 块大小
+```
 
 ---
 
@@ -45,7 +53,13 @@ src/
 │   ├── device-manager.ts  设备与会话聚合（L2）
 │   ├── ipc.ts             IPC 网关（channel 白名单）
 │   ├── log.ts             脱敏日志
-│   └── verify-entry.ts    无头验证入口
+│   ├── verify-entry.ts    无头验证入口（投屏）
+│   ├── verify-transfer.ts 无头验证入口（文件传输环路）
+│   └── transfer/          文件传输
+│       ├── identity.ts    设备身份证书与指纹（自签，持久化到 userData）
+│       ├── chunker.ts     分块读写、摘要、.part 路径、不覆盖命名
+│       ├── server.ts      HTTPS 数据面服务与客户端（含连接复用）
+│       └── manager.ts     传输任务状态机与编排
 ├── preload/index.ts       渲染进程桥，只暴露白名单 API
 ├── renderer/              Vue 3 界面
 │   ├── App.vue
@@ -54,7 +68,8 @@ src/
 └── shared/types.ts        主进程与渲染进程的类型契约
 scripts/
 ├── dev.mjs                启动包装（见踩坑 1）
-└── build-verify.mjs       打包并运行无头验证
+├── build-verify.mjs       打包并运行投屏无头验证
+└── build-verify-transfer.mjs  打包并运行传输无头验证
 ```
 
 ---
@@ -120,6 +135,7 @@ ELECTRON_MIRROR="https://npmmirror.com/mirrors/electron/" node node_modules/elec
 | 主窗口 | 标题 `LinkSpace`，正常创建 |
 | 退出清理 | electron 0 残留、scrcpy 0 残留 |
 | adb 枚举 | 2 台设备（真机无线 + 模拟器） |
+| 文件传输 | 本机监听端口 2040，1 GB ≈ 68.5 MB/s（4 MiB 块） |
 
 **ADR-001 复审依据**：内存 340 MB 对 Electron 应用属正常水平，空闲 CPU 可忽略，**继续采用 Electron，不转向 Tauri**。若后续加入文件传输、WebRTC 等重负载后内存显著增长，需重新评估。
 
@@ -134,6 +150,9 @@ ELECTRON_MIRROR="https://npmmirror.com/mirrors/electron/" node node_modules/elec
 - 会话停止、进程树清理、无残留
 - 错误场景：设备不存在 → 退出码 1 且 stderr 可解析
 - 窗口标题/位置参数、硬件解码（见 `modules/scrcpy-adapter/README.md`）
+- 文件传输环路 21 项断言：内容一致性、0 字节文件、中文/空格/`#` 文件名、
+  同名重命名、多块、断点续传、传输中取消并清理 `.part`、
+  未授权设备 403、并发、1 GB 大文件
 
 **未验证（需人工操作手机）**：
 - 鼠标键盘控制、中文输入法、剪贴板同步
@@ -145,7 +164,15 @@ ELECTRON_MIRROR="https://npmmirror.com/mirrors/electron/" node node_modules/elec
 
 ## 已知限制
 
-- 设备布局拖拽、文件传输、剪贴板同步未实现（属后续阶段）
+- **设备发现与配对未实现**：传输服务已监听，但 `isKnownDevice` 恒为 false，
+  即当前不接受任何对端。这是刻意留的，不是 bug——配对建立后才有可信设备清单。
+- **传输服务绑定 `0.0.0.0`**：应改为仅绑定局域网网卡，否则会暴露到非目标网络
+  （方案 14.4「仅监听必要的接口和端口」）。配对实现时一并处理。
+- **`transfer.cancel` 未接入控制通道**：发送方取消时通过 `cancelRequested`
+  事件抛给上层，接收方清理依赖这条消息送达。真实链路上需经控制通道传输。
+- **块级摘要只在发送侧计算**：接收侧未校验，目前靠整体 SHA-256 兜底
+  （验收项 4.6 未完成）。
+- 设备布局拖拽、剪贴板同步未实现（属后续阶段）
 - `platform.ts` 中保留了「已知 winget 安装路径」作为开发期兜底，**正式分发时必须移除**，改为随安装包提供 scrcpy
 - 无设置界面，所有参数硬编码
 - 日志只输出到控制台，未落盘（脱敏规则已写在 `log.ts` 注释中）

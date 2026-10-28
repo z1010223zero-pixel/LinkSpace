@@ -336,3 +336,20 @@ button {
 .session-row__spacer {
   flex: 1;
 }
+
+.progress {
+  position: relative;
+  width: 120px;
+  height: 6px;
+  background: var(--border);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.progress__bar {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  border-radius: 999px;
+  transition: width 0.2s ease;
+}

@@ -11,6 +11,8 @@ import type {
   LinkSpaceApi,
   SessionView,
   StartOptions,
+  TransferInfo,
+  TransferTaskView,
   Unsubscribe
 } from '../shared/types'
 
@@ -36,8 +38,16 @@ const api: LinkSpaceApi = {
 
   envInfo: () => ipcRenderer.invoke('env:info') as Promise<EnvInfo>,
 
+  listTransfers: () => ipcRenderer.invoke('transfer:list') as Promise<TransferTaskView[]>,
+
+  cancelTransfer: (id: string) =>
+    ipcRenderer.invoke('transfer:cancelFor', id) as Promise<IpcResult<void>>,
+
+  transferInfo: () => ipcRenderer.invoke('transfer:info') as Promise<TransferInfo>,
+
   onDevicesChanged: (cb) => subscribe('devices:changed', cb),
-  onSessionsChanged: (cb) => subscribe('sessions:changed', cb)
+  onSessionsChanged: (cb) => subscribe('sessions:changed', cb),
+  onTransfersChanged: (cb) => subscribe('transfers:changed', cb)
 }
 
 contextBridge.exposeInMainWorld('linkspace', api)
