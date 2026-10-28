@@ -1,0 +1,14 @@
+# 统一换行符，避免 Windows 开发时 LF/CRLF 混用污染 diff
+* text=auto eol=lf
+
+# 二进制文件不做换行转换
+*.png binary
+*.jpg binary
+*.ico binary
+*.apk binary
+*.aar binary
+*.jar binary
+*.keystore binary
+*.sys binary
+*.dll binary
+*.exe binary
