@@ -32,7 +32,30 @@ npm run verify:e2e         # 无头验证：发现→配对→传输→取消 �
 npm run clean              # 删除 out/
 ```
 
-**两个 `verify` 都不需要 GUI**，可重复运行并给出断言结果，是回归测试的主要手段。
+**四个 `verify` 都不需要 GUI**，可重复运行并给出断言结果，是回归测试的主要手段。
+
+### 跨平台验证（Windows ↔ Android 真机）
+
+`scripts/xplat-probe.ts` 是跨平台探测器：以真实 Host 连接 Android 真机，
+走完整「连接 → 配对 → 传输 → 落盘校验」链路。设备侧操作（点「接收」按钮）
+由 `.toolchain/run-xplat-verify.sh` 用 uiautomator 定位并真实点击，不注入测试代码。
+
+```bash
+npm run probe:xplat        # 打包探测器
+bash ../../.toolchain/run-xplat-verify.sh   # 一键跑完整跨平台验证
+```
+
+探测器的目标与身份可经环境变量覆盖：
+
+| 变量 | 作用 |
+|---|---|
+| `LINKSPACE_TARGET_HOST` / `LINKSPACE_TARGET_PORT` | 对端 IP 与端口（应用重启后端口会变） |
+| `LINKSPACE_PROBE_HOME` | 探测器身份与信任的持久化目录，默认 `/tmp/linkspace-probe-home` |
+| `LINKSPACE_PAIR_CODE_FILE` | 配对码文件路径，驱动脚本从 logcat 读到后写入 |
+
+已验证（2026-10-29，联想平板 TB710FU / Android 16）：
+配对成功 → offer → 点击接收 → 分块推送 → 整体 SHA-256 校验一致 → 落盘 6400 字节，
+连续多轮 `completed`，设备 ID 跨轮稳定。
 
 传输测试的可选参数：
 
