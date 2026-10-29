@@ -18,13 +18,21 @@
 | 前台服务保活 + 退出语义 + README 刷新 | 0d0f281 |
 | handlePairRequest 参数遮蔽吸收（对齐 A 端 15dff8a） | 38cef59 |
 | TLS 服务端客户端证书放行 + 信封 §3 语义校验 | f547ba3 |
-| 走查驱动接收器（仅 debug 构建）+ 移交清单进展 | e2bd219 → 本计划提交 |
+| 走查驱动（am start 主通道）+ .gitignore Debug/ 反排除 | e2bd219 → ce0bcd7 |
 
-远控全流程走查（2026-10-30）：**通过**。会话建立 / accept / move 坐标映射
-（3200×2000 → 1920×1080 逐点核对）/ click / wheel / key / stop+releaseAll
-全部在真实 TLS 链路验证。唯一未覆盖：真实手指 → MotionEvent → pointerInput
-映射——ZUI 安全门屏蔽 adb 触摸注入，已用仅 debug 的广播驱动器替代验证
-编解码全链路（见 DebugControlReceiver，release 不含）。
+## 0.1 执行进展（当日累计，均已在 master）
+
+| 任务 | 提交 | 结论 |
+|---|---|---|
+| 远控全流程真机走查 | ce0bcd7 | 通过：会话建立 / move 坐标映射逐点核对 / click / wheel / key / stop+releaseAll |
+| T1 剪贴板开关（默认关+持久化）+ 抑制窗口加锁 | 9c75ced | 通过：真机开关跨重启保持（截图证据） |
+| T2 finalize 两阶段落盘 + T3 死权限清理 | 39937dd | 通过：多文件接收走新路径落盘成功 |
+| T4 Discovery 软过期 | 5ec5036 | 通过：真机日志见「软过期移除」实际生效 |
+| T5 Identity 后台初始化 | ceb1c66 | 通过：启动线程与主线程分离（日志线程号证据） |
+| T6 第 6 组文件双向走查 | 615c3fc | 通过：下行 1MB 两次推送完成、上行 512KB 两次完成、**SHA-256 双向逐字节一致** |
+| T6 第 7 组剪贴板接收向 | 615c3fc | 通过：scope 门禁路径收到 20 字符 clipboard.share |
+
+第 7 组发送向与「真实手指触控」见 §1 T7（平台约束/需人工）。
 
 ---
 
