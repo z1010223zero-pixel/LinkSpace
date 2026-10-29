@@ -110,15 +110,39 @@ class Discovery(private val context: Context) {
         }
     }
 
+    /**
+     * 确保组播锁已持有。
+     *
+     * 锁不只是「收组播」需要——`registerService` 的通告同样走组播发送路径，
+     * 锁未持有时通告静默发不出去（本机日志显示 onServiceRegistered 成功，
+     * 但对端一个包都收不到）。所以 advertise 与 start 都要保证锁在位，
+     * 不能依赖调用方记住顺序。
+     */
+    private fun ensureMulticastLock() {
+        if (multicastLock?.isHeld == true) return
+        multicastLock = wifi.createMulticastLock("linkspace-mdns").apply {
+            setReferenceCounted(false)
+            acquire()
+        }
+    }
+
     /** 通告本机存在。TXT 记录只含公开非身份信息 */
     fun advertise(port: Int, caps: List<String>, paired: Boolean) {
+        // 先拿锁再通告：顺序反了会让通告发不出去，且不报错
+        ensureMulticastLock()
         val info = NsdServiceInfo().apply {
             serviceName = "LinkSpace-${LinkSpaceService.displayName}"
             serviceType = Protocol.SERVICE_TYPE
             setPort(port)
             // NsdManager 的 TXT 值不能含 '=' 且总长受限，保持简短。
             // 注意 API 收的是 String 而非 ByteArray。
+            //
+            // ver 与 port 必须有：桌面端 parseTxt 用 ver !== '1' 直接拒收，
+            // 缺了它 Windows 能收到组播应答却发现不了本机——
+            // 底层 mDNS 是通的，卡在解析层，现象极具迷惑性。
+            setAttribute("ver", Protocol.VERSION.toString())
             setAttribute("id", LinkSpaceService.deviceIdPrefix)
+            setAttribute("port", port.toString())
             setAttribute("type", LinkSpaceService.deviceType)
             setAttribute("caps", caps.joinToString(","))
             setAttribute("paired", if (paired) "1" else "0")
@@ -134,10 +158,7 @@ class Discovery(private val context: Context) {
         if (running) return
         running = true
         // 没有组播锁，NsdManager 在部分设备上收不到任何应答
-        multicastLock = wifi.createMulticastLock("linkspace-mdns").apply {
-            setReferenceCounted(false)
-            acquire()
-        }
+        ensureMulticastLock()
         nsd.discoverServices(Protocol.SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, discoveryListener)
     }
 

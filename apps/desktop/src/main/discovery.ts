@@ -12,9 +12,59 @@
 //   - 服务名中的显示名必须过滤，否则用户把机器名改成含点或反斜杠的字符串
 //     就能污染 mDNS 应答。
 
+import { networkInterfaces } from 'node:os'
 import { Bonjour, Browser, type Service } from 'bonjour-service'
+import { log } from './log'
 
 export const SERVICE_TYPE = 'linkspace'
+
+/**
+ * 选出用于 mDNS 组播的局域网网卡地址。
+ *
+ * 与 `resolveBindAddress()` 的判据**刻意不同**：那里把 CGNAT 段（100.64/10）
+ * 算作「不可公开路由」所以放行，而组播网卡必须选真正能跑 mDNS 的那张。
+ * 100.64/10 是运营商级 NAT 段，虚拟网卡（Tailscale、ZeroTier 等）常用它，
+ * 选中的结果就是「能收到突发通告但查不过去」——正是本次要修的现象。
+ *
+ * 选择顺序：环境变量 > 192.168.x > 10.x > 172.16–31.x。
+ * 多个同类地址时取第一个并告警：这一步选错发现功能会整体失效，
+ * 宁可说出来也不要静默。
+ */
+function pickLanInterface(): string | undefined {
+  const override = process.env.LINKSPACE_BIND_IP
+  if (override) return override
+
+  const scored: Array<{ addr: string; score: number }> = []
+  for (const list of Object.values(networkInterfaces())) {
+    for (const ni of list ?? []) {
+      if (ni.family !== 'IPv4' || ni.internal) continue
+      const o = ni.address.split('.').map(Number)
+      if (o.length !== 4 || o.some((n) => !Number.isFinite(n) || n < 0 || n > 255)) continue
+      if (o[0] === 127) continue // 回环
+      if (o[0] === 169 && o[1] === 254) continue // 链路本地
+      if (o[0] === 100 && o[1] >= 64 && o[1] <= 127) continue // CGNAT，不能跑 mDNS
+      let score: number
+      if (o[0] === 192 && o[1] === 168) score = 3
+      else if (o[0] === 10) score = 2
+      else if (o[0] === 172 && o[1] >= 16 && o[1] <= 31) score = 1
+      else continue // 其余一律不当局域网
+      scored.push({ addr: ni.address, score })
+    }
+  }
+
+  if (scored.length === 0) {
+    log.warn('未找到可用的局域网 IPv4 网卡，mDNS 将使用默认接口（可能发现不到设备）')
+    return undefined
+  }
+  // 分数高的优先；同分保持系统枚举顺序（稳定，不随运行变化）
+  scored.sort((a, b) => b.score - a.score)
+  const best = scored[0]
+  const sameGrade = scored.filter((s) => s.score === best.score).map((s) => s.addr)
+  if (sameGrade.length > 1) {
+    log.warn(`检测到多个同级局域网地址（${sameGrade.join(', ')}），mDNS 使用 ${best.addr}；可用 LINKSPACE_BIND_IP 覆盖`)
+  }
+  return best.addr
+}
 
 export type DeviceType = 'win' | 'android-phone' | 'android-tablet'
 
@@ -137,7 +187,17 @@ export class Discovery {
     if (this.started) return
     this.started = true
 
-    this.bonjour = new Bonjour()
+    // 必须显式指定组播网卡。
+    // multicast-dns 的 allInterfaces() 不排除回环地址（判据只有 isIPv4），
+    // 会把 127.0.0.1 也 addMembership；而 defaultInterface() 在 Windows 上
+    // 返回 0.0.0.0，setMulticastInterface('0.0.0.0') 让系统自选接口。
+    // 多网卡机器上选中的往往不是局域网那张，结果是：能收到别人突发式
+    // 的通告（组播包广播到所有接口），但主动查询发不到对端所在的网段，
+    // browser 永远发现不了服务。
+    // 传入 interface 后，库只对该地址 addMembership 并用它发组播。
+    // interface 在运行时有支持（mdns-server 把 opts 原样透传给 multicast-dns），
+    // 但 bonjour-service 的 TS 类型没声明它，这里显式断言并说明原因
+    this.bonjour = new Bonjour({ interface: pickLanInterface() } as Record<string, unknown>)
     this.publishSelf()
 
     // find 返回 Browser，直接用它的 up/down 事件。
