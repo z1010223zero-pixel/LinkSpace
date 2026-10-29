@@ -290,12 +290,42 @@ export class PairingCoordinator {
   }
 
   /**
-   * 发起配对并等待用户在对端确认。
-   * 对端确认后 resolve 出信任条目；被拒绝/超时则 reject。
+   * connect() 发出 device.announce 后立即返回，调用方很可能在对端
+   * hello 返回前就发起配对（UI 点击快于网络 RTT）。此时等待身份到达
+   * 而不是立即报错——报错后 UI 按钮消失，用户无从恢复（真机踩过）。
    */
-  requestPairing(conn: Connection): Promise<TrustEntry> {
+  private readonly identityWaiters = new Map<Connection, Array<() => void>>()
+
+  private waitIdentity(conn: Connection, timeoutMs = 8000): Promise<boolean> {
+    if (this.peers.has(conn)) return Promise.resolve(true)
+    return new Promise((resolve) => {
+      const done = (arrived: boolean): void => {
+        clearTimeout(timer)
+        const ws = this.identityWaiters.get(conn)?.filter((w) => w !== wake)
+        if (ws?.length) this.identityWaiters.set(conn, ws)
+        else this.identityWaiters.delete(conn)
+        resolve(arrived)
+      }
+      const wake = (): void => done(true)
+      const timer = setTimeout(() => done(false), timeoutMs)
+      const ws = this.identityWaiters.get(conn) ?? []
+      ws.push(wake)
+      this.identityWaiters.set(conn, ws)
+    })
+  }
+
+  /** 对端身份已在 handleAnnounce 注册完毕，唤醒等它的 requestPairing */
+  private flushIdentityWaiters(conn: Connection): void {
+    this.identityWaiters.get(conn)?.forEach((wake) => wake())
+    this.identityWaiters.delete(conn)
+  }
+
+  async requestPairing(conn: Connection): Promise<TrustEntry> {
     if (this.awaitingApprove.has(conn)) {
       return Promise.reject(new Error('该连接已有配对请求在进行中'))
+    }
+    if (!(await this.waitIdentity(conn))) {
+      return Promise.reject(new Error('连接尚未完成身份声明（对端未响应），请稍后重试'))
     }
     const peer = this.peers.get(conn)
     if (!peer) return Promise.reject(new Error('连接尚未完成身份声明，无法配对'))
@@ -389,6 +419,8 @@ export class PairingCoordinator {
       })
       conn.peerId = peerId
     }
+    // 身份注册完成，唤醒可能在等它的 requestPairing
+    this.flushIdentityWaiters(conn)
 
     // 回应自己的身份声明，让对方也知道我们是谁。
     // 每个连接只回一次，否则两边会无限互弹 announce。
