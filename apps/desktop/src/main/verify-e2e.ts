@@ -113,9 +113,8 @@ async function main(): Promise<void> {
     // ---------- 2. 配对 ----------
     console.log('\n2. 配对')
     const conn = await A.connect(found)
-    await waitFor(() => (conn.peerId === B.id ? conn : undefined))
-    check('连接后完成身份声明', conn.peerId === B.id)
-
+    // 故意不等身份声明就发起配对：复现 UI「点得快于网络 RTT」的真实
+    // 时序（曾报「连接尚未完成身份声明」），requestPairing 应内部等待
     const pairingPromise = A.requestPairing(conn)
     const pending = await waitFor(() => pairRequests.find((p) => p.peerId === A.id))
     check('B 收到配对请求', Boolean(pending))
