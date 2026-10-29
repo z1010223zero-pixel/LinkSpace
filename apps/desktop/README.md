@@ -32,10 +32,24 @@ npm run verify:e2e         # 无头验证：发现→配对→传输→取消 �
 npm run verify:layout      # 无头验证：设备卡片顺序持久化
 npm run verify:net         # 无头验证：局域网范围判定表
 npm run verify:clipboard   # 无头验证：剪贴板回环抑制
+npm run verify:mdns        # mDNS 互通验证（需 Android 真机在线）
 npm run clean              # 删除 out/
 ```
 
-**七个 `verify` 都不需要 GUI**，可重复运行并给出断言结果，是回归测试的主要手段。
+**前七个 `verify` 都不需要 GUI**，可重复运行并给出断言结果，是回归测试的主要手段。
+`verify:mdns` 例外：它必须有 Android 设备在同一局域网，否则必然 FAIL，
+单独跑而不进全套回归。
+
+### mDNS 组播网卡选择
+
+组播网卡必须显式指定，不能交给库自己选。`multicast-dns` 的
+`allInterfaces()` 不排除回环地址，`defaultInterface()` 在 Windows 上返回
+`0.0.0.0` 让系统自选——多网卡机器上选中的往往不是局域网那张，
+结果是「能收到突发通告但查询发不出去」。
+
+选择顺序：`LINKSPACE_BIND_IP` > 192.168.x > 10.x > 172.16–31.x。
+**CGNAT 段（100.64/10）被刻意排除**：`resolveBindAddress()` 放行它是因为
+它不可公开路由，但组播不能用它跑。这两处判据不同是故意的，改前先读注释。
 
 ### 监听地址与来源门禁
 

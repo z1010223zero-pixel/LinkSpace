@@ -8,8 +8,8 @@
 ## 0. 一句话现状
 
 **局域网多设备协作工具已跑通核心链路**：Windows 桌面端 ↔ Android 平板之间
-能发现、配对、双向传文件（含校验/取消）、双向同步剪贴板。约 9000 行代码
-（桌面 6800 + Android 2300）+ 1700 行设计文档，17 个提交。
+能发现（mDNS 双向互通）、配对、双向传文件（含校验/取消）、双向同步剪贴板。
+约 9000 行代码（桌面 6800 + Android 2300）+ 1700 行设计文档，18 个提交。
 阶段 2（文件共享与配对）主体完成，阶段 3（体验完善）开了个头。
 
 **还没做的**：Android 主动发送文件、跨电脑键鼠共享、扩展屏（IddCx）、
@@ -44,10 +44,12 @@ npm run verify:pairing     # 配对与信任清单
 npm run verify:e2e         # 发现→配对→传输→取消→剪贴板 全链路
 npm run verify:layout      # 设备顺序持久化
 npm run verify:net         # 局域网范围判定表
+npm run verify:mdns        # mDNS 互通（需 Android 真机在线）
 ```
 
-**全部不需要 GUI、不需要真机**，可重复运行并给出 PASS/FAIL。
+**前七项都不需要 GUI、不需要真机**，可重复运行并给出 PASS/FAIL。
 `verify:e2e` 是覆盖最全的一个，改了传输/配对/剪贴板一定跑它。
+`verify:mdns` 例外，它必须有 Android 在同一局域网，单独跑。
 
 ### 1.3 安全边界有三道，缺一不可
 
@@ -154,8 +156,7 @@ LinkSpace/
 - 大文件（>100 MB）、断点续传在 Android 侧的行为、传输中途杀应用的 `.part` 清理
 - 多设备同时连接
 - scrcpy 的鼠标/键盘/中文输入/断网：见 `scrcpy-manual-checklist.md`，28 条中 26 条待人工
-- mDNS 跨平台互通（Windows 未发现 Android 通告）：跨平台测试用直连 IP 绕过，
-  已记录为非阻塞问题，但**产品化前必须解决**
+- mDNS 跨平台互通：**已修复**（见 4.2），`npm run verify:mdns` 双向验证通过
 
 ---
 
@@ -165,19 +166,34 @@ LinkSpace/
 
 ### 4.1 Android 发送端（任务 #22）
 
-当前 Android 只能收。要补：UI 选文件 → 主动连接桌面端 → 推分块。
-桌面端数据面已有 GET 路由（`resolveOutgoing`），所以技术上可行。
+当前 Android 只能收文件，剪贴板已双向。要补：UI 选文件 → 主动连接桌面端
+→ 推分块。桌面端数据面已有 GET 路由（`resolveOutgoing`），技术上可行。
 工作量估计 3–5 人日，含真机验证。
 
 **注意**：Android 侧 `TransferServer` 目前只有接收路径，
 发送需要新增 `registerOutgoing` 与一个 HTTPS 客户端。
 参考桌面端 `transfer/manager.ts` 的 `push()` 实现。
 
-### 4.2 mDNS 互通（**建议提前**）
+**mDNS 已通之后这一步比原先估计简单**：不必再手工传 IP 与端口，
+直接走发现列表即可。
 
-这是产品化的硬门槛：设备之间互相发现不了，其他功能都无从谈起。
-当前 Windows 的 bonjour-service 收不到 Android 的 NsdManager 通告。
-已知现象但未定位根因，建议投入 1–2 天专项排查。
+### 4.2 mDNS 互通 —— 已修复（2026-10-29）
+
+曾是产品化的硬门槛，现已解决，双向发现均通过（`npm run verify:mdns`）。
+问题是**三层叠加**，每层单独的表现都是「底层 mDNS 通、上层发现不了」：
+
+1. **Android 组播锁顺序**：`advertise()` 在 `start()` 之前调用，而
+   `MulticastLock` 在 `start()` 里才拿。通告同样走组播发送路径，
+   锁未持有时通告静默丢失——本机日志显示注册成功，对端零收到。
+2. **multicast-dns 的网卡选择**：`allInterfaces()` 不排除回环，
+   `defaultInterface()` 在 Windows 上返回 `0.0.0.0` 让系统自选。
+   本机因此选中 CGNAT 段（100.64/10，虚拟网卡在用），查询发不到局域网。
+3. **Android 的 TXT 缺 `ver` 字段**：桌面端 `parseTxt` 用 `ver !== '1'`
+   直接拒收。bonjour 底层收到了应答，但 `Discovery.handleService` 直接 return。
+
+**残留风险**：网卡选择依赖 `192.168 > 10 > 172.16-31` 的优先级。
+换网络环境（例如公司 10.x 网段 + 虚拟网卡同在）时可能需要
+`LINKSPACE_BIND_IP` 手动指定。这一点没有自动化测试覆盖。
 
 ### 4.3 安装包与合规（任务 #26、#27）
 
@@ -210,12 +226,29 @@ electron-builder 出 NSIS 安装包；SBOM 用 `license-checker` 生成，
    绑回环会让对端连不上。而 `verify:transfer` 走直连，绑 127.0.0.1 即可。
 5. **BouncyCastle 不能显式指定 provider**：系统内置的是重打包内部类。
 6. **Gradle 官方源 TLS 吊销检查失败**：用腾讯云镜像。
-6. **mDNS 必须拿组播锁**：`WifiManager.MulticastLock`，
-   不加的话 NsdManager 静默收不到应答且不报错。
-7. **`push()` 取消后仍正常 resolve**：调用方必须核对 `state !== 'completed'`
+7. **mDNS 组播锁的获取顺序**：`advertise()` 也走组播发送路径，
+   必须在拿锁**之后**调用。顺序反了通告静默丢失且不报错。
+8. **`push()` 取消后仍正常 resolve**：调用方必须核对 `state !== 'completed'`
    再发 `transfer.complete`，否则半成品会被落盘。
-8. **chunk 路由的键格式**：`transferId:fileName`，按第一个冒号拆分。
+9. **chunk 路由的键格式**：`transferId:fileName`，按第一个冒号拆分。
    Android 曾按裸 transferId 键控导致 404。
+
+### mDNS 不通时的排查顺序
+
+这套顺序是 2026-10-29 修三层叠加问题时总结的，按序做能少走弯路：
+
+```
+1. 组播层通不通？     node out/verify/mdns-diag.cjs
+                     收不到任何包 → 网卡/组播问题，不是代码问题
+2. 包里的名字对不 对？node out/verify/mdns-records.cjs
+                     看 PTR 记录名是否为 _linkspace._tcp.local
+3. 查询有没有应答？   node out/verify/mdns-query.cjs
+                     手动发查询，有应答说明对端活着
+4. 带 interface 通不通？node out/verify/mdns-iface-test.cjs 192.168.x.x
+                     通 → 问题在网卡选择；不通 → 问题在 interface 本身
+5. 最后才看解析层     npm run verify:mdns
+                     前四步都过还发现不了 → TXT 字段缺失（ver/port）
+```
 
 ---
 
@@ -238,11 +271,15 @@ feat(android): 剪贴板同步与 offer 信任门禁修复
 
 1. **Android 的 WebSocketConnection 是手写的 RFC 6455 子集**，
    只有真机联调验证，缺单元测试。这是风险最高的一块。
-2. **mDNS 互通缺口未定位**（见 4.2）。
+2. **mDNS 网卡选择依赖优先级启发**（192.168 > 10 > 172.16-31）。
+   换网络环境时可能需要 `LINKSPACE_BIND_IP` 手动指定，无自动化测试覆盖。
 3. **`verify:transfer` 的 `--large` 用例**（1 GB）跑得慢，平时可不跑。
 4. **Android 无前台服务**：应用退到后台可能被回收导致传输中断。
 5. **scrcpy 的 GPU 规避配置**（`--in-process-gpu`）是本机特有的，
    疑与 ToDesk 虚拟显示驱动冲突，排查到根因后应移除。
+6. **mDNS 诊断脚本在 `out/verify/` 下未纳入版本控制**：
+   `mdns-diag.cjs` / `mdns-records.cjs` / `mdns-query.cjs` / `mdns-iface-test.cjs`
+   是排查时临时写的，重建 out/ 就会丢。若还要继续排查，先把它们移到 scripts/。
 
 ---
 
@@ -252,8 +289,8 @@ feat(android): 剪贴板同步与 offer 信任门禁修复
 |---|---|
 | 1 | 读 `docs/architecture.md` + `docs/protocol.md`，跑通七项无头测试 |
 | 2 | 读 `host.ts` 与 `LinkSpaceService.kt`，对照理解两端职责 |
-| 3 | 跑 `run-xplat-verify.sh` 与 `run-clip-verify.sh`，亲手看一遍真机链路 |
-| 4 | 处理 Android 发送端（#22），或先攻 mDNS 互通 |
+| 3 | 跑 `run-xplat-verify.sh`、`run-clip-verify.sh`、`verify:mdns`，亲手看真机链路 |
+| 4 | 处理 Android 发送端（#22）——mDNS 已通，它比原先估计的简单 |
 | 5 | 按 `scrcpy-manual-checklist.md` 逐条人工验证，把 ⬜ 填掉 |
 
 **原则**：任何「已验证」的结论都必须有对应证据（测试输出或日志），
