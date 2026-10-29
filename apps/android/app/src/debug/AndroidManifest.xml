@@ -1,8 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 仅 debug 构建追加的清单：走查驱动接收器。release 源集不含本文件 -->
+<!-- 仅 debug 构建追加的清单：走查驱动入口。release 源集不含本文件 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <application>
+        <!-- 主入口：am start 直达，不受广播投递管控影响 -->
+        <activity
+            android:name=".DebugEntryActivity"
+            android:exported="true"
+            android:theme="@android:style/Theme.NoDisplay" />
+        <!-- 备用：广播通道（部分 ROM 延迟投递，仅兼容用） -->
         <receiver
             android:name=".DebugControlReceiver"
             android:exported="true">
@@ -10,6 +16,8 @@
                 <action android:name="cn.linkspace.client.DEBUG_REQUEST_INPUT" />
                 <action android:name="cn.linkspace.client.DEBUG_SEND_EVENTS" />
                 <action android:name="cn.linkspace.client.DEBUG_STOP_INPUT" />
+                <action android:name="cn.linkspace.client.DEBUG_SEND_FILE" />
+                <action android:name="cn.linkspace.client.DEBUG_AUTO_ACCEPT" />
             </intent-filter>
         </receiver>
     </application>
