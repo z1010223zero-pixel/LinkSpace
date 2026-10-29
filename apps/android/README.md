@@ -1,7 +1,7 @@
 # apps/android — LinkSpace Android 客户端
 
-Kotlin + Jetpack Compose。**当前是接收方**：通告自身、接受配对、接收文件。
-投屏与控制由桌面端 scrcpy 经 adb 完成，不经过本应用。
+Kotlin + Jetpack Compose。**文件是接收方**（通告自身、接受配对、接收文件），
+**剪贴板已双向**。投屏与控制由桌面端 scrcpy 经 adb 完成，不经过本应用。
 
 ## 职责
 
@@ -103,9 +103,12 @@ API 要求从一个 KeyStore InputStream 构造，而我们的证书是运行时
 
 ## 已知限制
 
-- **只做接收方**：不主动连接桌面端推送文件
+- **文件只做接收方**：不主动连接桌面端推送文件（剪贴板已是双向）
 - 保存目录固定为 `getExternalFilesDir(null)/LinkSpace`，未做用户选择
 - 界面没有发送文件的入口
+- **剪贴板同步只在前台有效**：Android 10 起后台应用读不到剪贴板
+  （不是权限问题，申请也拿不到）。因此同步挂在 `MainActivity.onResume/onPause`
+  之间，退到后台就停。这是平台约束，不是缺陷。
 - 无前台服务，应用被切到后台可能被系统回收导致传输中断
 
 ## 待定

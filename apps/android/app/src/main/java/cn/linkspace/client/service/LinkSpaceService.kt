@@ -111,13 +111,14 @@ class LinkSpaceService private constructor(private val appContext: Context) {
         }
 
         discovery.onChange { list -> _discovered.value = list }
-        discovery.advertise(srv.port, listOf("file"), trust.list().isNotEmpty())
+        discovery.advertise(srv.port, Protocol.DEFAULT_GRANT_SCOPE, trust.list().isNotEmpty())
         discovery.start()
 
         Log.i(TAG, "LinkSpace 服务已启动，id=$deviceIdPrefix，端口=${srv.port}")
     }
 
     fun stop() {
+        disableClipboardSync()
         discovery.stop()
         discovery.stopAdvertising()
         server?.stop()
@@ -150,7 +151,7 @@ class LinkSpaceService private constructor(private val appContext: Context) {
                             "payload", JSONObject().apply {
                                 put("displayName", displayName)
                                 put("deviceType", deviceType)
-                                put("caps", org.json.JSONArray(listOf("file")))
+                                put("caps", org.json.JSONArray(Protocol.DEFAULT_GRANT_SCOPE))
                                 put("fingerprint", fingerprint)
                             }
                         )
@@ -190,7 +191,7 @@ class LinkSpaceService private constructor(private val appContext: Context) {
                                     put("displayName", displayName)
                                     put("deviceType", deviceType)
                                     put("fingerprint", fingerprint)
-                                    put("scope", org.json.JSONArray(listOf("file")))
+                                    put("scope", org.json.JSONArray(Protocol.DEFAULT_GRANT_SCOPE))
                                 }
                             )
                         }
@@ -214,6 +215,21 @@ class LinkSpaceService private constructor(private val appContext: Context) {
             }
 
             Protocol.TYPE_TRANSFER_OFFER -> {
+                // 门禁必须设在 offer 这一步，而不是等数据面再拒。
+                // 少了这道检查，未配对设备的 offer 也会走完「创建任务 →
+                // 用户点接收 → 签发 token → 发 accept」整条链，最后才在
+                // 数据面被拒——用户看到的是「点了接收却没有文件」，
+                // 而日志里躺着一条难以定位的 403。桌面端从一开始就拒。
+                if (!trust.hasScope(from, "file")) {
+                    Log.w(TAG, "拒绝未授权设备的 transfer.offer: $from")
+                    server?.sendControl(
+                        envelope(Protocol.TYPE_TRANSFER_ERROR, from) {
+                            put("code", "SCOPE_DENIED")
+                            put("message", "设备未授权")
+                        }
+                    )
+                    return
+                }
                 val transferId = payload.optString("transferId")
                 val filesArr = payload.optJSONArray("files") ?: org.json.JSONArray()
                 val files = (0 until filesArr.length()).map {
@@ -221,6 +237,19 @@ class LinkSpaceService private constructor(private val appContext: Context) {
                     TransferFile(name = o.optString("name"), size = o.optLong("size"))
                 }
                 handleOffer(transferId, files, from)
+            }
+
+            Protocol.TYPE_CLIPBOARD_SHARE -> {
+                // 范围门禁：剪贴板会经过密码与令牌，没有 clipboard 授权
+                // 的对端既不能读也不能写本机剪贴板
+                if (!trust.hasScope(from, "clipboard")) {
+                    Log.w(TAG, "拒绝未授权设备的 clipboard.share: $from")
+                    return
+                }
+                val kind = payload.optString("kind", "text")
+                if (kind != "text") return
+                Log.i(TAG, "收到 clipboard.share，${payload.optString("text").length} 字符")
+                clipboard?.receive(payload.optString("text"))
             }
 
             Protocol.TYPE_TRANSFER_CANCEL -> {
@@ -241,6 +270,18 @@ class LinkSpaceService private constructor(private val appContext: Context) {
             }
         }
     }
+
+    /** 统一的信封构造，避免每处手写一遍字段导致对不齐 */
+    private fun envelope(type: String, to: String, payload: JSONObject.() -> Unit): JSONObject =
+        JSONObject().apply {
+            put("v", Protocol.VERSION)
+            put("type", type)
+            put("id", java.util.UUID.randomUUID().toString())
+            put("from", deviceIdPrefix)
+            put("to", to)
+            put("ts", System.currentTimeMillis())
+            put("payload", JSONObject().apply(payload))
+        }
 
     private fun pairError(to: String, message: String): JSONObject = JSONObject().apply {
         put("v", Protocol.VERSION)
@@ -316,7 +357,7 @@ class LinkSpaceService private constructor(private val appContext: Context) {
                 displayName = pending.displayName,
                 deviceType = pending.deviceType,
                 fingerprint = pending.fingerprint,
-                scope = listOf("file"),
+                scope = Protocol.DEFAULT_GRANT_SCOPE,
                 trustedAt = System.currentTimeMillis()
             )
         )
@@ -335,6 +376,51 @@ class LinkSpaceService private constructor(private val appContext: Context) {
     fun revokeTrust(deviceId: String) {
         trust.revoke(deviceId)
         _trusted.value = trust.list()
+    }
+
+    // ---------- 剪贴板同步 ----------
+
+    private var clipboard: ClipboardSync? = null
+
+    /**
+     * 启用剪贴板同步。读写由调用方注入：
+     * Android 10 起后台应用读不到剪贴板，所以注入时机由界面在前台时控制。
+     */
+    fun enableClipboardSync(io: ClipboardSync.ClipboardIo) {
+        clipboard?.stop()
+        clipboard = ClipboardSync(
+            io = io,
+            send = { text -> broadcastClipboard(text) },
+            onSkip = { reason -> Log.w(TAG, reason) }
+        ).also { it.start() }
+    }
+
+    fun disableClipboardSync() {
+        clipboard?.stop()
+        clipboard = null
+    }
+
+    /** 本机剪贴板可能变了，由界面在前台时驱动 */
+    fun pollClipboard() {
+        clipboard?.poll()
+    }
+
+    /** 只发给持有 clipboard 授权的对端，不做全量广播 */
+    private fun broadcastClipboard(text: String) {
+        val srv = server ?: return
+        var sent = 0
+        srv.connectedPeerIds().forEach { peerId ->
+            if (!trust.hasScope(peerId, "clipboard")) return@forEach
+            srv.sendControlTo(
+                peerId,
+                envelope(Protocol.TYPE_CLIPBOARD_SHARE, peerId) {
+                    put("kind", "text")
+                    put("text", text)
+                }
+            )
+            sent++
+        }
+        if (sent > 0) Log.i(TAG, "剪贴板已同步到 $sent 台设备")
     }
 
     // ---------- 传输 ----------

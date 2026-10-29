@@ -410,6 +410,27 @@ class TransferServer(
         }
     }
 
+    /**
+     * 只发给指定对端。
+     * 广播（sendControl）不适合剪贴板：内容应当只给持有 clipboard 授权
+     * 的对端，一次广播会把文本推给连上的每一台设备。
+     */
+    fun sendControlTo(peerId: String, obj: JSONObject) {
+        val text = obj.toString()
+        synchronized(controlConns) {
+            controlConns.toList().forEach { conn ->
+                if (controlPeerIds[conn] == peerId) conn.send(text)
+            }
+        }
+    }
+
+    /** 当前已建立控制连接且已声明身份的对端 ID */
+    fun connectedPeerIds(): Set<String> {
+        synchronized(controlConns) {
+            return controlConns.mapNotNull { controlPeerIds[it] }.toSet()
+        }
+    }
+
     // ---------- 工具 ----------
 
     private fun uniqueFile(dir: File, name: String): File {

@@ -35,6 +35,13 @@ object Protocol {
     const val TYPE_TRANSFER_CANCEL = "transfer.cancel"
     const val TYPE_TRANSFER_COMPLETE = "transfer.complete"
     const val TYPE_TRANSFER_ERROR = "transfer.error"
+    const val TYPE_CLIPBOARD_SHARE = "clipboard.share"
+
+    /**
+     * 配对默认授予的范围，与桌面端 `DEFAULT_GRANT_SCOPE` 一致。
+     * control 不在其中：让对端操作本机必须另行授权。
+     */
+    val DEFAULT_GRANT_SCOPE: List<String> = listOf("file", "clipboard")
 }
 
 /** 控制消息信封，字段与桌面端一致 */

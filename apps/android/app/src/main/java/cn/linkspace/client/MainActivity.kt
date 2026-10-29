@@ -1,5 +1,6 @@
 package cn.linkspace.client
 
+import android.content.ClipboardManager
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -16,10 +17,71 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import cn.linkspace.client.service.ClipboardSync
 import cn.linkspace.client.service.LinkSpaceService
 import cn.linkspace.client.service.TransferTask
 
 class MainActivity : ComponentActivity() {
+    /**
+     * 剪贴板同步只在界面前台时运行。
+     *
+     * Android 10 起后台应用读取剪贴板会被系统拒绝（getPrimaryClip 返回空
+     * 或直接抛异常），这不是权限问题，申请也拿不到。因此不放到服务里常驻，
+     * 而是在 onResume / onPause 之间挂接——代价是应用退到后台后不再同步，
+     * 这符合平台约束，也比静默失败好。
+     */
+    private val clipboardIo = object : ClipboardSync.ClipboardIo {
+        private fun manager(): ClipboardManager? =
+            getSystemService(ClipboardManager::class.java)
+
+        override fun readText(): String {
+            val clip = runCatching { manager()?.primaryClip }.getOrNull() ?: return ""
+            if (clip.itemCount == 0) return ""
+            return clip.getItemAt(0)?.coerceToText(this@MainActivity)?.toString() ?: ""
+        }
+
+        /**
+         * 写剪贴板走主线程：控制消息到达时服务在 IO 线程上，
+         * 直接 setPrimaryClip 在部分版本上会被拒绝。
+         */
+        override fun writeText(text: String) {
+            runOnUiThread {
+                runCatching {
+                    manager()?.setPrimaryClip(
+                        android.content.ClipData.newPlainText("LinkSpace", text)
+                    )
+                }.onFailure {
+                    android.util.Log.w("LinkSpace/Clipboard", "写入剪贴板失败: ${it.message}")
+                }
+            }
+        }
+    }
+
+    private val clipboardListener =
+        ClipboardManager.OnPrimaryClipChangedListener { serviceOf()?.pollClipboard() }
+
+    private fun serviceOf(): LinkSpaceService? = LinkSpaceService.get(this)
+
+    override fun onResume() {
+        super.onResume()
+        val service = serviceOf() ?: return
+        service.enableClipboardSync(clipboardIo)
+        android.util.Log.i("LinkSpace/Clipboard", "界面已到前台，剪贴板同步已启用")
+        runCatching {
+            getSystemService(ClipboardManager::class.java)
+                ?.addPrimaryClipChangedListener(clipboardListener)
+        }
+    }
+
+    override fun onPause() {
+        runCatching {
+            getSystemService(ClipboardManager::class.java)
+                ?.removePrimaryClipChangedListener(clipboardListener)
+        }
+        serviceOf()?.disableClipboardSync()
+        super.onPause()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val service = LinkSpaceService.get(this)

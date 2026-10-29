@@ -132,6 +132,26 @@ INFO: 31 fps / 33 fps / 32 fps / 30 fps
 | 2.3.3 | 断网后行为 | ⬜ 待测 |
 | 2.1.5 | 关闭窗口后进程无残留 | ✅ 已验证 2026-10-29（详见 `scrcpy-manual-checklist.md` 4.1） |
 
+### 2.8 剪贴板同步（新增，2026-10-29 真机验证）
+
+跨平台真机结果（Windows ↔ 联想平板 TB710FU / Android 16）：
+
+| 方向 | 结果 | 证据 |
+|---|---|---|
+| Windows → Android | ✅ 已验证 | 平板日志 `收到 clipboard.share，23 字符`；回环抑制生效，本端 5 秒内无回推 |
+| Android → Windows | ⬜ 需人工 | Android 的剪贴板写入无法用 adb 模拟（`service call clipboard` 受权限限制，分享 intent 不写剪贴板），必须在平板上真实执行一次复制 |
+| 授权门禁 | ✅ 已验证 | 配对默认授予 `file,clipboard`；`clipboard.share` 只发给持有 clipboard 授权的对端 |
+
+回环抑制的两层保障：
+
+1. **抑制窗口**：写入后 500ms 内忽略本地变更，且窗口内**不更新基线**
+   （更新会把旧值记成已知状态，回环只是延后一轮）。
+2. **内容相等即跳过**：收到的文本与本机当前剪贴板相同时不写盘。
+
+授权模型：`clipboard.share` 双向都过 `hasScope(peerId, 'clipboard')`。
+配对默认授予 `file` + `clipboard`，`control` 永远不在默认范围内
+（键鼠与投屏能让对端操作本机，必须用户单独授权）。
+
 ### 2.7 探查项结论
 
 | # | 探查项 | 结论 |
