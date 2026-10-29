@@ -312,8 +312,67 @@ async function main(): Promise<void> {
       reborn.list().find((e) => e.deviceId === A.id)?.displayName === 'E2E-Alpha-改'
     )
 
-    // ---------- 8. 撤销信任后门禁重新生效 ----------
-    console.log('\n8. 撤销信任后门禁重新生效')
+    // ---------- 8. 离线等待发送（4.9）：提示等待，不静默丢弃 ----------
+    console.log('\n8. 离线等待发送（对端下线后发起，上线自动补发）')
+    await B.stop()
+    // 等 A 感知断连（onClosed 清掉 peers 表），否则 offerFiles 拿到的还是死连接
+    await waitFor(() => (!A.isConnected(B.id) ? true : undefined))
+    check('A 已感知 B 下线', !A.isConnected(B.id))
+
+    // 对已配对但离线的设备发起发送：任务挂起为 waiting，不报错、不丢弃
+    const waitTask = await A.offerFiles(B.id, [
+      { name: 'offline.txt', path: srcPath, size: payload.length }
+    ])
+    check('离线设备的发送任务挂起为 waiting', waitTask.state === 'waiting', waitTask.state)
+
+    // 未配对设备依旧直接报错：信任都不存在，「等它上线」无从谈起
+    let strangerErr = ''
+    try {
+      await A.offerFiles('dev_ffffffffffff', [
+        { name: 's.txt', path: srcPath, size: payload.length }
+      ])
+    } catch (err) {
+      strangerErr = err instanceof Error ? err.message : String(err)
+    }
+    check('未配对设备离线发起仍被拒绝', strangerErr.length > 0, strangerErr || '(竟然没有报错)')
+
+    // B 重新上线（同证书同数据目录，信任仍在）。A 主动连入并完成身份
+    // 声明后，announce 处理器补发 waiting 任务
+    await B.start()
+    const svcB2: DiscoveredService = {
+      serviceName: 'E2E-Beta-改',
+      idPrefix: B.id.slice(0, 12),
+      displayName: 'E2E-Beta-改',
+      deviceType: 'android-phone',
+      caps: ['file', 'clipboard'],
+      host: '127.0.0.1',
+      port: B.port,
+      lastSeen: Date.now(),
+      paired: true
+    }
+    const connB2 = await A.connect(svcB2)
+    await waitFor(() => (connB2.peerId === B.id ? connB2 : undefined))
+    check('B 重启后重新连接并声明身份', connB2.peerId === B.id)
+
+    await waitFor(() =>
+      A.transferTasks().find((t) => t.id === waitTask.id && t.state === 'offered')
+        ? true
+        : undefined
+    )
+    check('B 上线后任务自动转为 offered', true)
+    const incoming2 = await waitFor(() => offered.find((t) => t.id === waitTask.id))
+    check('B 收到补发的 offer', Boolean(incoming2))
+
+    await B.acceptTransfer(waitTask.id, saveDir)
+    const done2 = await waitFor(() =>
+      changed.find((t) => t.id === waitTask.id && t.state === 'completed')
+    )
+    check('补发传输完成', done2.state === 'completed', done2.state)
+    const saved2 = await stat(join(saveDir, 'offline.txt'))
+    check('补发落盘大小一致', saved2.size === payload.length, `${saved2.size}`)
+
+    // ---------- 9. 撤销信任后门禁重新生效 ----------
+    console.log('\n9. 撤销信任后门禁重新生效')
     B.revokeTrust(A.id)
     await waitFor(() => (!A.trustStore.isKnown(B.id) ? true : undefined))
     check('A 的信任已撤销', !A.trustStore.isKnown(B.id))

@@ -33,6 +33,7 @@ import { sendChunk, probeCommittedOffset, ChunkConflictError } from './server'
 import { log } from '../log'
 
 export type TransferState =
+  | 'waiting' // 对端离线，任务挂起等待其上线（验收 4.9：提示等待，不静默丢弃）
   | 'offered' // 已发起，等待对端确认
   | 'accepted' // 对端已接受，准备/正在传输
   | 'completed'
@@ -128,7 +129,8 @@ export class TransferManager extends EventEmitter {
     peerId: string,
     files: TransferFile[],
     transferId?: string,
-    direction: 'send' | 'receive' = 'send'
+    direction: 'send' | 'receive' = 'send',
+    opts?: { waiting?: boolean }
   ): Promise<TransferTask> {
     if (files.length === 0) throw new Error('没有要传输的文件')
     if (files.length > 512) throw new Error(`单次传输文件数过多: ${files.length}`)
@@ -156,7 +158,7 @@ export class TransferManager extends EventEmitter {
       id,
       direction: isSend ? 'send' : 'receive',
       peerId,
-      state: 'offered',
+      state: opts?.waiting ? 'waiting' : 'offered',
       files: cleanFiles,
       totalSize: cleanFiles.reduce((sum, f) => sum + f.size, 0),
       transferred: 0,
@@ -169,6 +171,20 @@ export class TransferManager extends EventEmitter {
       }
     }
     log.info(`创建传输任务 ${id}，${cleanFiles.length} 个文件，共 ${task.totalSize} 字节`)
+    this.emit('changed', task)
+    return task
+  }
+
+  /**
+   * waiting → offered：对端上线后由 Host 调用（先发出 transfer.offer
+   * 再调用本方法，保证对端先看到 offer、本端状态后翻转）。
+   * 只接受 waiting 状态的任务，其余原样返回——重复 flush 不产生副作用。
+   */
+  markOffered(id: string): TransferTask | undefined {
+    const task = this.tasks.get(id)
+    if (!task || task.state !== 'waiting') return task
+    task.state = 'offered'
+    log.info(`传输任务 ${id} 对端已上线，转为等待确认`)
     this.emit('changed', task)
     return task
   }

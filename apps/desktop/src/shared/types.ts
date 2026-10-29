@@ -50,6 +50,7 @@ export interface EnvInfo {
 // ---------- 文件传输 ----------
 
 export type TransferState =
+  | 'waiting' // 对端离线，任务挂起等待其上线
   | 'offered' // 已发起，等待对端确认
   | 'accepted' // 对端已接受，准备/正在传输
   | 'completed'
