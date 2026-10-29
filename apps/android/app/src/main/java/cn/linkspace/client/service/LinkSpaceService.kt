@@ -224,9 +224,9 @@ class LinkSpaceService private constructor(private val appContext: Context) {
 
             Protocol.TYPE_PAIR_REQUEST -> handlePairRequest(
                 ctx = ctx,
-                displayName = payload.optString("displayName"),
-                deviceType = payload.optString("deviceType"),
-                fingerprint = payload.optString("fingerprint")
+                peerDisplayName = payload.optString("displayName"),
+                peerDeviceType = payload.optString("deviceType"),
+                peerFingerprint = payload.optString("fingerprint")
             )
 
             Protocol.TYPE_PAIR_SUBMIT -> {
@@ -433,11 +433,16 @@ class LinkSpaceService private constructor(private val appContext: Context) {
      */
     private fun handlePairRequest(
         ctx: TransferServer.ControlContext,
-        displayName: String,
-        deviceType: String,
-        fingerprint: String
+        peerDisplayName: String,
+        peerDeviceType: String,
+        peerFingerprint: String
     ) {
         val peerId = ctx.peerId
+        // 参数带 peer 前缀：pair.request 载荷里的身份是**对端自报**的。
+        // 曾用无前缀参数名与 companion 属性同名，快速通道 approve 里
+        // `put("displayName", displayName)` 被遮蔽解析到参数——平板在
+        // 「我是谁」的回执里发成了桌面的名字/类型/指纹（真机踩过，master
+        // 15dff8a 修复；本重构按同一规则命名，遮蔽在编译期不可能再发生）。
         // 已信任的设备直接放行，不再要求配对码。
         // 必须回 pair.approve：桌面端对已信任对端也是直接 approve
         // （pairing.ts「若已信任，直接放行」），两端语义必须对称——
@@ -458,6 +463,7 @@ class LinkSpaceService private constructor(private val appContext: Context) {
             server?.sendControlTo(
                 peerId,
                 envelope(Protocol.TYPE_PAIR_APPROVE, peerId) {
+                    // 回执是「我是谁」：全部用本机身份，不是载荷里的自报值
                     put("deviceId", deviceIdPrefix)
                     put("displayName", displayName)
                     put("deviceType", deviceType)
@@ -481,10 +487,10 @@ class LinkSpaceService private constructor(private val appContext: Context) {
         val pending = PendingPairing(
             id = java.util.UUID.randomUUID().toString(),
             peerId = peerId,
-            displayName = displayName,
-            deviceType = deviceType,
+            displayName = peerDisplayName,
+            deviceType = peerDeviceType,
             // 落库指纹以 TLS 证书为准，自报值只作拿不到证书时的退路
-            fingerprint = ctx.tlsFingerprint ?: normalizeFingerprint(fingerprint),
+            fingerprint = ctx.tlsFingerprint ?: normalizeFingerprint(peerFingerprint),
             code = code,
             expiresAt = System.currentTimeMillis() + 60_000
         )
