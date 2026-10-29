@@ -93,7 +93,9 @@ data class DiscoveredService(
     val caps: List<String>,
     val host: String,
     val port: Int,
-    val paired: Boolean
+    val paired: Boolean,
+    /** 最后一次收到通告的时间，软过期判定用（对齐桌面端 lastSeen） */
+    val lastSeen: Long = 0L
 )
 
 /** 传输任务 */

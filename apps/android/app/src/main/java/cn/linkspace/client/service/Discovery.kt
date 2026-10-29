@@ -56,7 +56,8 @@ class Discovery(private val context: Context) {
                 caps = (attrs["caps"]?.let { String(it) } ?: "").split(',').filter { it.isNotBlank() },
                 host = host.hostAddress ?: return,
                 port = info.port,
-                paired = attrs["paired"]?.let { String(it) } == "1"
+                paired = attrs["paired"]?.let { String(it) } == "1",
+                lastSeen = System.currentTimeMillis()
             )
             seen[svc.serviceName] = svc
             notifyListeners()
@@ -160,16 +161,47 @@ class Discovery(private val context: Context) {
         // 没有组播锁，NsdManager 在部分设备上收不到任何应答
         ensureMulticastLock()
         nsd.discoverServices(Protocol.SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, discoveryListener)
+        sweepThread = Thread({ sweepLoop() }, "linkspace-discovery-sweep").apply {
+            isDaemon = true
+            start()
+        }
     }
 
     fun stop() {
         if (!running) return
         running = false
+        sweepThread?.interrupt()
+        sweepThread = null
         runCatching { nsd.stopServiceDiscovery(discoveryListener) }
         runCatching { multicastLock?.release() }
         multicastLock = null
         seen.clear()
     }
+
+    /**
+     * 软过期清扫：mDNS 的 goodbye 不可靠（设备直接断网不会有），
+     * NsdManager 的 onServiceLost 因此经常不触发。超过 STALE_MS 未再
+     * 通告的服务一律移除并回流列表——与桌面端 discovery.ts 的 sweep
+     * 同一规则。onServiceFound 会对重复通告反复 resolve，即本表的刷新路径。
+     */
+    private fun sweepLoop() {
+        while (running) {
+            runCatching { Thread.sleep(STALE_MS / 2) }.getOrNull() ?: return
+            val now = System.currentTimeMillis()
+            var removed = false
+            for ((name, svc) in seen) {
+                if (now - svc.lastSeen > STALE_MS) {
+                    seen.remove(name)
+                    removed = true
+                    Log.d(TAG, "软过期移除 ${svc.displayName}")
+                }
+            }
+            if (removed) notifyListeners()
+        }
+    }
+
+    @Volatile
+    private var sweepThread: Thread? = null
 
     fun current(): List<DiscoveredService> = seen.values.sortedBy { it.displayName }
 
@@ -184,5 +216,8 @@ class Discovery(private val context: Context) {
 
     companion object {
         private const val TAG = "LinkSpace/Discovery"
+
+        /** 软过期阈值，与桌面端 discovery.ts 的 staleMs 一致（12s） */
+        const val STALE_MS = 12_000L
     }
 }
