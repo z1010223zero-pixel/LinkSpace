@@ -48,6 +48,7 @@ let unsubTransfers: (() => void) | null = null
 let unsubDiscovered: (() => void) | null = null
 let unsubPairings: (() => void) | null = null
 let pollTimer: number | null = null
+let speedTimer: number | null = null
 
 const onlineCount = computed(() => devices.value.filter((d) => d.state === 'device').length)
 const activeSessions = computed(() =>
@@ -114,6 +115,46 @@ async function loadSessions(): Promise<void> {
 async function loadTransfers(): Promise<void> {
   const list = await window.linkspace.listTransfers()
   transfers.value = Array.isArray(list) ? list : []
+  sampleRates()
+}
+
+// ---------- 传输速率（4.3） ----------
+//
+// 差分采样：对 accepted 任务用「上次采样字节 / 距上次采样时间」算瞬时速率。
+// 快照本身是事件驱动的（每块完成推送一次），块间隔随对端速度波动很大
+// （本地环路几十毫秒、真实 Wi-Fi 可能数秒），直接差分会剧烈跳动，
+// 因此这里做 500ms 节流，采样口径由 1s 兜底轮询保证连续。
+const rateSamples = new Map<string, { bytes: number; ts: number }>()
+const rateLastTs = { value: 0 }
+const rates = ref<Record<string, number>>({})
+
+function sampleRates(): void {
+  const now = Date.now()
+  const elapsed = now - rateLastTs.value
+  const next: Record<string, number> = {}
+  for (const t of transfers.value) {
+    if (t.state !== 'accepted' || !t.totalSize) continue
+    const prev = rateSamples.get(t.id)
+    if (prev && elapsed >= 500 && now > prev.ts) {
+      // 负差分（续传回退重算）按 0 处理，不显示负速率
+      next[t.id] = Math.max(0, ((t.transferred - prev.bytes) / (now - prev.ts)) * 1000)
+    } else if (prev && elapsed < 500 && rates.value[t.id] !== undefined) {
+      // 节流窗口内沿用上次速率，避免抖动
+      next[t.id] = rates.value[t.id]
+    }
+    rateSamples.set(t.id, { bytes: t.transferred, ts: now })
+  }
+  // 任务结束后清掉采样点，防止 Map 随历史任务增长
+  for (const id of rateSamples.keys()) {
+    if (!next[id]) rateSamples.delete(id)
+  }
+  rateLastTs.value = now
+  rates.value = next
+}
+
+function speedOf(t: TransferTaskView): string {
+  const r = rates.value[t.id]
+  return r === undefined ? '' : `${bytes(r)}/s`
 }
 
 function percentOf(t: TransferTaskView): number {
@@ -291,6 +332,12 @@ onMounted(async () => {
     void loadDevices()
     void loadSessions()
   }, 5000)
+
+  // 速率需要连续采样（4.3）：事件密度随对端速度波动，1s 兜底轮询保证
+  // 活动任务的进度与速率持续刷新；无活动任务时跳过，空转成本可忽略
+  speedTimer = window.setInterval(() => {
+    if (transfers.value.some((t) => t.state === 'accepted')) void loadTransfers()
+  }, 1000)
 })
 
 onBeforeUnmount(() => {
@@ -300,6 +347,7 @@ onBeforeUnmount(() => {
   unsubDiscovered?.()
   unsubPairings?.()
   if (pollTimer !== null) window.clearInterval(pollTimer)
+  if (speedTimer !== null) window.clearInterval(speedTimer)
 })
 </script>
 
@@ -397,6 +445,9 @@ onBeforeUnmount(() => {
           <span class="session-row__spacer" />
           <span v-if="t.state === 'accepted'" class="progress">
             <span class="progress__bar" :style="{ width: percentOf(t) + '%' }" />
+          </span>
+          <span v-if="t.state === 'accepted'" class="session-row__speed">
+            {{ speedOf(t) }}
           </span>
           <span class="badge badge--neutral">{{ STATE_LABEL[t.state] ?? t.state }}</span>
           <button
