@@ -11,12 +11,6 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
-    <!-- 接收文件落盘。Android 10 以下才需要写外部存储，这里 minSdk 26，
-         用 MediaStore 即可，但保留声明以便在旧设备上运行 -->
-    <uses-permission
-        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
-        android:maxSdkVersion="28" />
-
     <application
         android:name=".LinkSpaceApp"
         android:allowBackup="false"

@@ -191,7 +191,10 @@ class TransferServer(
     }
 
     /**
-     * 落盘：校验大小与整体摘要，通过才把 .part 改名为正式文件。
+     * 落盘：两阶段——先对全部文件校验（大小 + 整体摘要），全部通过后
+     * 再统一改名。逐文件「校验即改名」的话，多文件任务第 N 个失败时
+     * 前 N-1 个已经成了正式文件，任务整体却是失败状态，落盘结果与
+     * 任务状态互相矛盾（审查 P3「部分成功不回滚」）。
      *
      * 摘要由发送方随 transfer.complete 经控制通道交来（与桌面端一致）。
      * 大小或摘要不符一律删除 .part 并报错——宁可丢文件也不能留个
@@ -207,39 +210,46 @@ class TransferServer(
             ?: return Result.failure(IllegalStateException("任务不存在或已落盘"))
         tokens.remove(transferId)
 
-        var done = 0
+        // 第一阶段：全部校验，任何一项不过就整体失败（.part 统一清理）
         for ((name, part) in inc.parts) {
             val file = File(part.partPath)
+            val fail = { reason: String -> Result.failure<Int>(IOException(reason)) }
             if (!file.exists()) {
-                return Result.failure(IOException("文件 $name 的 .part 不存在"))
+                inc.cleanupParts()
+                return fail("文件 $name 的 .part 不存在")
             }
-            // 1. 大小必须与 offer 声明一致
             if (file.length() != part.expectedSize) {
-                runCatching { file.delete() }
-                return Result.failure(
-                    IOException("文件 $name 大小不符：期望 ${part.expectedSize}，实际 ${file.length()}")
-                )
+                inc.cleanupParts()
+                return fail("文件 $name 大小不符：期望 ${part.expectedSize}，实际 ${file.length()}")
             }
-            // 2. 整体摘要必须存在且一致
-            val expected = digests[name]
-                ?: run {
-                    runCatching { file.delete() }
-                    return Result.failure(IOException("缺少文件 $name 的整体摘要，拒绝落盘"))
-                }
+            val expected = digests[name] ?: run {
+                inc.cleanupParts()
+                return fail("缺少文件 $name 的整体摘要，拒绝落盘")
+            }
             val actual = sha256File(file)
             if (actual != expected) {
-                runCatching { file.delete() }
-                return Result.failure(IOException("文件 $name 摘要不符：期望 ${expected.take(12)}…，实际 ${actual.take(12)}…"))
+                inc.cleanupParts()
+                return fail("文件 $name 摘要不符：期望 ${expected.take(12)}…，实际 ${actual.take(12)}…")
             }
-            // 3. 改名。目标已存在时说明落盘目录出现了同名文件，重命名避免覆盖
+        }
+
+        // 第二阶段：全部校验已通过，逐个改名。此刻唯一可能的失败是
+        // 改名本身的 IO 异常（目标被占用等），概率极低且不会产生
+        // 「坏内容当正式文件」的后果
+        var done = 0
+        for ((name, part) in inc.parts) {
             val target = File(part.finalPath)
-            if (!file.renameTo(target)) {
-                runCatching { file.delete() }
+            if (!File(part.partPath).renameTo(target)) {
+                inc.cleanupParts()
                 return Result.failure(IOException("文件 $name 改名失败"))
             }
             done++
         }
         return Result.success(done)
+    }
+
+    private fun Incoming.cleanupParts() {
+        parts.values.forEach { runCatching { File(it.partPath).delete() } }
     }
 
     private fun sha256File(file: File): String {
