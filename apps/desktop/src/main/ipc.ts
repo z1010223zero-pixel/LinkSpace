@@ -56,6 +56,8 @@ const CHANNELS = [
   'layout:save',
   'profile:get',
   'profile:rename',
+  'clipboard:get',
+  'clipboard:setEnabled',
   'ping'
 ] as const
 
@@ -278,6 +280,16 @@ export function registerIpc(
     if (!result.ok) return fail(result.error ?? '改名失败')
     broadcast(getWindow, 'selfName:changed')
     return { ok: true as const, value: result.name }
+  })
+
+  // ---------- 剪贴板同步开关（6.6） ----------
+
+  invoke('clipboard:get', () => host.isClipboardEnabled())
+
+  ipcMain.handle('clipboard:setEnabled', async (_e, enabled: unknown) => {
+    if (typeof enabled !== 'boolean') return fail('缺少开关状态')
+    host.setClipboardEnabled(enabled)
+    return { ok: true as const, value: host.isClipboardEnabled() }
   })
 
   invoke('ping', () => 'pong')

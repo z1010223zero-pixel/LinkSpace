@@ -29,6 +29,19 @@ const editingName = ref(false)
 const nameDraft = ref('')
 const nameInput = ref<HTMLInputElement | null>(null)
 
+// ---------- 剪贴板同步开关（6.6） ----------
+const clipboardOn = ref(true)
+
+async function toggleClipboard(): Promise<void> {
+  const next = !clipboardOn.value
+  const res = await window.linkspace.setClipboardEnabled(next)
+  if (!res.ok) {
+    notice.value = res.error.message
+    return
+  }
+  clipboardOn.value = res.value
+}
+
 watch(editingName, async (v) => {
   if (!v) return
   await nextTick()
@@ -337,6 +350,7 @@ onMounted(async () => {
   env.value = await window.linkspace.envInfo()
   transferInfo.value = await window.linkspace.transferInfo().catch(() => null)
   selfName.value = await window.linkspace.selfDisplayName().catch(() => '')
+  clipboardOn.value = await window.linkspace.clipboardEnabled().catch(() => true)
   await loadDevices()
   await loadSessions()
   await loadTransfers()
@@ -427,6 +441,15 @@ onBeforeUnmount(() => {
           {{ env.ready ? 'scrcpy 就绪' : 'scrcpy 未就绪' }}
         </span>
         <span class="badge badge--neutral">在线 {{ onlineCount }}/{{ devices.length }}</span>
+        <button
+          class="badge badge-btn"
+          :class="clipboardOn ? 'badge--ok' : 'badge--off'"
+          :title="clipboardOn ? '剪贴板同步已开启，点击关闭' : '剪贴板同步已关闭，点击开启'"
+          @click="toggleClipboard"
+        >
+          <span class="badge__dot" />
+          剪贴板 {{ clipboardOn ? '开' : '关' }}
+        </button>
         <button class="btn btn--sm" :disabled="refreshing" @click="refresh">
           {{ refreshing ? '扫描中…' : '刷新' }}
         </button>

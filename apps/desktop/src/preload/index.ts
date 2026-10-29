@@ -85,6 +85,11 @@ const api: LinkSpaceApi = {
   renameSelf: (name: string) =>
     ipcRenderer.invoke('profile:rename', name) as Promise<IpcResult<string>>,
 
+  clipboardEnabled: () => ipcRenderer.invoke('clipboard:get') as Promise<boolean>,
+
+  setClipboardEnabled: (enabled: boolean) =>
+    ipcRenderer.invoke('clipboard:setEnabled', enabled) as Promise<IpcResult<boolean>>,
+
   onDevicesChanged: (cb) => subscribe('devices:changed', cb),
   onSessionsChanged: (cb) => subscribe('sessions:changed', cb),
   onTransfersChanged: (cb) => subscribe('transfers:changed', cb),

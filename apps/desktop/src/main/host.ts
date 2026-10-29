@@ -84,6 +84,8 @@ export class Host {
    */
   private selfName: string
   private clipboardSync: ClipboardSync | null = null
+  /** 剪贴板同步用户开关（6.6）。关闭后收发双向静默，不产生任何流量 */
+  private clipboardEnabled = false
   private readonly transfers = new TransferManager()
   private control: ControlNode | null = null
   private pairing: PairingCoordinator | null = null
@@ -612,7 +614,26 @@ export class Host {
       send: (text) => this.broadcastClipboard(text),
       onSkip: (reason) => log.warn(reason)
     })
+    this.clipboardEnabled = true
     this.clipboardSync.start()
+  }
+
+  /**
+   * 剪贴板同步开关（6.6「关闭同步 → 完全不传输」）。
+   * 关闭走 ClipboardSync.stop()：poll 与 receive 双向失效；
+   * 重新开启时 start() 重读基线——开关期间剪贴板里的内容不是
+   * 「用户刚复制的」，不该在开启瞬间被广播出去。
+   */
+  setClipboardEnabled(enabled: boolean): void {
+    if (enabled === this.clipboardEnabled) return
+    this.clipboardEnabled = enabled
+    if (enabled) this.clipboardSync?.start()
+    else this.clipboardSync?.stop()
+    log.info(`剪贴板同步已${enabled ? '开启' : '关闭'}`)
+  }
+
+  isClipboardEnabled(): boolean {
+    return this.clipboardEnabled
   }
 
   /** 本机剪贴板可能变了，由上层定时调用 */

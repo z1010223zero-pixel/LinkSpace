@@ -155,6 +155,9 @@ export interface LinkSpaceApi {
   selfDisplayName(): Promise<string>
   /** 修改本机显示名，改名会经 device.rename 同步到已连接的对端 */
   renameSelf(name: string): Promise<IpcResult<string>>
+  /** 剪贴板同步开关（6.6）。关闭后收发双向静默，不产生任何流量 */
+  clipboardEnabled(): Promise<boolean>
+  setClipboardEnabled(enabled: boolean): Promise<IpcResult<boolean>>
   onDevicesChanged(cb: () => void): Unsubscribe
   onSessionsChanged(cb: () => void): Unsubscribe
   onTransfersChanged(cb: () => void): Unsubscribe

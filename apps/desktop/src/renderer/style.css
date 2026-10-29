@@ -185,6 +185,22 @@ button {
   color: var(--text-secondary);
 }
 
+/* 剪贴板开关（6.6）：badge 外形的可点按钮 */
+.badge--off {
+  background: var(--surface-muted);
+  color: var(--text-secondary);
+}
+
+.badge-btn {
+  border: none;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.badge-btn:hover {
+  filter: brightness(0.96);
+}
+
 .badge__dot {
   width: 6px;
   height: 6px;
