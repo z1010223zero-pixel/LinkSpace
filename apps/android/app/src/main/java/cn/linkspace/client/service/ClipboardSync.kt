@@ -35,20 +35,29 @@ class ClipboardSync(
     private var suppressUntil = 0L
     private var running = false
 
+    // 三个可变状态被两个线程无协调地访问：poll 由主线程（剪贴板监听器 /
+    // onResume）驱动，receive 由控制通道读线程驱动。不锁的话可见性与
+    // check-then-act（poll 的「读-比-记」序列）都可能被撕裂——曾表现为
+    // 偶发的回环泄漏。方法级锁足够：临界区内只有内存操作与一次
+    // writeText（其内部是 runOnUiThread 投递，不阻塞，无死锁面）。
+
     /**
      * 开始同步。先读一次基线：启动前剪贴板里的内容不是「用户刚复制的」，
      * 不该在启动瞬间被广播出去。
      */
+    @Synchronized
     fun start() {
         running = true
         lastSeen = io.readText()
     }
 
+    @Synchronized
     fun stop() {
         running = false
     }
 
     /** 本机剪贴板可能变了，由调用方驱动 */
+    @Synchronized
     fun poll() {
         if (!running) return
         val cur = io.readText()
@@ -65,6 +74,7 @@ class ClipboardSync(
     }
 
     /** 收到对端推来的文本 */
+    @Synchronized
     fun receive(text: String) {
         if (!running) return
         if (text.isEmpty()) return

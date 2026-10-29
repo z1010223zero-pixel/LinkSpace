@@ -44,6 +44,7 @@ class LinkSpaceService private constructor(private val appContext: Context) {
         const val deviceType = "android-phone"
 
         private const val KEY_DISPLAY_NAME = "displayName"
+        private const val KEY_CLIPBOARD_SYNC = "clipboardSyncEnabled"
         /** 同时挂起的配对请求上限，与桌面端 MAX_PENDING 一致 */
         private const val MAX_PENDING_PAIRINGS = 8
         /** 配对码最大错误次数，超过即断开对端连接（与桌面端 maxAttempts 一致） */
@@ -79,7 +80,6 @@ class LinkSpaceService private constructor(private val appContext: Context) {
     private val discovery = Discovery(appContext)
     /** 本机显示名持久化（5.4）：改名跨重启保持，存 SharedPreferences */
     private val prefs = appContext.getSharedPreferences("linkspace", Context.MODE_PRIVATE)
-
     private var server: TransferServer? = null
 
     /** 待用户确认的配对请求 */
@@ -132,6 +132,7 @@ class LinkSpaceService private constructor(private val appContext: Context) {
         displayName = prefs.getString(KEY_DISPLAY_NAME, null)?.takeIf { it.isNotBlank() }
             ?: (android.os.Build.MODEL ?: "Android")
         _selfName.value = displayName
+        _clipboardEnabled.value = prefs.getBoolean(KEY_CLIPBOARD_SYNC, false)
 
         val srv = TransferServer(
             identity = identity,
@@ -592,10 +593,28 @@ class LinkSpaceService private constructor(private val appContext: Context) {
     private var clipboard: ClipboardSync? = null
 
     /**
+     * 剪贴板同步开关，持久化、默认**关**。
+     * 剪贴板会经过密码与令牌，默认静默双向同步等于把敏感内容常年在网上
+     * 推给所有已配对设备；用户显式开启才参与（与桌面端 P2-1 的修复方向
+     * 一致）。关闭时既不发送也不接收。
+     */
+    private val _clipboardEnabled = MutableStateFlow(false)
+    val clipboardEnabled: StateFlow<Boolean> = _clipboardEnabled
+
+    fun setClipboardSyncEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_CLIPBOARD_SYNC, enabled).apply()
+        _clipboardEnabled.value = enabled
+        // 关闭立即生效；开启方向由界面在前台时注入 io 后生效
+        if (!enabled) disableClipboardSync()
+    }
+
+    /**
      * 启用剪贴板同步。读写由调用方注入：
      * Android 10 起后台应用读不到剪贴板，所以注入时机由界面在前台时控制。
+     * 开关未开启时调用是空操作——界面的 onResume 不再是无条件开启。
      */
     fun enableClipboardSync(io: ClipboardSync.ClipboardIo) {
+        if (!clipboardEnabled.value) return
         clipboard?.stop()
         clipboard = ClipboardSync(
             io = io,

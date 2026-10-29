@@ -83,11 +83,15 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         val service = serviceOf() ?: return
-        service.enableClipboardSync(clipboardIo)
-        android.util.Log.i("LinkSpace/Clipboard", "界面已到前台，剪贴板同步已启用")
-        runCatching {
-            getSystemService(ClipboardManager::class.java)
-                ?.addPrimaryClipChangedListener(clipboardListener)
+        // 剪贴板同步只在开关开启且界面前台时运行（开关默认关：
+        // 剪贴板会经过密码与令牌，默认静默同步有泄露面）
+        if (service.clipboardEnabled.value) {
+            service.enableClipboardSync(clipboardIo)
+            android.util.Log.i("LinkSpace/Clipboard", "界面已到前台，剪贴板同步已启用")
+            runCatching {
+                getSystemService(ClipboardManager::class.java)
+                    ?.addPrimaryClipChangedListener(clipboardListener)
+            }
         }
     }
 
@@ -109,7 +113,25 @@ class MainActivity : ComponentActivity() {
         setContent {
             MaterialTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
-                    MainScreen(service)
+                    MainScreen(
+                        service,
+                        onClipboardToggle = { on ->
+                            service.setClipboardSyncEnabled(on)
+                            if (on) {
+                                // 前台内立即生效，不等下一次 onResume
+                                service.enableClipboardSync(clipboardIo)
+                                runCatching {
+                                    getSystemService(ClipboardManager::class.java)
+                                        ?.addPrimaryClipChangedListener(clipboardListener)
+                                }
+                            } else {
+                                runCatching {
+                                    getSystemService(ClipboardManager::class.java)
+                                        ?.removePrimaryClipChangedListener(clipboardListener)
+                                }
+                            }
+                        }
+                    )
                 }
             }
         }
@@ -117,7 +139,7 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-fun MainScreen(service: LinkSpaceService) {
+fun MainScreen(service: LinkSpaceService, onClipboardToggle: (Boolean) -> Unit) {
     val pairings by service.pendingPairings.collectAsStateWithLifecycle()
     val discovered by service.discovered.collectAsStateWithLifecycle()
     val transfers by service.transfers.collectAsStateWithLifecycle()
@@ -126,6 +148,7 @@ fun MainScreen(service: LinkSpaceService) {
     val selfName by service.selfName.collectAsStateWithLifecycle()
     val inputState by service.inputState.collectAsStateWithLifecycle()
     val inputMessage by service.inputMessage.collectAsStateWithLifecycle()
+    val clipboardEnabled by service.clipboardEnabled.collectAsStateWithLifecycle()
     var notice by remember { mutableStateOf("") }
 
     val context = LocalContext.current
@@ -200,6 +223,17 @@ fun MainScreen(service: LinkSpaceService) {
                     cn.linkspace.client.service.LinkSpaceForegroundService.exit(context)
                     (context as? android.app.Activity)?.finish()
                 }) { Text("退出") }
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("剪贴板同步", fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                    Text(
+                        "与已配对设备互相同步剪贴板文本。默认关闭：内容会经过本机网络。",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(checked = clipboardEnabled, onCheckedChange = onClipboardToggle)
             }
             Spacer(Modifier.height(4.dp))
         }
