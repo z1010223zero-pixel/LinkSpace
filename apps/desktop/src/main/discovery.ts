@@ -197,7 +197,11 @@ export class Discovery {
     // 传入 interface 后，库只对该地址 addMembership 并用它发组播。
     // interface 在运行时有支持（mdns-server 把 opts 原样透传给 multicast-dns），
     // 但 bonjour-service 的 TS 类型没声明它，这里显式断言并说明原因
-    this.bonjour = new Bonjour({ interface: pickLanInterface() } as Record<string, unknown>)
+    // 实测（真机走查 2026-10-29）：Windows 上把组播 socket 绑到具体地址
+    // （interface 选项）会导致**完全收不到组播入包**——绑 0.0.0.0 全接口
+    // 接收才正常。之前为修「查询发不到对端网段」传入 interface，矫枉过正；
+    // 出方向靠系统路由表自选，入方向靠对端周期性通告兜底，不需要绑定。
+    this.bonjour = new Bonjour()
     this.publishSelf()
 
     // find 返回 Browser，直接用它的 up/down 事件。
