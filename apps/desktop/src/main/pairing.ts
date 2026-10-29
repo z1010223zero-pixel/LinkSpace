@@ -120,6 +120,14 @@ export class PairingCoordinator {
     return s.filter((x) => x !== 'control')
   }
 
+  /**
+   * 本机改名后同步（5.4）：后续的 announce / pair.request 会带上新名字。
+   * opts 字段非只读，原地更新即可，协调器没有其他地方缓存名字副本。
+   */
+  setDisplayName(name: string): void {
+    this.opts.displayName = name
+  }
+
   constructor(opts: PairingCoordinatorOptions) {
     this.opts = opts
     this.trust = opts.trust

@@ -247,6 +247,16 @@ export class Discovery {
     this.publishSelf()
   }
 
+  /**
+   * 本机改名后更新通告（5.4）。服务名内嵌显示名（LinkSpace-<displayName>），
+   * NSD/bonjour 都不支持原地改名，走与 refreshAdvertisement 相同的
+   * 「停掉重发」路径；重发前先更新 opts，publishSelf 会取到新名字。
+   */
+  setDisplayName(name: string): void {
+    this.opts.displayName = name
+    this.refreshAdvertisement()
+  }
+
   private publishSelf(): void {
     this.ad = this.bonjour!.publish({
       name: sanitizeServiceName(this.opts.displayName),

@@ -80,11 +80,18 @@ const api: LinkSpaceApi = {
   saveDeviceLayout: (order: string[]) =>
     ipcRenderer.invoke('layout:save', order) as Promise<IpcResult<void>>,
 
+  selfDisplayName: () => ipcRenderer.invoke('profile:get') as Promise<string>,
+
+  renameSelf: (name: string) =>
+    ipcRenderer.invoke('profile:rename', name) as Promise<IpcResult<string>>,
+
   onDevicesChanged: (cb) => subscribe('devices:changed', cb),
   onSessionsChanged: (cb) => subscribe('sessions:changed', cb),
   onTransfersChanged: (cb) => subscribe('transfers:changed', cb),
   onDiscoveredChanged: (cb) => subscribe('discovered:changed', cb),
-  onPairingsChanged: (cb) => subscribe('pairings:changed', cb)
+  onPairingsChanged: (cb) => subscribe('pairings:changed', cb),
+  onTrustChanged: (cb) => subscribe('trust:changed', cb),
+  onSelfNameChanged: (cb) => subscribe('selfName:changed', cb)
 }
 
 contextBridge.exposeInMainWorld('linkspace', api)

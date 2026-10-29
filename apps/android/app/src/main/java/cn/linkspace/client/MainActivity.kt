@@ -112,7 +112,12 @@ fun MainScreen(service: LinkSpaceService) {
     val transfers by service.transfers.collectAsStateWithLifecycle()
     val trusted by service.trusted.collectAsStateWithLifecycle()
     val port by service.port.collectAsStateWithLifecycle()
+    val selfName by service.selfName.collectAsStateWithLifecycle()
     var notice by remember { mutableStateOf("") }
+
+    // ---------- 本机改名（5.4） ----------
+    var showRenameDialog by remember { mutableStateOf(false) }
+    var nameDraft by remember { mutableStateOf("") }
 
     // ---------- 发送文件 ----------
     var sendTarget by remember { mutableStateOf<DiscoveredService?>(null) }
@@ -136,10 +141,21 @@ fun MainScreen(service: LinkSpaceService) {
         item {
             Text("LinkSpace", fontSize = 24.sp, fontWeight = FontWeight.Bold)
             Text(
+                "本机名称 $selfName",
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Medium
+            )
+            Text(
                 "本机指纹 ${service.fingerprint.take(17)}… · 端口 $port",
                 fontSize = 12.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+            Row {
+                TextButton(onClick = {
+                    nameDraft = selfName
+                    showRenameDialog = true
+                }) { Text("修改本机名称") }
+            }
             Spacer(Modifier.height(4.dp))
         }
 
@@ -361,6 +377,44 @@ fun MainScreen(service: LinkSpaceService) {
                         pendingFiles = emptyList()
                     }
                 ) { Text("取消") }
+            }
+        )
+    }
+
+    // ---------- 本机改名对话框（5.4） ----------
+    if (showRenameDialog) {
+        AlertDialog(
+            onDismissRequest = { showRenameDialog = false },
+            title = { Text("修改本机名称") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        "对端设备会看到这个名字，最长 60 字符。",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    OutlinedTextField(
+                        value = nameDraft,
+                        onValueChange = { nameDraft = it },
+                        singleLine = true,
+                        label = { Text("显示名") }
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        service.setDisplayName(nameDraft)
+                            .onSuccess { clean ->
+                                notice = "已改名为「$clean」"
+                                showRenameDialog = false
+                            }
+                            .onFailure { notice = it.message ?: "改名失败" }
+                    }
+                ) { Text("确定") }
+            },
+            dismissButton = {
+                OutlinedButton(onClick = { showRenameDialog = false }) { Text("取消") }
             }
         )
     }

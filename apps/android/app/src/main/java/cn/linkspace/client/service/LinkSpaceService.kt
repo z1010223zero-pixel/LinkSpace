@@ -43,6 +43,8 @@ class LinkSpaceService private constructor(private val appContext: Context) {
 
         const val deviceType = "android-phone"
 
+        private const val KEY_DISPLAY_NAME = "displayName"
+
         @Volatile
         var deviceIdPrefix: String = ""
             private set
@@ -65,6 +67,8 @@ class LinkSpaceService private constructor(private val appContext: Context) {
     private val identity = Identity(filesDir)
     private val trust = TrustStore(File(filesDir, "trust.json"))
     private val discovery = Discovery(appContext)
+    /** 本机显示名持久化（5.4）：改名跨重启保持，存 SharedPreferences */
+    private val prefs = appContext.getSharedPreferences("linkspace", Context.MODE_PRIVATE)
 
     private var server: TransferServer? = null
 
@@ -94,6 +98,10 @@ class LinkSpaceService private constructor(private val appContext: Context) {
     private val _port = MutableStateFlow(0)
     val port: StateFlow<Int> = _port
 
+    /** 本机显示名（5.4），界面据此展示与编辑 */
+    private val _selfName = MutableStateFlow("")
+    val selfName: StateFlow<String> = _selfName
+
     private val pendingMap = ConcurrentHashMap<String, PendingPairing>()
     /** 已回过 announce 的对端，防止无限互弹 */
     private val announcedConnections: MutableSet<String> = java.util.Collections.synchronizedSet(mutableSetOf())
@@ -109,7 +117,9 @@ class LinkSpaceService private constructor(private val appContext: Context) {
 
         val cert = identity.get()
         deviceIdPrefix = cert.fingerprint.replace(":", "").take(12)
-        displayName = android.os.Build.MODEL ?: "Android"
+        displayName = prefs.getString(KEY_DISPLAY_NAME, null)?.takeIf { it.isNotBlank() }
+            ?: (android.os.Build.MODEL ?: "Android")
+        _selfName.value = displayName
 
         val srv = TransferServer(
             identity = identity,
@@ -233,6 +243,19 @@ class LinkSpaceService private constructor(private val appContext: Context) {
                 trust.revoke(from)
                 _trusted.value = trust.list()
                 Log.i(TAG, "对端撤销了信任: $from")
+            }
+
+            Protocol.TYPE_RENAME -> {
+                // 名字是对端自报的，只信信任清单内的设备（与桌面端同一门禁）
+                if (!trust.isKnown(from)) {
+                    Log.w(TAG, "忽略未信任设备的改名请求: $from")
+                    return
+                }
+                val name = sanitizeDisplayName(payload.optString("displayName")) ?: return
+                if (trust.rename(from, name)) {
+                    _trusted.value = trust.list()
+                    Log.i(TAG, "对端 $from 已改名为「$name」")
+                }
             }
 
             Protocol.TYPE_TRANSFER_OFFER -> {
@@ -397,6 +420,47 @@ class LinkSpaceService private constructor(private val appContext: Context) {
     fun revokeTrust(deviceId: String) {
         trust.revoke(deviceId)
         _trusted.value = trust.list()
+    }
+
+    // ---------- 本机改名（5.4） ----------
+
+    /**
+     * 显示名清洗：与桌面端 `profile.ts` 的 sanitizeDisplayName 同一规则，
+     * 去控制字符、去首尾空白、限长 60。返回 null 表示无效名。
+     */
+    private fun sanitizeDisplayName(raw: String): String? {
+        val clean = raw.replace(Regex("[\\u0000-\\u001f\\u007f]"), "").trim()
+        if (clean.isEmpty()) return null
+        return clean.take(60)
+    }
+
+    /**
+     * 本机改名：持久化 → 更新 mDNS 通告（服务名内嵌显示名，NSD 不支持
+     * 原地改名，先注销再注册）→ 广播 device.rename 给已连接对端。
+     * 对端仅更新信任清单内的条目并落盘，两端重启后都保持。
+     * 成功时返回清洗后的名字，供 UI 展示「对端将看到的名字」。
+     */
+    fun setDisplayName(name: String): Result<String> {
+        val clean = sanitizeDisplayName(name)
+            ?: return Result.failure(IllegalArgumentException("名字不能为空"))
+        if (clean == displayName) return Result.success(clean)
+        displayName = clean
+        prefs.edit().putString(KEY_DISPLAY_NAME, clean).apply()
+        _selfName.value = clean
+        server?.let { srv ->
+            runCatching { discovery.stopAdvertising() }
+            discovery.advertise(srv.port, Protocol.DEFAULT_GRANT_SCOPE, trust.list().isNotEmpty())
+            var sent = 0
+            srv.connectedPeerIds().forEach { peerId ->
+                srv.sendControlTo(
+                    peerId,
+                    envelope(Protocol.TYPE_RENAME, peerId) { put("displayName", clean) }
+                )
+                sent++
+            }
+            if (sent > 0) Log.i(TAG, "本机已改名为「$clean」，通知 $sent 台在线设备")
+        }
+        return Result.success(clean)
     }
 
     // ---------- 剪贴板同步 ----------

@@ -98,6 +98,19 @@ class TrustStore(private val file: File) {
         return changed
     }
 
+    /**
+     * 更新对端显示名（device.rename，5.4）。与桌面端 trust.ts 同一语义：
+     * 只对信任清单内的设备生效，返回是否有实际变更。
+     */
+    @Synchronized
+    fun rename(deviceId: String, displayName: String): Boolean {
+        val idx = entries.indexOfFirst { it.deviceId == deviceId }
+        if (idx < 0 || entries[idx].displayName == displayName) return false
+        entries[idx] = entries[idx].copy(displayName = displayName)
+        persist()
+        return true
+    }
+
     private fun persist() {
         val arr = JSONArray()
         entries.forEach { e ->

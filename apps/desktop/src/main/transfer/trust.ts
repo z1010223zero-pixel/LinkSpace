@@ -123,6 +123,19 @@ export class TrustStore {
     return changed
   }
 
+  /**
+   * 更新对端显示名（device.rename）。只对信任清单内的设备生效，
+   * 未知名设备直接忽略——名字是对端自报的，但不该给陌生连接
+   * 留下改写本机状态的通道。返回是否有实际变更。
+   */
+  rename(deviceId: string, displayName: string): boolean {
+    const idx = this.entries.findIndex((e) => e.deviceId === deviceId)
+    if (idx < 0 || this.entries[idx].displayName === displayName) return false
+    this.entries[idx] = { ...this.entries[idx], displayName }
+    this.persist()
+    return true
+  }
+
   /** 与对端通告的指纹比对，不一致说明设备身份被替换或中间人 */
   matchesFingerprint(deviceId: string, fingerprint: string): boolean {
     return this.fingerprintOf(deviceId) === fingerprint
