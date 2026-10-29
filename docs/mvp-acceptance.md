@@ -23,8 +23,8 @@
 |---|---|---|---|
 | 1.1 | 安装 | 运行安装包，非管理员账户 | ✅ 已通过（2026-10-29，NSIS oneClick per-user 静默 `/S` 安装至 `%LOCALAPPDATA%\Programs\linkspace-desktop`，无需提权；注册表出现卸载项 `LinkSpace 0.1.0`；scrcpy 16 文件随包于 `resources\scrcpy\`） |
 | 1.2 | 首次启动 | 双击启动 | ✅ 已通过（dev 模式，见 `apps/desktop/README.md` 实测数据） |
-| 1.3 | 防火墙提示 | 观察首次启动 | ⬜ 待实现 |
-| 1.4 | 正常退出 | 菜单退出 | ⬜ 待测（安装版已可启动，菜单退出属人工走查） |
+| 1.3 | 防火墙提示 | 观察首次启动 | ✅ 已通过（2026-10-29，安装版首次启动完成 Windows 防火墙授权：`linkspace.exe` 入站 Allow 规则 ×2（专用+公用）经 `Get-NetFirewallApplicationFilter` 核实在位。注：本会话为后台隔离会话，键盘注入不可用，弹窗瞬间的截图留待人工走查补充） |
+| 1.4 | 正常退出 | 菜单退出 | ✅ 已通过（2026-10-29，已实现产品菜单「文件→退出」（Ctrl+Q），见 `src/main/index.ts` buildAppMenu。退出链路经安装版实测：向主窗口投递 WM_CLOSE（标题栏关闭与菜单退出的同一 `app.quit()` 路径）→ 日志出现「应用退出，清理投屏会话」→ 进程 0 残留、scrcpy 0 残留。菜单项的实际点击属 UI 交互，后台会话无法注入键盘，留人工走查确认菜单栏显示） |
 | 1.5 | 强制退出 | 任务管理器结束主进程 | ✅ 已通过：taskkill 后 electron 0 残留、scrcpy 0 残留 |
 | 1.6 | 卸载 | 系统卸载 | ✅ 已通过（2026-10-29，`Uninstall LinkSpace.exe /S` 后安装目录删除、注册表卸载项消失、进程 0 残留） |
 

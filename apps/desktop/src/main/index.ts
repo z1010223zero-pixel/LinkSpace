@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, shell } from 'electron'
+import { app, BrowserWindow, clipboard, Menu, shell } from 'electron'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { DeviceManager } from './device-manager'
@@ -131,11 +131,38 @@ function stopClipboardSync(): void {
   clipboardTimer = null
 }
 
+// ---------- 应用菜单 ----------
+//
+// 1.4「正常退出」的验收路径是菜单退出：必须有走 app.quit() 的产品级
+// 退出入口，才能触发 before-quit 里的投屏会话清理（标题栏 X 也走同一
+// 路径，但菜单是验收明确要求的入口）。同时收编 Electron 的默认英文
+// 菜单，避免窗口顶栏出现与产品无关的默认项。
+// role 菜单项（编辑/视图/窗口）由 Electron 按 app locale 自动本地化。
+function buildAppMenu(): void {
+  const template: Electron.MenuItemConstructorOptions[] = [
+    {
+      label: '文件',
+      submenu: [
+        {
+          label: '退出',
+          accelerator: 'CmdOrCtrl+Q',
+          click: () => app.quit()
+        }
+      ]
+    },
+    { role: 'editMenu' },
+    { role: 'viewMenu' },
+    { role: 'windowMenu' }
+  ]
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template))
+}
+
 // ---------- 生命周期 ----------
 app.whenReady().then(async () => {
   const b = locateBinaries()
   log.info(`LinkSpace 启动，scrcpy=${b.scrcpy}（来源 ${b.source}）`)
 
+  buildAppMenu()
   registerIpc(() => mainWindow, devices, adapter, host, runtime)
   createWindow()
 
