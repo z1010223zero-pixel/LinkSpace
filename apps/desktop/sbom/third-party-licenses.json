@@ -1,0 +1,547 @@
+{
+  "product": {
+    "name": "linkspace-desktop",
+    "version": "0.1.0",
+    "description": "LinkSpace 桌面端 —— 局域网多设备协作工作空间"
+  },
+  "generatedAt": "2026-10-29T07:47:18.905Z",
+  "generator": {
+    "tool": "license-checker",
+    "version": "25.0.1",
+    "scope": "production npm dependencies of apps/desktop"
+  },
+  "nativeDistribution": {
+    "name": "scrcpy 官方 Windows 发行包",
+    "version": "5.0.1",
+    "bundled": "随安装包分发于 <resourcesPath>/scrcpy/（electron-builder extraResources）",
+    "note": "官方发行包仅含一份 Apache-2.0 LICENSE.txt，SDL3/libusb/FFmpeg 的许可证文本需在发布时随附（license-inventory.md §5 合规检查表）",
+    "components": [
+      {
+        "name": "scrcpy",
+        "version": "5.0.1",
+        "licenses": "Apache-2.0",
+        "source": "https://github.com/Genymobile/scrcpy",
+        "files": [
+          "scrcpy.exe"
+        ],
+        "notes": "官方发行包自带 LICENSE.txt（Apache-2.0）"
+      },
+      {
+        "name": "scrcpy-server",
+        "version": "5.0.1",
+        "licenses": "Apache-2.0",
+        "source": "https://github.com/Genymobile/scrcpy",
+        "files": [
+          "scrcpy-server"
+        ],
+        "notes": "运行时推送到 Android 设备"
+      },
+      {
+        "name": "Android Debug Bridge (adb)",
+        "version": "1.0.41",
+        "licenses": "Apache-2.0",
+        "source": "https://developer.android.com/studio/releases/platform-tools",
+        "files": [
+          "adb.exe",
+          "AdbWinApi.dll",
+          "AdbWinUsbApi.dll"
+        ],
+        "notes": ""
+      },
+      {
+        "name": "SDL",
+        "version": "3.4.18",
+        "licenses": "zlib",
+        "source": "https://github.com/libsdl-org/SDL",
+        "files": [
+          "SDL3.dll"
+        ],
+        "notes": "scrcpy 5.x 已从 SDL2 升级为 SDL3"
+      },
+      {
+        "name": "libusb",
+        "version": "1.0",
+        "licenses": "LGPL-2.1",
+        "source": "https://github.com/libusb/libusb",
+        "files": [
+          "libusb-1.0.dll"
+        ],
+        "notes": "动态链接，需随附许可证全文（由 renderLicenseBundle 承担）"
+      },
+      {
+        "name": "FFmpeg libavcodec",
+        "version": "63.1.102",
+        "licenses": "UNKNOWN",
+        "source": "https://ffmpeg.org",
+        "files": [
+          "avcodec-63.dll"
+        ],
+        "notes": "取决于构建选项（LGPL 或 GPL），核实前按 UNKNOWN 记录，见 license-inventory.md §1.3"
+      },
+      {
+        "name": "FFmpeg libavformat",
+        "version": "63",
+        "licenses": "UNKNOWN",
+        "source": "https://ffmpeg.org",
+        "files": [
+          "avformat-63.dll"
+        ],
+        "notes": "同 libavcodec"
+      },
+      {
+        "name": "FFmpeg libavutil",
+        "version": "61",
+        "licenses": "UNKNOWN",
+        "source": "https://ffmpeg.org",
+        "files": [
+          "avutil-61.dll"
+        ],
+        "notes": "同 libavcodec"
+      },
+      {
+        "name": "FFmpeg libswresample",
+        "version": "7",
+        "licenses": "UNKNOWN",
+        "source": "https://ffmpeg.org",
+        "files": [
+          "swresample-7.dll"
+        ],
+        "notes": "同 libavcodec"
+      }
+    ]
+  },
+  "npmPackages": [
+    {
+      "name": "@babel/helper-string-parser",
+      "version": "7.29.11",
+      "licenses": "MIT",
+      "repository": "https://github.com/babel/babel",
+      "licenseFile": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\@babel\\helper-string-parser\\LICENSE",
+      "path": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\@babel\\helper-string-parser"
+    },
+    {
+      "name": "@babel/helper-validator-identifier",
+      "version": "7.29.7",
+      "licenses": "MIT",
+      "repository": "https://github.com/babel/babel",
+      "licenseFile": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\@babel\\helper-validator-identifier\\LICENSE",
+      "path": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\@babel\\helper-validator-identifier"
+    },
+    {
+      "name": "@babel/parser",
+      "version": "7.29.11",
+      "licenses": "MIT",
+      "repository": "https://github.com/babel/babel",
+      "licenseFile": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\@babel\\parser\\LICENSE",
+      "path": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\@babel\\parser"
+    },
+    {
+      "name": "@babel/types",
+      "version": "7.29.11",
+      "licenses": "MIT",
+      "repository": "https://github.com/babel/babel",
+      "licenseFile": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\@babel\\types\\LICENSE",
+      "path": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\@babel\\types"
+    },
+    {
+      "name": "@jridgewell/sourcemap-codec",
+      "version": "1.6.0",
+      "licenses": "MIT",
+      "repository": "https://github.com/jridgewell/sourcemaps",
+      "licenseFile": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\@jridgewell\\sourcemap-codec\\LICENSE",
+      "path": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\@jridgewell\\sourcemap-codec"
+    },
+    {
+      "name": "@leichtgewicht/ip-codec",
+      "version": "2.0.5",
+      "licenses": "MIT",
+      "repository": "https://github.com/martinheidegger/ip-codec",
+      "licenseFile": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\@leichtgewicht\\ip-codec\\LICENSE",
+      "path": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\@leichtgewicht\\ip-codec"
+    },
+    {
+      "name": "@noble/hashes",
+      "version": "1.8.0",
+      "licenses": "MIT",
+      "repository": "https://github.com/paulmillr/noble-hashes",
+      "licenseFile": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\@noble\\hashes\\LICENSE",
+      "path": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\@noble\\hashes"
+    },
+    {
+      "name": "@peculiar/asn1-cms",
+      "version": "2.11.1",
+      "licenses": "MIT",
+      "repository": "https://github.com/PeculiarVentures/asn1-schema",
+      "licenseFile": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\@peculiar\\asn1-cms\\LICENSE",
+      "path": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\@peculiar\\asn1-cms"
+    },
+    {
+      "name": "@peculiar/asn1-csr",
+      "version": "2.11.1",
+      "licenses": "MIT",
+      "repository": "https://github.com/PeculiarVentures/asn1-schema",
+      "licenseFile": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\@peculiar\\asn1-csr\\LICENSE",
+      "path": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\@peculiar\\asn1-csr"
+    },
+    {
+      "name": "@peculiar/asn1-ecc",
+      "version": "2.11.1",
+      "licenses": "MIT",
+      "repository": "https://github.com/PeculiarVentures/asn1-schema",
+      "licenseFile": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\@peculiar\\asn1-ecc\\LICENSE",
+      "path": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\@peculiar\\asn1-ecc"
+    },
+    {
+      "name": "@peculiar/asn1-pfx",
+      "version": "2.11.1",
+      "licenses": "MIT",
+      "repository": "https://github.com/PeculiarVentures/asn1-schema",
+      "licenseFile": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\@peculiar\\asn1-pfx\\LICENSE",
+      "path": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\@peculiar\\asn1-pfx"
+    },
+    {
+      "name": "@peculiar/asn1-pkcs8",
+      "version": "2.11.1",
+      "licenses": "MIT",
+      "repository": "https://github.com/PeculiarVentures/asn1-schema",
+      "licenseFile": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\@peculiar\\asn1-pkcs8\\LICENSE",
+      "path": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\@peculiar\\asn1-pkcs8"
+    },
+    {
+      "name": "@peculiar/asn1-pkcs9",
+      "version": "2.11.1",
+      "licenses": "MIT",
+      "repository": "https://github.com/PeculiarVentures/asn1-schema",
+      "licenseFile": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\@peculiar\\asn1-pkcs9\\LICENSE",
+      "path": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\@peculiar\\asn1-pkcs9"
+    },
+    {
+      "name": "@peculiar/asn1-rsa",
+      "version": "2.11.1",
+      "licenses": "MIT",
+      "repository": "https://github.com/PeculiarVentures/asn1-schema",
+      "licenseFile": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\@peculiar\\asn1-rsa\\LICENSE",
+      "path": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\@peculiar\\asn1-rsa"
+    },
+    {
+      "name": "@peculiar/asn1-schema",
+      "version": "2.11.1",
+      "licenses": "MIT",
+      "repository": "https://github.com/PeculiarVentures/asn1-schema",
+      "licenseFile": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\@peculiar\\asn1-schema\\LICENSE",
+      "path": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\@peculiar\\asn1-schema"
+    },
+    {
+      "name": "@peculiar/asn1-x509",
+      "version": "2.11.1",
+      "licenses": "MIT",
+      "repository": "https://github.com/PeculiarVentures/asn1-schema",
+      "licenseFile": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\@peculiar\\asn1-x509\\LICENSE",
+      "path": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\@peculiar\\asn1-x509"
+    },
+    {
+      "name": "@peculiar/asn1-x509-attr",
+      "version": "2.11.1",
+      "licenses": "MIT",
+      "repository": "https://github.com/PeculiarVentures/asn1-schema",
+      "licenseFile": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\@peculiar\\asn1-x509-attr\\LICENSE",
+      "path": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\@peculiar\\asn1-x509-attr"
+    },
+    {
+      "name": "@peculiar/utils",
+      "version": "2.0.3",
+      "licenses": "MIT",
+      "repository": "https://github.com/PeculiarVentures/pvtsutils",
+      "licenseFile": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\@peculiar\\utils\\LICENSE",
+      "path": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\@peculiar\\utils"
+    },
+    {
+      "name": "@peculiar/x509",
+      "version": "1.14.3",
+      "licenses": "MIT",
+      "repository": "https://github.com/PeculiarVentures/x509",
+      "licenseFile": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\@peculiar\\x509\\LICENSE",
+      "path": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\@peculiar\\x509"
+    },
+    {
+      "name": "@vue/compiler-core",
+      "version": "3.5.44",
+      "licenses": "MIT",
+      "repository": "https://github.com/vuejs/core",
+      "licenseFile": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\@vue\\compiler-core\\LICENSE",
+      "path": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\@vue\\compiler-core"
+    },
+    {
+      "name": "@vue/compiler-dom",
+      "version": "3.5.44",
+      "licenses": "MIT",
+      "repository": "https://github.com/vuejs/core",
+      "licenseFile": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\@vue\\compiler-dom\\LICENSE",
+      "path": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\@vue\\compiler-dom"
+    },
+    {
+      "name": "@vue/compiler-sfc",
+      "version": "3.5.44",
+      "licenses": "MIT",
+      "repository": "https://github.com/vuejs/core",
+      "licenseFile": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\@vue\\compiler-sfc\\LICENSE",
+      "path": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\@vue\\compiler-sfc"
+    },
+    {
+      "name": "@vue/compiler-ssr",
+      "version": "3.5.44",
+      "licenses": "MIT",
+      "repository": "https://github.com/vuejs/core",
+      "licenseFile": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\@vue\\compiler-ssr\\LICENSE",
+      "path": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\@vue\\compiler-ssr"
+    },
+    {
+      "name": "@vue/reactivity",
+      "version": "3.5.44",
+      "licenses": "MIT",
+      "repository": "https://github.com/vuejs/core",
+      "licenseFile": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\@vue\\reactivity\\LICENSE",
+      "path": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\@vue\\reactivity"
+    },
+    {
+      "name": "@vue/runtime-core",
+      "version": "3.5.44",
+      "licenses": "MIT",
+      "repository": "https://github.com/vuejs/core",
+      "licenseFile": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\@vue\\runtime-core\\LICENSE",
+      "path": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\@vue\\runtime-core"
+    },
+    {
+      "name": "@vue/runtime-dom",
+      "version": "3.5.44",
+      "licenses": "MIT",
+      "repository": "https://github.com/vuejs/core",
+      "licenseFile": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\@vue\\runtime-dom\\LICENSE",
+      "path": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\@vue\\runtime-dom"
+    },
+    {
+      "name": "@vue/server-renderer",
+      "version": "3.5.44",
+      "licenses": "MIT",
+      "repository": "https://github.com/vuejs/core",
+      "licenseFile": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\@vue\\server-renderer\\LICENSE",
+      "path": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\@vue\\server-renderer"
+    },
+    {
+      "name": "@vue/shared",
+      "version": "3.5.44",
+      "licenses": "MIT",
+      "repository": "https://github.com/vuejs/core",
+      "licenseFile": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\@vue\\shared\\LICENSE",
+      "path": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\@vue\\shared"
+    },
+    {
+      "name": "asn1js",
+      "version": "3.1.0",
+      "licenses": "BSD-3-Clause",
+      "repository": "https://github.com/PeculiarVentures/ASN1.js",
+      "licenseFile": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\asn1js\\LICENSE",
+      "path": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\asn1js"
+    },
+    {
+      "name": "bonjour-service",
+      "version": "1.4.4",
+      "licenses": "MIT",
+      "repository": "https://github.com/onlxltd/bonjour-service",
+      "licenseFile": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\bonjour-service\\LICENSE",
+      "path": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\bonjour-service"
+    },
+    {
+      "name": "bytestreamjs",
+      "version": "2.0.1",
+      "licenses": "BSD-3-Clause",
+      "repository": "https://github.com/PeculiarVentures/ByteStream.js",
+      "licenseFile": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\bytestreamjs\\LICENSE",
+      "path": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\bytestreamjs"
+    },
+    {
+      "name": "csstype",
+      "version": "3.2.3",
+      "licenses": "MIT",
+      "repository": "https://github.com/frenic/csstype",
+      "licenseFile": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\csstype\\LICENSE",
+      "path": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\csstype"
+    },
+    {
+      "name": "dns-packet",
+      "version": "5.6.1",
+      "licenses": "MIT",
+      "repository": "https://github.com/mafintosh/dns-packet",
+      "licenseFile": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\dns-packet\\LICENSE",
+      "path": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\dns-packet"
+    },
+    {
+      "name": "entities",
+      "version": "7.0.1",
+      "licenses": "BSD-2-Clause",
+      "repository": "https://github.com/fb55/entities",
+      "licenseFile": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\entities\\LICENSE",
+      "path": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\entities"
+    },
+    {
+      "name": "estree-walker",
+      "version": "2.0.2",
+      "licenses": "MIT",
+      "repository": "https://github.com/Rich-Harris/estree-walker",
+      "licenseFile": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\estree-walker\\LICENSE",
+      "path": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\estree-walker"
+    },
+    {
+      "name": "fast-deep-equal",
+      "version": "3.1.3",
+      "licenses": "MIT",
+      "repository": "https://github.com/epoberezkin/fast-deep-equal",
+      "licenseFile": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\fast-deep-equal\\LICENSE",
+      "path": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\fast-deep-equal"
+    },
+    {
+      "name": "magic-string",
+      "version": "0.30.21",
+      "licenses": "MIT",
+      "repository": "https://github.com/Rich-Harris/magic-string",
+      "licenseFile": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\@vue\\compiler-sfc\\node_modules\\magic-string\\LICENSE",
+      "path": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\@vue\\compiler-sfc\\node_modules\\magic-string"
+    },
+    {
+      "name": "multicast-dns",
+      "version": "7.2.5",
+      "licenses": "MIT",
+      "repository": "https://github.com/mafintosh/multicast-dns",
+      "licenseFile": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\multicast-dns\\LICENSE",
+      "path": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\multicast-dns"
+    },
+    {
+      "name": "nanoid",
+      "version": "3.3.20",
+      "licenses": "MIT",
+      "repository": "https://github.com/ai/nanoid",
+      "licenseFile": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\nanoid\\LICENSE",
+      "path": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\nanoid"
+    },
+    {
+      "name": "picocolors",
+      "version": "1.1.1",
+      "licenses": "ISC",
+      "repository": "https://github.com/alexeyraspopov/picocolors",
+      "licenseFile": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\picocolors\\LICENSE",
+      "path": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\picocolors"
+    },
+    {
+      "name": "pkijs",
+      "version": "3.4.3",
+      "licenses": "BSD-3-Clause",
+      "repository": "https://github.com/PeculiarVentures/PKI.js",
+      "licenseFile": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\pkijs\\LICENSE",
+      "path": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\pkijs"
+    },
+    {
+      "name": "postcss",
+      "version": "8.5.32",
+      "licenses": "MIT",
+      "repository": "https://github.com/postcss/postcss",
+      "licenseFile": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\postcss\\LICENSE",
+      "path": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\postcss"
+    },
+    {
+      "name": "pvtsutils",
+      "version": "1.3.6",
+      "licenses": "MIT",
+      "repository": "https://github.com/PeculiarVentures/pvtsutils",
+      "licenseFile": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\pvtsutils\\LICENSE",
+      "path": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\pvtsutils"
+    },
+    {
+      "name": "pvutils",
+      "version": "1.2.0",
+      "licenses": "MIT",
+      "repository": "https://github.com/PeculiarVentures/pvutils",
+      "licenseFile": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\pvutils\\LICENSE",
+      "path": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\pvutils"
+    },
+    {
+      "name": "reflect-metadata",
+      "version": "0.2.2",
+      "licenses": "Apache-2.0",
+      "repository": "https://github.com/rbuckton/reflect-metadata",
+      "licenseFile": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\reflect-metadata\\LICENSE",
+      "path": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\reflect-metadata"
+    },
+    {
+      "name": "selfsigned",
+      "version": "5.5.0",
+      "licenses": "MIT",
+      "repository": "https://github.com/jfromaniello/selfsigned",
+      "licenseFile": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\selfsigned\\LICENSE",
+      "path": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\selfsigned"
+    },
+    {
+      "name": "source-map-js",
+      "version": "1.2.2",
+      "licenses": "BSD-3-Clause",
+      "repository": "https://github.com/7rulnik/source-map-js",
+      "licenseFile": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\source-map-js\\LICENSE",
+      "path": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\source-map-js"
+    },
+    {
+      "name": "thunky",
+      "version": "1.1.0",
+      "licenses": "MIT",
+      "repository": "https://github.com/mafintosh/thunky",
+      "licenseFile": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\thunky\\LICENSE",
+      "path": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\thunky"
+    },
+    {
+      "name": "tslib",
+      "version": "1.14.1",
+      "licenses": "0BSD",
+      "repository": "https://github.com/Microsoft/tslib",
+      "licenseFile": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\tsyringe\\node_modules\\tslib\\LICENSE.txt",
+      "path": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\tsyringe\\node_modules\\tslib"
+    },
+    {
+      "name": "tslib",
+      "version": "2.8.1",
+      "licenses": "0BSD",
+      "repository": "https://github.com/Microsoft/tslib",
+      "licenseFile": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\tslib\\LICENSE.txt",
+      "path": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\tslib"
+    },
+    {
+      "name": "tsyringe",
+      "version": "4.10.0",
+      "licenses": "MIT",
+      "repository": "https://github.com/Microsoft/tsyringe",
+      "licenseFile": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\tsyringe\\LICENSE",
+      "path": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\tsyringe"
+    },
+    {
+      "name": "typescript",
+      "version": "5.9.3",
+      "licenses": "Apache-2.0",
+      "repository": "https://github.com/microsoft/TypeScript",
+      "licenseFile": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\typescript\\LICENSE.txt",
+      "path": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\typescript"
+    },
+    {
+      "name": "vue",
+      "version": "3.5.44",
+      "licenses": "MIT",
+      "repository": "https://github.com/vuejs/core",
+      "licenseFile": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\vue\\LICENSE",
+      "path": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\vue"
+    },
+    {
+      "name": "ws",
+      "version": "8.22.0",
+      "licenses": "MIT",
+      "repository": "https://github.com/websockets/ws",
+      "licenseFile": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\ws\\LICENSE",
+      "path": "D:\\test\\testforai\\LinkSpace\\apps\\desktop\\node_modules\\ws"
+    }
+  ]
+}

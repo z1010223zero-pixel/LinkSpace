@@ -39,6 +39,8 @@ logs/
 # 构建输出
 apps/desktop/out/
 apps/desktop/node_modules/
+# scrcpy 二进制暂存（由 scripts/stage-scrcpy.mjs 从本机发行包复制，不进版本库）
+apps/desktop/vendor/
 
 # ---------- Android ----------
 # 本机无 Android Studio，工具链装在 .toolchain/，体积数 GB，不进版本库

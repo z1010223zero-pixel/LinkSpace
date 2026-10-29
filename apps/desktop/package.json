@@ -3,12 +3,16 @@
   "version": "0.1.0",
   "private": true,
   "description": "LinkSpace 桌面端 —— 局域网多设备协作工作空间",
+  "author": "LinkSpace",
   "main": "./out/main/index.js",
   "scripts": {
     "dev": "node scripts/dev.mjs",
     "build": "electron-vite build",
     "typecheck": "vue-tsc --noEmit",
     "clean": "node -e \"fs.rmSync('out',{recursive:true,force:true})\"",
+    "stage:scrcpy": "node scripts/stage-scrcpy.mjs",
+    "dist": "electron-vite build && node scripts/stage-scrcpy.mjs && electron-builder --win --publish never",
+    "sbom": "node scripts/generate-sbom.mjs",
     "verify": "node scripts/build-verify.mjs && node out/verify/verify.js",
     "verify:transfer": "node scripts/build-verify-transfer.mjs && node out/verify/verify-transfer.js",
     "verify:pairing": "node scripts/build-verify-pairing.mjs",
@@ -30,10 +34,44 @@
     "@types/ws": "^8.18.2",
     "@vitejs/plugin-vue": "^6.0.1",
     "electron": "37.10.3",
+    "electron-builder": "^26.18.0",
     "electron-vite": "^6.0.0",
     "esbuild": "^0.28.2",
+    "license-checker": "^25.0.1",
     "typescript": "~5.9.3",
     "vite": "^8.3.5",
     "vue-tsc": "^3.3.13"
+  },
+  "build": {
+    "appId": "cn.linkspace.desktop",
+    "productName": "LinkSpace",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "out/**",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "vendor/scrcpy",
+        "to": "scrcpy"
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false
+    },
+    "npmRebuild": false
   }
 }
