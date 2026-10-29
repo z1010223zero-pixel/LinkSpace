@@ -10,11 +10,13 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Semaphore
 import javax.net.ssl.SSLContext
-import javax.net.ssl.SSLServerSocketFactory
+import javax.net.ssl.SSLServerSocket
+import javax.net.ssl.SSLSocket
 
 /**
- * HTTPS 文件接收服务。
+ * HTTPS 文件接收服务 + 控制通道服务端。
  *
  * 为什么不用 NanoHTTPD：它的 HTTPS API 要求从一个 KeyStore InputStream 构造，
  * 而我们的证书是运行时生成的，需要额外序列化一层；协议本身只有几条路由，
@@ -24,7 +26,11 @@ import javax.net.ssl.SSLServerSocketFactory
  *   POST /linkspace/v1/transfer/:id/chunk?offset=N    写入分块
  *   GET  /linkspace/v1/transfer/:id/chunk?offset=N    读取分块
  *   空体 POST = 偏移探针，只回报 committedOffset
- *   偏移不衔接返回 409
+ *   偏移不衔接返回 409；块摘要不符返回 400；体超限返回 413
+ *
+ * 请求体的读取发生在**鉴权之后**：body 缓冲按 Content-Length 分配，
+ * 若在读头阶段就分配，任何同网段设备都能用一个 Content-Length 头
+ * 触发最高 2GB 的内存分配把进程杀死（全项目审查 2026-10-29 P0-3）。
  */
 class TransferServer(
     private val identity: Identity,
@@ -42,12 +48,21 @@ class TransferServer(
     private val tokens = ConcurrentHashMap<String, String>()
     private val cancelled = ConcurrentHashMap.newKeySet<String>()
     private val controlConns = java.util.Collections.synchronizedSet(mutableSetOf<WebSocketConnection>())
-    /** WebSocket 连接 → 对端设备 ID。收到首条消息时记录，关闭时用于清理 */
+    /**
+     * WebSocket 连接 → 对端设备 ID。**首条消息（announce）时固定**，
+     * 之后该连接上任何 `from` 与之不符的消息一律丢弃——否则一条连接
+     * 可以先冒用 A 建立身份、再换 B 的 id 操作 A 的任务。
+     */
     private val controlPeerIds = java.util.Collections.synchronizedMap(mutableMapOf<WebSocketConnection, String>())
+    /** 连接 → 连入方 TLS 客户端证书指纹（未出示证书为 null），指纹锚定用 */
+    private val controlFingerprints = java.util.Collections.synchronizedMap(mutableMapOf<WebSocketConnection, String?>())
 
     /** 已交接给 WebSocket 的连接，finally 不得再关闭 */
-    private val handedOff: MutableSet<java.net.Socket> =
+    private val handedOff: MutableSet<Socket> =
         java.util.Collections.synchronizedSet(mutableSetOf())
+
+    /** 并发连接上限：accept 后拿不到槽位直接断开，防止线程与内存被灌满 */
+    private val connSlots = Semaphore(64)
 
     private var serverSocket: ServerSocket? = null
     private var thread: Thread? = null
@@ -75,9 +90,13 @@ class TransferServer(
         )
         kmf.init(identity.keyStore(), CharArray(0))
         ctx.init(kmf.keyManagers, null, null)
-        val factory: SSLServerSocketFactory = ctx.serverSocketFactory
-        val socket = factory.createServerSocket(0, 64) as ServerSocket
+        val factory: SSLContext = ctx
+        val socket = factory.serverSocketFactory.createServerSocket(0, 64) as ServerSocket
         socket.reuseAddress = true
+        // 索取连入方证书用于指纹锚定（对端桌面已实现客户端出示证书）。
+        // 用 want 而不是 need：旧版对端不出示证书时仍可完成配对，
+        // 已信任设备的证书校验在控制消息层强制执行
+        (socket as SSLServerSocket).wantClientAuth = true
         serverSocket = socket
         port = socket.localPort
 
@@ -99,6 +118,12 @@ class TransferServer(
         runCatching { serverSocket?.close() }
         serverSocket = null
         thread = null
+        synchronized(controlConns) {
+            controlConns.toList().forEach { runCatching { it.close() } }
+            controlConns.clear()
+        }
+        controlPeerIds.clear()
+        controlFingerprints.clear()
     }
 
     /** 周期向所有控制连接发心跳。to 留空：保活包是广播性质，桌面端允许空 to */
@@ -121,7 +146,7 @@ class TransferServer(
         }
     }
 
-    /** 接收方：登记一个待接收任务（桌面端 offer 到达时调用） */
+    /** 接收方：登记一个待接收任务（文件名已在 handleOffer 清洗过） */
     fun registerIncoming(
         transferId: String,
         files: List<TransferFile>,
@@ -166,6 +191,8 @@ class TransferServer(
      * 摘要由发送方随 transfer.complete 经控制通道交来（与桌面端一致）。
      * 大小或摘要不符一律删除 .part 并报错——宁可丢文件也不能留个
      * 名字像模像样的损坏文件。取消/失败状态的任务直接拒绝。
+     * 缺摘要不再兼容放行：协议规定 complete 必带 digests，缺省跳过
+     * 等于给「静默篡改落盘内容」留门（全项目审查 P1-6）。
      */
     fun finalizeTransfer(transferId: String, digests: Map<String, String>): Result<Int> {
         if (cancelled.contains(transferId)) {
@@ -188,14 +215,16 @@ class TransferServer(
                     IOException("文件 $name 大小不符：期望 ${part.expectedSize}，实际 ${file.length()}")
                 )
             }
-            // 2. 整体摘要必须与发送方一致（发送方没提供则不校验，兼容旧行为）
+            // 2. 整体摘要必须存在且一致
             val expected = digests[name]
-            if (expected != null) {
-                val actual = sha256File(file)
-                if (actual != expected) {
+                ?: run {
                     runCatching { file.delete() }
-                    return Result.failure(IOException("文件 $name 摘要不符：期望 ${expected.take(12)}…，实际 ${actual.take(12)}…"))
+                    return Result.failure(IOException("缺少文件 $name 的整体摘要，拒绝落盘"))
                 }
+            val actual = sha256File(file)
+            if (actual != expected) {
+                runCatching { file.delete() }
+                return Result.failure(IOException("文件 $name 摘要不符：期望 ${expected.take(12)}…，实际 ${actual.take(12)}…"))
             }
             // 3. 改名。目标已存在时说明落盘目录出现了同名文件，重命名避免覆盖
             val target = File(part.finalPath)
@@ -230,7 +259,22 @@ class TransferServer(
             } catch (e: IOException) {
                 if (socket.isClosed) return else continue
             }
-            Thread({ handleConnection(conn) }, "linkspace-conn").apply {
+            if (!connSlots.tryAcquire()) {
+                Log.w(TAG, "连接数已达上限，拒绝新连接")
+                runCatching { conn.close() }
+                continue
+            }
+            Thread({
+                try {
+                    handleConnection(conn)
+                } catch (t: Throwable) {
+                    // 处理器内的任何异常（包括 OOM 级别的分配失败）都不允许
+                    // 带走 accept 线程，否则服务整体下线
+                    Log.w(TAG, "连接处理异常: ${t.javaClass.simpleName}: ${t.message}")
+                } finally {
+                    connSlots.release()
+                }
+            }, "linkspace-conn").apply {
                 isDaemon = true
                 start()
             }
@@ -242,20 +286,21 @@ class TransferServer(
         // 而 use 退出时会关闭 socket，升级就等于白做。
         val socket = raw
         try {
-
             socket.tcpNoDelay = true
             val input = socket.getInputStream()
             val output = socket.getOutputStream()
+            // 连入方 TLS 证书指纹：升级前连接已完成 TLS 握手（请求已读过），
+            // 此时取证书既准确又省事。null = 对端未出示证书
+            val tlsFp = tlsFingerprintOf(socket)
 
             // 一个连接上可能有多个请求（keep-alive），循环处理
             while (!socket.isClosed) {
-                val req = try {
-                    HttpRequest.read(input)
+                val head = try {
+                    HttpHead.read(input)
                 } catch (e: IOException) {
                     return
                 } ?: return
-
-                val keepAlive = handleRequest(socket, req, output)
+                val keepAlive = handleRequest(socket, head, input, output, tlsFp)
                 if (!keepAlive) return
             }
         } finally {
@@ -266,20 +311,27 @@ class TransferServer(
         }
     }
 
-    private fun handleRequest(socket: Socket, req: HttpRequest, out: OutputStream): Boolean {
+    private fun handleRequest(
+        socket: Socket,
+        head: HttpHead,
+        input: InputStream,
+        out: OutputStream,
+        tlsFp: String?
+    ): Boolean {
         // WebSocket 升级：控制通道与文件传输共用同一端口（ADR-003）
-        if (WebSocketConnection.isUpgrade(req.method, req.headers)) {
-            val key = req.header("sec-websocket-key") ?: ""
+        if (WebSocketConnection.isUpgrade(head.method, head.headers)) {
+            val key = head.header("sec-websocket-key") ?: ""
             out.write(WebSocketConnection.handshakeResponse(key))
             out.flush()
             val conn = WebSocketConnection(socket)
             conn.listener = object : WebSocketConnection.Listener {
-                override fun onMessage(text: String) = onControlMessage(conn, text)
+                override fun onMessage(text: String) = onControlMessage(conn, text, tlsFp)
                 override fun onClosed() {
                     controlConns.remove(conn)
                     // 对端断连：把它留下的待确认配对请求清掉，否则会变成
                     // 永远展示在界面上、提交也不会成功的僵尸条目
                     val peer = controlPeerIds.remove(conn)
+                    controlFingerprints.remove(conn)
                     if (peer != null) controlClosedHandler?.invoke(peer)
                 }
             }
@@ -291,26 +343,27 @@ class TransferServer(
             return false
         }
 
-        val path = req.path
-        val match = Regex("^/linkspace/v1/transfer/([^/]+)/chunk$").find(path)
+        val match = Regex("^/linkspace/v1/transfer/([^/]+)/chunk$").find(head.path)
 
-        // 控制通道走 WebSocket，这里只处理数据面；其余一律 404
+        // 控制通道走 WebSocket，这里只处理数据面；其余一律 404 并断开
+        // （body 未读，保持 keep-alive 会让后续解析错位）
         if (match == null) {
-            writeResponse(out, 404, "not found", req.keepAlive)
-            return req.keepAlive
+            writeResponse(out, 404, "not found", false)
+            return false
         }
 
-        val deviceId = req.header(Protocol.HEADER_DEVICE_ID)
-        val token = req.header(Protocol.HEADER_TRANSFER_TOKEN)
+        // ---------- 鉴权（全部通过之前不读 body、不分配缓冲） ----------
+        val deviceId = head.header(Protocol.HEADER_DEVICE_ID)
+        val token = head.header(Protocol.HEADER_TRANSFER_TOKEN)
         if (deviceId.isNullOrEmpty() || token.isNullOrEmpty()) {
-            writeResponse(out, 401, "missing credentials", req.keepAlive)
-            return req.keepAlive
+            writeResponse(out, 401, "missing credentials", head.keepAlive)
+            return head.keepAlive
         }
         // 未授权设备一律拒绝——这是「未授权不能传输」的第一道闸门
         if (!trust.isKnown(deviceId) || !trust.hasScope(deviceId, "file")) {
             Log.w(TAG, "拒绝未授权设备的传输请求: ${deviceId.take(12)}")
-            writeResponse(out, 403, "unknown device", req.keepAlive)
-            return req.keepAlive
+            writeResponse(out, 403, "unknown device", head.keepAlive)
+            return head.keepAlive
         }
 
         // 桌面端的键格式是 transferId:fileName（与 transfer/server.ts 一致），
@@ -319,41 +372,55 @@ class TransferServer(
         val rawKey = decodeUriComponent(match.groupValues[1])
         val colon = rawKey.indexOf(':')
         if (colon <= 0) {
-            writeResponse(out, 400, "bad key", req.keepAlive)
-            return req.keepAlive
+            writeResponse(out, 400, "bad key", head.keepAlive)
+            return head.keepAlive
         }
         val transferId = rawKey.substring(0, colon)
         val fileName = rawKey.substring(colon + 1)
-        val offset = req.query["offset"]?.toLongOrNull() ?: 0L
+        val offset = head.query["offset"]?.toLongOrNull() ?: 0L
+        if (offset < 0) {
+            writeResponse(out, 400, "bad offset", head.keepAlive)
+            return head.keepAlive
+        }
         val inc = incoming[transferId]
         if (inc == null) {
-            writeResponse(out, 404, "unknown transfer", req.keepAlive)
-            return req.keepAlive
+            writeResponse(out, 404, "unknown transfer", head.keepAlive)
+            return head.keepAlive
         }
         // 令牌必须与接收方生成的匹配
         if (tokens[transferId] != token) {
-            writeResponse(out, 403, "bad token", req.keepAlive)
-            return req.keepAlive
+            writeResponse(out, 403, "bad token", head.keepAlive)
+            return head.keepAlive
         }
         // 已取消的任务不得再收分块：取消与分块几乎同时到达时，
         // 不拦的话取消后落下的字节会重新长出 .part
         if (cancelled.contains(transferId)) {
-            writeResponse(out, 409, "cancelled", req.keepAlive)
-            return req.keepAlive
+            writeResponse(out, 409, "cancelled", head.keepAlive)
+            return head.keepAlive
         }
         val part = inc.parts[fileName]
         if (part == null) {
-            writeResponse(out, 404, "unknown file", req.keepAlive)
-            return req.keepAlive
+            writeResponse(out, 404, "unknown file", head.keepAlive)
+            return head.keepAlive
         }
 
-        if (req.method == "POST") {
+        if (head.method == "POST") {
+            // 请求体超限直接 413 断开，绝不分配缓冲
+            if (head.contentLength > Protocol.MAX_CHUNK_BODY) {
+                Log.w(TAG, "分块体超限 ${head.contentLength}，断开连接")
+                writeResponse(out, 413, "chunk too large", false)
+                return false
+            }
+            val body = readBody(input, head.contentLength)
+            if (body == null) {
+                return false
+            }
             val written = File(part.partPath).length()
 
             // 空体 = 偏移探针，只回报已确认偏移
-            if (req.body.isEmpty()) {
+            if (body.isEmpty()) {
                 writeJson(
-                    out, 200, req.keepAlive,
+                    out, 200, head.keepAlive,
                     JSONObject().apply {
                         put("ok", true)
                         put("received", 0)
@@ -361,53 +428,68 @@ class TransferServer(
                         put("expectedSize", part.expectedSize)
                     }
                 )
-                return req.keepAlive
+                return head.keepAlive
             }
 
             // 偏移必须衔接，否则直接追加会静默产生损坏文件
             if (offset != written) {
                 writeJson(
-                    out, 409, req.keepAlive,
+                    out, 409, head.keepAlive,
                     JSONObject().apply {
                         put("ok", false)
                         put("committedOffset", written)
                         put("expectedSize", part.expectedSize)
                     }
                 )
-                return req.keepAlive
+                return head.keepAlive
+            }
+
+            // 块级摘要校验（协议第 5 节）：不符的块不落盘，由发送方重传，
+            // 而不是把坏字节写进 .part。缺摘要头视为非法请求
+            val declared = head.header(Protocol.HEADER_CHUNK_DIGEST)
+            if (declared.isNullOrEmpty() || !declared.equals(sha256Hex(body), ignoreCase = true)) {
+                Log.w(TAG, "分块摘要校验失败: $transferId@$offset")
+                writeJson(
+                    out, 400, false,
+                    JSONObject().apply {
+                        put("ok", false)
+                        put("error", "digest mismatch")
+                        put("committedOffset", written)
+                    }
+                )
+                return false
             }
 
             try {
-                File(part.partPath).appendBytes(req.body)
+                File(part.partPath).appendBytes(body)
             } catch (e: IOException) {
                 Log.e(TAG, "写入分块失败: ${e.message}")
-                writeResponse(out, 500, "io error", req.keepAlive)
-                return req.keepAlive
+                writeResponse(out, 500, "io error", head.keepAlive)
+                return head.keepAlive
             }
 
             val now = File(part.partPath).length()
             writeJson(
-                out, 200, req.keepAlive,
+                out, 200, head.keepAlive,
                 JSONObject().apply {
                     put("ok", true)
-                    put("received", req.body.size)
+                    put("received", body.size)
                     put("committedOffset", now)
                     put("expectedSize", part.expectedSize)
                 }
             )
-            return req.keepAlive
+            return head.keepAlive
         }
 
-        if (req.method == "GET") {
-            val part = inc.parts[fileName] ?: run {
-                writeResponse(out, 404, "unknown file", req.keepAlive)
-                return req.keepAlive
-            }
-            val length = req.query["length"]?.toIntOrNull() ?: Protocol.CHUNK_SIZE
+        if (head.method == "GET") {
+            // length 上限与桌面端一致（32MiB）：不设上限时已认证对端
+            // 一个请求就能申请 2GB 缓冲
+            val length = (head.query["length"]?.toIntOrNull() ?: Protocol.CHUNK_SIZE)
+                .coerceIn(1, Protocol.MAX_CHUNK_BODY)
             val data = readChunk(File(part.partPath), offset, length)
             out.write(
                 buildHttpResponse(
-                    200, req.keepAlive,
+                    200, head.keepAlive,
                     headers = mapOf(
                         "Content-Type" to "application/octet-stream",
                         "Content-Length" to data.size.toString(),
@@ -417,24 +499,67 @@ class TransferServer(
             )
             out.write(data)
             out.flush()
-            return req.keepAlive
+            return head.keepAlive
         }
 
-        writeResponse(out, 405, "method not allowed", req.keepAlive)
-        return req.keepAlive
+        writeResponse(out, 405, "method not allowed", head.keepAlive)
+        return head.keepAlive
     }
+
+    private fun readBody(input: InputStream, length: Long): ByteArray? {
+        if (length <= 0) return ByteArray(0)
+        val buf = ByteArray(length.toInt())
+        var read = 0
+        while (read < length) {
+            val n = input.read(buf, read, length.toInt() - read)
+            if (n < 0) return null
+            read += n
+        }
+        return buf
+    }
+
+    private fun tlsFingerprintOf(socket: Socket): String? = runCatching {
+        val ssl = socket as? SSLSocket ?: return null
+        val cert = ssl.session?.peerCertificates?.firstOrNull()
+            as? java.security.cert.X509Certificate ?: return null
+        sha256Hex(cert.encoded).replace(":", "").lowercase()
+    }.getOrNull()
 
     // ---------- 控制通道 ----------
 
-    /** 上层注入的控制消息处理器 */
-    var controlHandler: ((JSONObject) -> Unit)? = null
+    /**
+     * 控制消息的处理上下文。peerId 是该连接在 announce 时登记的身份，
+     * tlsFingerprint 是连入方出示的客户端证书指纹（可能为 null）。
+     * 服务层据此做指纹锚定：自报身份只有挂到真实证书上才可信。
+     */
+    class ControlContext(
+        val peerId: String,
+        val tlsFingerprint: String?,
+        internal val conn: WebSocketConnection
+    ) {
+        /** 主动掐断这条连接（指纹不符、配对码穷举等场景） */
+        fun close() {
+            runCatching { conn.close() }
+        }
+    }
 
-    private fun onControlMessage(conn: WebSocketConnection, text: String) {
+    /** 上层注入的控制消息处理器 */
+    var controlHandler: ((ControlContext, JSONObject) -> Unit)? = null
+
+    private fun onControlMessage(conn: WebSocketConnection, text: String, tlsFp: String?) {
         val obj = runCatching { JSONObject(text) }.getOrNull() ?: return
-        // 记录这条连接属于哪个对端，断连清理时要用
         val from = obj.optString("from")
-        if (from.isNotEmpty()) controlPeerIds[conn] = from
-        controlHandler?.invoke(obj)
+        if (from.isEmpty()) return
+        val registered = controlPeerIds[conn]
+        if (registered == null) {
+            controlPeerIds[conn] = from
+            controlFingerprints[conn] = tlsFp
+            controlHandler?.invoke(ControlContext(from, tlsFp, conn), obj)
+        } else if (registered != from) {
+            Log.w(TAG, "连接身份漂移（$registered → $from），丢弃消息")
+        } else {
+            controlHandler?.invoke(ControlContext(registered, controlFingerprints[conn], conn), obj)
+        }
     }
 
     /** 控制连接断开回调，参数为对端设备 ID */
@@ -449,14 +574,24 @@ class TransferServer(
 
     /**
      * 只发给指定对端。
-     * 广播（sendControl）不适合剪贴板：内容应当只给持有 clipboard 授权
-     * 的对端，一次广播会把文本推给连上的每一台设备。
+     * 广播（sendControl）不适合 accept 与剪贴板：token 和内容应当只给
+     * 任务的当事对端，一次广播等于把它们交给连上的每一台设备——
+     * 包括未认证的连接（全项目审查 P0-2）。
      */
     fun sendControlTo(peerId: String, obj: JSONObject) {
         val text = obj.toString()
         synchronized(controlConns) {
             controlConns.toList().forEach { conn ->
                 if (controlPeerIds[conn] == peerId) conn.send(text)
+            }
+        }
+    }
+
+    /** 主动掐断某对端的全部控制连接（指纹不符 / 配对码穷举时调用） */
+    fun closePeer(peerId: String) {
+        synchronized(controlConns) {
+            controlConns.toList().forEach { conn ->
+                if (controlPeerIds[conn] == peerId) runCatching { conn.close() }
             }
         }
     }
@@ -469,6 +604,21 @@ class TransferServer(
     }
 
     // ---------- 工具 ----------
+
+    /**
+     * 清洗来自对端的文件名：剥掉全部路径成分，只留基础名。
+     * 名字不清洗的话 `join(saveDir, name)` 会被 `../` 序列拼出保存目录
+     * 之外的写入路径；清洗后为空 / `.` / `..` 的名字直接拒绝。
+     * 手工按两种分隔符切分，不依赖本机 File 的平台语义。
+     */
+    fun sanitizeFileName(name: String): String {
+        val base = name.replace('\\', '/').substringAfterLast('/')
+        val cleaned = base.trim()
+        if (cleaned.isEmpty() || cleaned == "." || cleaned == "..") {
+            throw IOException("非法文件名: ${name.take(80)}")
+        }
+        return cleaned.take(255)
+    }
 
     private fun uniqueFile(dir: File, name: String): File {
         val direct = File(dir, name)
@@ -498,8 +648,14 @@ class TransferServer(
     }
 
     private fun writeResponse(out: OutputStream, code: Int, body: String, keepAlive: Boolean) {
-        out.write(buildHttpResponse(code, keepAlive, mapOf("Content-Type" to "text/plain")))
-        out.write(body.toByteArray())
+        val bytes = body.toByteArray()
+        out.write(
+            buildHttpResponse(
+                code, keepAlive,
+                mapOf("Content-Type" to "text/plain", "Content-Length" to bytes.size.toString())
+            )
+        )
+        out.write(bytes)
         out.flush()
     }
 
@@ -528,6 +684,7 @@ class TransferServer(
             404 -> "Not Found"
             405 -> "Method Not Allowed"
             409 -> "Conflict"
+            413 -> "Payload Too Large"
             500 -> "Internal Server Error"
             else -> "Unknown"
         }
@@ -546,30 +703,42 @@ class TransferServer(
             MessageDigest.getInstance("SHA-256").digest(data)
                 .joinToString("") { "%02x".format(it) }
 
+        /**
+         * 百分号解码。URLDecoder 是表单编码语义，会把 `+` 还原成空格——
+         * 文件名里字面的 `+` 会被解码错，先把它转义成 %2B 再解码
+         * （发送方编码时 + 从不表示空格，桌面端 decodeURIComponent 同语义）。
+         */
         fun decodeUriComponent(s: String): String =
-            java.net.URLDecoder.decode(s, "UTF-8")
+            java.net.URLDecoder.decode(s.replace("+", "%2B"), "UTF-8")
     }
 }
 
 /** 单个文件的落盘信息。提成顶层类：registerIncoming 是 public，返回值不能是私有嵌套类 */
 class PartInfo(val partPath: String, val finalPath: String, val expectedSize: Long)
 
-/** 最小 HTTP/1.1 请求解析。只支持我们需要的子集：固定头 + Content-Length 体 */
-private class HttpRequest(
+/** 单个请求头区块的上限，防止无界逐字节拼接吃光内存 */
+private const val MAX_HEADER_BYTES = 32 * 1024
+private const val MAX_HEADER_LINES = 100
+
+/**
+ * HTTP 请求头（不含 body）。body 由 handleRequest 在鉴权通过后
+ * 经 [TransferServer.readBody] 读取——先鉴权后读体是内存安全的根基。
+ */
+private class HttpHead(
     val method: String,
     val path: String,
     val query: Map<String, String>,
     val headers: Map<String, String>,
-    val body: ByteArray,
+    val contentLength: Long,
     val keepAlive: Boolean
 ) {
     fun header(name: String): String? = headers[name.lowercase()]
 
     companion object {
-        fun read(input: InputStream): HttpRequest? {
+        fun read(input: InputStream): HttpHead? {
             val requestLine = readLine(input) ?: return null
             val parts = requestLine.split(" ")
-            if (parts.size < 3) throw IOException("非法的请求行: $requestLine")
+            if (parts.size < 3) throw IOException("非法的请求行: ${requestLine.take(80)}")
             val method = parts[0]
             val rawPath = parts[1]
 
@@ -577,6 +746,7 @@ private class HttpRequest(
             while (true) {
                 val line = readLine(input) ?: throw IOException("请求头未结束")
                 if (line.isEmpty()) break
+                if (headers.size >= MAX_HEADER_LINES) throw IOException("请求头过多")
                 val idx = line.indexOf(':')
                 if (idx > 0) {
                     headers[line.substring(0, idx).trim().lowercase()] = line.substring(idx + 1).trim()
@@ -589,24 +759,17 @@ private class HttpRequest(
             if (qIdx >= 0) {
                 rawPath.substring(qIdx + 1).split('&').forEach { kv ->
                     val eq = kv.indexOf('=')
-                    if (eq > 0) query[kv.substring(0, eq)] = kv.substring(eq + 1)
+                    if (eq > 0) query[kv.substring(0, eq)] = TransferServer.decodeUriComponent(kv.substring(eq + 1))
                 }
             }
 
-            val contentLength = headers["content-length"]?.toIntOrNull() ?: 0
-            val body = ByteArray(contentLength)
-            var read = 0
-            while (read < contentLength) {
-                val n = input.read(body, read, contentLength - read)
-                if (n < 0) break
-                read += n
-            }
-
+            val contentLength = headers["content-length"]?.toLongOrNull() ?: 0L
             val conn = headers["connection"]?.lowercase() ?: ""
             val keepAlive = conn != "close"
-            return HttpRequest(method, path, query, headers, if (read == contentLength) body else body.copyOf(read), keepAlive)
+            return HttpHead(method, path, query, headers, contentLength, keepAlive)
         }
 
+        /** 逐字节读一行，行长超限即抛——头行无界拼接是内存耗尽的另一条路 */
         private fun readLine(input: InputStream): String? {
             val sb = StringBuilder()
             while (true) {
@@ -614,6 +777,7 @@ private class HttpRequest(
                 if (c < 0) return if (sb.isEmpty()) null else sb.toString()
                 if (c == '\n'.code) return sb.toString().removeSuffix("\r")
                 if (c != '\r'.code) sb.append(c.toChar())
+                if (sb.length > MAX_HEADER_BYTES) throw IOException("请求行/头过长")
             }
         }
     }

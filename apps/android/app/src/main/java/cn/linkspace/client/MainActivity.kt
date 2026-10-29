@@ -12,19 +12,28 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.changedToDown
+import androidx.compose.ui.input.pointer.changedToUp
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import cn.linkspace.client.service.ClipboardSync
 import cn.linkspace.client.service.DiscoveredService
+import cn.linkspace.client.service.InputController
 import cn.linkspace.client.service.LinkSpaceService
 import cn.linkspace.client.service.OutgoingFile
 import cn.linkspace.client.service.TransferTask
@@ -94,6 +103,8 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val service = LinkSpaceService.get(this)
+        // 前台服务随应用启动：保活连接，杀后台不再「随时消失」（任务 B-③）
+        cn.linkspace.client.service.LinkSpaceForegroundService.start(this)
 
         setContent {
             MaterialTheme {
@@ -113,7 +124,36 @@ fun MainScreen(service: LinkSpaceService) {
     val trusted by service.trusted.collectAsStateWithLifecycle()
     val port by service.port.collectAsStateWithLifecycle()
     val selfName by service.selfName.collectAsStateWithLifecycle()
+    val inputState by service.inputState.collectAsStateWithLifecycle()
+    val inputMessage by service.inputMessage.collectAsStateWithLifecycle()
     var notice by remember { mutableStateOf("") }
+
+    val context = LocalContext.current
+
+    // Android 13+ 前台服务需要通知权限才展示通知；拒绝不阻塞运行，
+    // 只是通知不显示（服务照常保活）
+    if (android.os.Build.VERSION.SDK_INT >= 33) {
+        val notifPermission = rememberLauncherForActivityResult(
+            ActivityResultContracts.RequestPermission()
+        ) { }
+        LaunchedEffect(Unit) {
+            notifPermission.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+
+    // 键鼠控制中的提示（对端拒绝 / 断连 / 会话结束原因）
+    LaunchedEffect(inputMessage) {
+        if (inputMessage.isNotEmpty()) {
+            notice = inputMessage
+            service.clearInputMessage()
+        }
+    }
+
+    // 控制会话激活时整屏切到触控板
+    if (inputState.phase == "active") {
+        TouchpadScreen(service)
+        return
+    }
 
     // ---------- 本机改名（5.4） ----------
     var showRenameDialog by remember { mutableStateOf(false) }
@@ -124,7 +164,6 @@ fun MainScreen(service: LinkSpaceService) {
     var pendingFiles by remember { mutableStateOf<List<OutgoingFile>>(emptyList()) }
     var sending by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
-    val context = LocalContext.current
 
     // SAF 选文件：只回 Uri 不回路径，名字与大小在回调里一并查好，
     // 对话框展示的就是将要发送的东西，不再有第二次转换
@@ -155,6 +194,12 @@ fun MainScreen(service: LinkSpaceService) {
                     nameDraft = selfName
                     showRenameDialog = true
                 }) { Text("修改本机名称") }
+                TextButton(onClick = {
+                    // 用户主动退出 = 彻底下线：断开全部连接（含键鼠会话）
+                    // 并停掉前台服务（任务 B-③ 的退出语义）
+                    cn.linkspace.client.service.LinkSpaceForegroundService.exit(context)
+                    (context as? android.app.Activity)?.finish()
+                }) { Text("退出") }
             }
             Spacer(Modifier.height(4.dp))
         }
@@ -308,6 +353,20 @@ fun MainScreen(service: LinkSpaceService) {
                         }) {
                             Text("发送文件")
                         }
+                        // 安卓→电脑远控（协议 4.6）：桌面被控端会弹确认框
+                        Button(onClick = {
+                            val metrics = context.resources.displayMetrics
+                            service.input.request(
+                                peerId = service.fullPeerIdOf(d.idPrefix),
+                                screen = InputController.Screen(
+                                    metrics.widthPixels.coerceAtLeast(1),
+                                    metrics.heightPixels.coerceAtLeast(1)
+                                ),
+                                displayName = selfName
+                            )
+                        }) {
+                            Text("控制电脑")
+                        }
                     }
                 }
             }
@@ -316,7 +375,7 @@ fun MainScreen(service: LinkSpaceService) {
         item {
             Spacer(Modifier.height(24.dp))
             Text(
-                "第一阶段：本机作为接收方。投屏与控制由桌面端 scrcpy 完成，不经过本应用。",
+                "投屏与被控由桌面端完成；本机可发送/接收文件，也可作为触控板控制已配对的电脑。",
                 fontSize = 11.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -377,6 +436,20 @@ fun MainScreen(service: LinkSpaceService) {
                         pendingFiles = emptyList()
                     }
                 ) { Text("取消") }
+            }
+        )
+    }
+
+    // ---------- 等待对端确认控制请求 ----------
+    val inputStateForDialog = inputState
+    if (inputStateForDialog.phase == "waiting") {
+        AlertDialog(
+            onDismissRequest = { service.input.stop() },
+            title = { Text("正在请求控制对方电脑") },
+            text = { Text("请在电脑上确认 LinkSpace 弹出的授权提示。请求 30 秒内未确认会自动失效。") },
+            confirmButton = {},
+            dismissButton = {
+                OutlinedButton(onClick = { service.input.stop() }) { Text("取消") }
             }
         )
     }
@@ -476,3 +549,285 @@ private fun Context.outgoingFiles(uris: List<Uri>): List<OutgoingFile> =
             )
         }.getOrNull()
     }
+
+
+/**
+ * 触控板模式：Android 作为键鼠控制端（协议 4.6）。
+ *
+ * 交互约定（MVP）：
+ *   - 单指拖动 = 移动光标（绝对坐标，按本机屏幕空间上报，桌面端做映射）
+ *   - 轻点 = 左键单击；「按住拖拽」开关 = 左键保持按下
+ *   - 双指拖动 = 滚轮（一档约 48px）
+ *   - 文本框 = 键盘输入（美式布局字符映射，IME 中文跳过）；
+ *     Ctrl/Alt 为粘滞修饰键，输一个字符即自动释放
+ */
+@Composable
+fun TouchpadScreen(service: LinkSpaceService) {
+    val controller = service.input
+    val context = LocalContext.current
+
+    // 事件坐标空间 = 请求时声明的本机屏幕尺寸，两者必须一致
+    val metrics = remember { context.resources.displayMetrics }
+    val screenW = remember { metrics.widthPixels.coerceAtLeast(1) }
+    val screenH = remember { metrics.heightPixels.coerceAtLeast(1) }
+
+    var dragLeft by remember { mutableStateOf(false) }
+    var ctrlSticky by remember { mutableStateOf(false) }
+    var altSticky by remember { mutableStateOf(false) }
+    var text by remember { mutableStateOf("") }
+    var scrollAccum by remember { mutableStateOf(0f) }
+
+    fun send(events: List<org.json.JSONObject>) {
+        // 每条消息上限 64 条（协议 4.6），分段发送
+        events.chunked(PROTO_MAX_EVENTS).forEach { controller.sendEvents(it) }
+    }
+
+    fun typeChar(c: Char): List<org.json.JSONObject> {
+        val pair = Vk.forChar(c)
+        val vk = pair.first
+        val needShift = pair.second
+        if (vk == 0) return emptyList()
+        val events = mutableListOf<org.json.JSONObject>()
+        if (ctrlSticky) events += InputController.key(0x11, true)
+        if (altSticky) events += InputController.key(0x12, true)
+        if (needShift) events += InputController.key(0x10, true)
+        events += InputController.key(vk, true)
+        events += InputController.key(vk, false)
+        if (needShift) events += InputController.key(0x10, false)
+        if (altSticky) events += InputController.key(0x12, false)
+        if (ctrlSticky) events += InputController.key(0x11, false)
+        return events
+    }
+
+    Column(Modifier.fillMaxSize().padding(12.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("正在控制电脑", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                Text(
+                    "单指移动 · 轻点单击 · 双指滚动 · 下方输入文字",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Button(onClick = {
+                if (dragLeft) {
+                    send(listOf(InputController.up("left")))
+                    dragLeft = false
+                }
+                controller.stop()
+            }) { Text("结束控制") }
+        }
+
+        // ---------- 特殊按键行 ----------
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(vertical = 6.dp)) {
+            FilledTonalButton(onClick = { send(listOf(InputController.key(0x1B, true), InputController.key(0x1B, false))) }) { Text("Esc") }
+            FilledTonalButton(onClick = { send(InputController.tap(0x09)) }) { Text("Tab") }
+            FilledTonalButton(onClick = { send(InputController.tap(0x0D)) }) { Text("Enter") }
+            FilledTonalButton(onClick = { send(InputController.tap(0x08)) }) { Text("退格") }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            FilledTonalButton(onClick = { send(InputController.tap(0x25)) }) { Text("←") }
+            FilledTonalButton(onClick = { send(InputController.tap(0x26)) }) { Text("↑") }
+            FilledTonalButton(onClick = { send(InputController.tap(0x28)) }) { Text("↓") }
+            FilledTonalButton(onClick = { send(InputController.tap(0x27)) }) { Text("→") }
+            Spacer(Modifier.weight(1f))
+            FilledTonalButton(
+                onClick = { ctrlSticky = !ctrlSticky },
+                colors = ButtonDefaults.filledTonalButtonColors(
+                    containerColor = if (ctrlSticky) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.secondaryContainer
+                )
+            ) { Text("Ctrl") }
+            FilledTonalButton(
+                onClick = { altSticky = !altSticky },
+                colors = ButtonDefaults.filledTonalButtonColors(
+                    containerColor = if (altSticky) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.secondaryContainer
+                )
+            ) { Text("Alt") }
+        }
+
+        // ---------- 文本输入（美式布局映射；中文等 IME 内容跳过） ----------
+        BasicTextField(
+            value = text,
+            onValueChange = { new ->
+                val events = diffToKeyEvents(text, new, ::typeChar)
+                text = new
+                // 输入即用掉粘滞修饰键
+                ctrlSticky = false
+                altSticky = false
+                send(events)
+            },
+            modifier = Modifier.fillMaxWidth().height(44.dp).padding(vertical = 4.dp),
+            textStyle = TextStyle(fontSize = 15.sp),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
+            decorationBox = { inner ->
+                Surface(shape = MaterialTheme.shapes.small, color = MaterialTheme.colorScheme.surfaceVariant) {
+                    Box(Modifier.padding(horizontal = 10.dp, vertical = 10.dp)) {
+                        if (text.isEmpty()) {
+                            Text("在此输入文字，将键入到电脑", fontSize = 13.sp, color = Color.Gray)
+                        }
+                        inner()
+                    }
+                }
+            }
+        )
+
+        // ---------- 触控板 ----------
+        Surface(
+            shape = MaterialTheme.shapes.medium,
+            color = MaterialTheme.colorScheme.surfaceVariant,
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .padding(vertical = 8.dp)
+                .pointerInput(Unit) {
+                    awaitPointerEventScope {
+                        var downAt = 0L
+                        var moved = false
+                        var twoFinger = false
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            val pressed = event.changes.filter { it.pressed }
+                            if (pressed.size >= 2) {
+                                // 双指滚动：纵向位移累计成一档档的滚轮刻度。
+                                // 上滑 = 内容向上 = 滚轮向上（Windows 正值 = 向上滚）
+                                twoFinger = true
+                                var dy = 0f
+                                pressed.forEach { dy += it.positionChange().y }
+                                scrollAccum += dy / pressed.size
+                                while (kotlin.math.abs(scrollAccum) >= 48f) {
+                                    val tick = if (scrollAccum > 0) -1 else 1
+                                    send(listOf(InputController.wheel(0, tick)))
+                                    scrollAccum -= tick * 48f
+                                }
+                                event.changes.forEach {
+                                    if (it.positionChange() != androidx.compose.ui.geometry.Offset.Zero) it.consume()
+                                }
+                            } else if (pressed.size == 1) {
+                                val c = pressed.first()
+                                if (c.changedToDown()) twoFinger = false
+                                if (!twoFinger) {
+                                    val pos = c.position
+                                    if (c.changedToDown()) {
+                                        downAt = System.currentTimeMillis()
+                                        moved = false
+                                    }
+                                    if (c.positionChange() != androidx.compose.ui.geometry.Offset.Zero) {
+                                        moved = moved || kotlin.math.abs(c.positionChange().x) > 2f ||
+                                            kotlin.math.abs(c.positionChange().y) > 2f
+                                    }
+                                    // 按触控板占比映射到本机全屏坐标
+                                    val x = (pos.x / size.width.toFloat() * screenW).toInt()
+                                    val y = (pos.y / size.height.toFloat() * screenH).toInt()
+                                    send(
+                                        listOf(
+                                            InputController.move(
+                                                x.coerceIn(0, screenW - 1),
+                                                y.coerceIn(0, screenH - 1)
+                                            )
+                                        )
+                                    )
+                                    if (c.changedToUp() && !moved && System.currentTimeMillis() - downAt < 250) {
+                                        send(listOf(InputController.down("left"), InputController.up("left")))
+                                    }
+                                    if (c.positionChange() != androidx.compose.ui.geometry.Offset.Zero) c.consume()
+                                }
+                            } else {
+                                // 全部抬起：滚动状态复位
+                                twoFinger = false
+                                scrollAccum = 0f
+                            }
+                        }
+                    }
+                }
+        ) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text("触控板", color = Color.Gray)
+            }
+        }
+
+        // ---------- 鼠标键 ----------
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(
+                modifier = Modifier.weight(1f),
+                onClick = { send(listOf(InputController.down("left"), InputController.up("left"))) }
+            ) { Text("左键") }
+            Button(
+                modifier = Modifier.weight(1f),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = if (dragLeft) MaterialTheme.colorScheme.tertiary
+                    else MaterialTheme.colorScheme.primary
+                ),
+                onClick = {
+                    if (dragLeft) {
+                        send(listOf(InputController.up("left")))
+                    } else {
+                        send(listOf(InputController.down("left")))
+                    }
+                    dragLeft = !dragLeft
+                }
+            ) { Text(if (dragLeft) "松开拖拽" else "按住拖拽") }
+            Button(
+                modifier = Modifier.weight(1f),
+                onClick = { send(listOf(InputController.down("right"), InputController.up("right"))) }
+            ) { Text("右键") }
+        }
+    }
+}
+
+/** 协议常量的本文件别名，避免与 Compose 命名冲突 */
+private const val PROTO_MAX_EVENTS = 64
+
+/**
+ * 文本框内容差分 → 键盘事件。
+ * 追加 = 逐字符输入；变短 = 退格；整段替换 = 退格后重输。
+ * 一次超过 64 条的批次由 [TouchpadScreen.send] 分段。
+ */
+private fun diffToKeyEvents(
+    last: String,
+    new: String,
+    typeChar: (Char) -> List<org.json.JSONObject>
+): List<org.json.JSONObject> {
+    val events = mutableListOf<org.json.JSONObject>()
+    val backspace = listOf(InputController.key(0x08, true), InputController.key(0x08, false))
+    when {
+        new.length > last.length && new.startsWith(last) ->
+            new.substring(last.length).forEach { events += typeChar(it) }
+        new.length < last.length && last.startsWith(new) ->
+            repeat((last.length - new.length).coerceAtMost(64)) { events += backspace }
+        else -> {
+            repeat(last.length.coerceAtMost(32)) { events += backspace }
+            new.take(32).forEach { events += typeChar(it) }
+        }
+    }
+    return events
+}
+
+/**
+ * 字符 → Windows 虚拟键码（美式键盘布局），second 表示是否需要 Shift。
+ * 映射表覆盖 ASCII 可打印字符与常用控制键；中文等 IME 内容返回 vk=0，
+ * 宁可跳过也不猜——错误键码会直接打到电脑上。
+ */
+private object Vk {
+    private val shifted = mapOf(
+        '!' to (0x31 to true), '@' to (0x32 to true), '#' to (0x33 to true), '$' to (0x34 to true),
+        '%' to (0x35 to true), '^' to (0x36 to true), '&' to (0x37 to true), '*' to (0x38 to true),
+        '(' to (0x39 to true), ')' to (0x30 to true), '`' to (0xC0 to false), '~' to (0xC0 to true),
+        '-' to (0xBD to false), '_' to (0xBD to true), '=' to (0xBB to false), '+' to (0xBB to true),
+        '[' to (0xDB to false), '{' to (0xDB to true), ']' to (0xDD to false), '}' to (0xDD to true),
+        '\\' to (0xDC to false), '|' to (0xDC to true), ';' to (0xBA to false), ':' to (0xBA to true),
+        '\'' to (0xDE to false), '"' to (0xDE to true), ',' to (0xBC to false), '<' to (0xBC to true),
+        '.' to (0xBE to false), '>' to (0xBE to true), '/' to (0xBF to false), '?' to (0xBF to true)
+    )
+
+    fun forChar(c: Char): Pair<Int, Boolean> = when (c) {
+        in 'a'..'z' -> (0x41 + (c - 'a')) to false
+        in 'A'..'Z' -> (0x41 + (c - 'A')) to true
+        in '0'..'9' -> (0x30 + (c - '0')) to false
+        ' ' -> 0x20 to false
+        '\n', '\r' -> 0x0D to false
+        '\t' -> 0x09 to false
+        else -> shifted[c] ?: (0x00 to false)
+    }
+}

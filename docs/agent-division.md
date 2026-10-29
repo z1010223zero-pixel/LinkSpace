@@ -73,6 +73,9 @@ git worktree add ..\LinkSpace-android -b feat/android-b master
 | 日期 | 发现方 | 问题 | 移交给 | 状态 |
 |---|---|---|---|---|
 | （示例）2026-10-29 | B | 桌面心跳 15s 超时偏短 | A | 已修（14dfb12） |
+| 2026-10-29 | B | 安卓→电脑远控的全流程真机走查需要桌面在线配合（确认弹窗 + 输入注入），B 侧已就绪（触控板 UI + InputController，真机安装启动通过） | A | 待办：请 A 错峰起桌面实例配合走查 |
+| 2026-10-29 | B | 文档一致性（审查报告 §4）：根 README 与 apps/desktop/README 的状态段过期，属 A 领地，B 不代改 | A | 待办 |
+| 2026-10-29 | B | 分工文档 §2 原写「GRADLE_USER_HOME=D:\dev\gradle 没问题」与 apps/android/README 实测相反（该路径不可写，报 journal-1.lock 拒绝访问）；且 ANDROID_SDK_ROOT 与 ANDROID_HOME 不一致会让 Gradle 拒绝构建。正确姿势已补进 android README | 双方知晓 | 已更正 |
 
 ## 7. 提交与合并流程
 

@@ -39,6 +39,33 @@ object Protocol {
     const val TYPE_TRANSFER_ERROR = "transfer.error"
     const val TYPE_CLIPBOARD_SHARE = "clipboard.share"
 
+    /** 会话控制（4.3 / 4.6 键鼠共享）：Android 作控制端时使用 */
+    const val TYPE_SESSION_START = "session.start"
+    const val TYPE_SESSION_ACCEPT = "session.accept"
+    const val TYPE_SESSION_REJECT = "session.reject"
+    const val TYPE_SESSION_STOP = "session.stop"
+    const val TYPE_INPUT_EVENT = "input.event"
+
+    /** sessionId 约束，与桌面端 SESSION_ID_RE 一致 */
+    const val SESSION_ID_RE = "[A-Za-z0-9_-]{1,64}"
+
+    /** 单条 input.event 消息的事件数上限，与桌面端 MAX_EVENTS_PER_MESSAGE 一致 */
+    const val MAX_EVENTS_PER_MESSAGE = 64
+
+    /** move 事件坐标上限（控制端屏幕绝对坐标），与桌面端 MAX_COORD 一致 */
+    const val MAX_COORD = 32768
+
+    /** 数据面请求体上限，与桌面端 MAX_CHUNK_BODY 一致（超限 413） */
+    const val MAX_CHUNK_BODY = 32 * 1024 * 1024
+
+    /**
+     * 数据面组合键的百分号编码。桌面端按 decodeURIComponent 解码，
+     * 把 `+` 还原为空格的是表单编码规则而非 URI 规则——SAF 文件名里
+     * 空格与 `+` 都常见，必须用 %20 表示空格、`+` 原样编码成 %2B。
+     */
+    fun encodeTransferKey(key: String): String =
+        java.net.URLEncoder.encode(key, "UTF-8").replace("+", "%20")
+
     /**
      * 配对默认授予的范围，与桌面端 `DEFAULT_GRANT_SCOPE` 一致。
      * control 不在其中：让对端操作本机必须另行授权。

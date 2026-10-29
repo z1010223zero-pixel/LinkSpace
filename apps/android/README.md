@@ -1,20 +1,22 @@
 # apps/android — LinkSpace Android 客户端
 
-Kotlin + Jetpack Compose。**文件是接收方**（通告自身、接受配对、接收文件），
-**剪贴板已双向**。投屏与控制由桌面端 scrcpy 经 adb 完成，不经过本应用。
+Kotlin + Jetpack Compose。**文件收发双向**（通告自身、接受配对、发送/接收文件），
+**剪贴板已双向**，**安卓→电脑远控已实现**（本机作触控板 + 键盘，控制已配对的电脑）。
+投屏与被控显示由桌面端 scrcpy 经 adb 完成，不经过本应用。
 
 ## 职责
 
 - 广播自身存在（mDNS）并响应配对
 - 文件传输的接收与发送端
 - 剪贴板同步
+- 键鼠共享的控制端（安卓→电脑远控，协议 4.6）
+- 前台服务保活与「用户退出 = 彻底下线」语义
 - 扩展屏幕的接收端（P2）
-- 被控时的可见授权提示
 
 ## 边界
 
-- **投屏与控制不经过本客户端**：由 scrcpy 的 server 端完成。本客户端不重复实现视频采集与输入注入。
-- 不实现跨设备键鼠的输入注入（第一阶段）。
+- **投屏与被控显示不经过本客户端**：由 scrcpy 的 server 端完成。本客户端不重复实现视频采集与输入注入。
+- 输入注入发生在**桌面被控端**（SendInput）；本客户端只做事件采集与外发。
 
 ## 设备角色差异（方案 2.3）
 
@@ -22,11 +24,18 @@ Kotlin + Jetpack Compose。**文件是接收方**（通告自身、接受配对�
 |---|---|---|
 | 投屏 | 支持（经 scrcpy） | 不适用 |
 | 文件 / 剪贴板 | 支持 | 支持 |
+| 远控电脑（触控板） | 支持 | 支持 |
 | 扩展显示接收 | 不适用 | 目标能力（P2） |
 
 ## 状态
 
-**接收端主体已实现（2026-10-29）**，等待真机联调。阶段 2（文件共享）才真正需要本客户端。
+**收发 + 远控 + 安全基线已实现（2026-10-29，Agent B）**。与全项目审查
+（`docs/project-review-2026-10-29.md`）对应的修复全部落地：TLS 指纹钉住
+（P0-1）、服务端索证 + 指纹闸门 + 定向 accept + revoke 校验（P0-2）、
+先鉴权后读体 + 32MiB 上限（P0-3）、文件名收敛（P1-4）、配对码 CSPRNG +
+错误上限 + 挂起上限（P1-5）、块摘要必校验 + 整体摘要必带（P1-6）、
+cancel/complete 绑定连接身份（P1-7）、组合键百分号编码（P1-8）、
+配对码不再进 logcat、前台服务保活（P2）。
 
 ---
 
@@ -37,6 +46,9 @@ Kotlin + Jetpack Compose。**文件是接收方**（通告自身、接受配对�
 ```bash
 export JAVA_HOME="/c/Program Files/Java/jdk-22"
 export ANDROID_HOME="/d/test/testforai/LinkSpace/.toolchain/android-sdk"
+# 环境里另有 ANDROID_SDK_ROOT=D:\document\Android\sdk，两者不一致会让
+# Gradle 直接拒绝构建，必须一起指到 .toolchain
+export ANDROID_SDK_ROOT="$ANDROID_HOME"
 export GRADLE_USER_HOME="/d/test/testforai/LinkSpace/.toolchain/gradle-home"
 
 # 构建
@@ -73,6 +85,9 @@ service/
 ├── Discovery.kt             mDNS 通告与浏览（系统 NsdManager）
 ├── WebSocketConnection.kt   最小 WebSocket 服务端（RFC 6455 子集）
 ├── TransferServer.kt        HTTPS 数据面 + 控制通道，共用同一端口
+├── LinkSpaceClient.kt       客户端角色（发送/远控连出），TLS 握手后按信任清单钉指纹
+├── InputController.kt       键鼠共享控制端状态机，镜像桌面 input/session.ts
+├── LinkSpaceForegroundService.kt  前台服务：保活 + 退出语义
 └── LinkSpaceService.kt      编排层，对应桌面端 host.ts
 ```
 
@@ -89,7 +104,8 @@ API 要求从一个 KeyStore InputStream 构造，而我们的证书是运行时
 
 ## 已验证 / 未验证
 
-**已验证**：见 `docs/technical-validation.md`。
+**已验证**：见 `docs/technical-validation.md`。2026-10-29（Agent B）：
+APK 构建、真机（TB710FU）安装启动、服务栈就绪、前台服务常驻（dataSync）。
 
 **未验证**：
 
@@ -97,21 +113,22 @@ API 要求从一个 KeyStore InputStream 构造，而我们的证书是运行时
 - 断点续传在 Android 侧的行为
 - 传输中途杀掉应用后的 `.part` 清理
 - 多设备同时连接
+- 安卓→电脑远控的全流程真机走查（需桌面端配合弹确认框，移交清单已挂）
 - Android 10 以下的分区存储适配（minSdk 26，理论上覆盖）
 
 ---
 
 ## 已知限制
 
-- **文件只做接收方**：不主动连接桌面端推送文件（剪贴板已是双向）
 - 保存目录固定为 `getExternalFilesDir(null)/LinkSpace`，未做用户选择
-- 界面没有发送文件的入口
 - **剪贴板同步只在前台有效**：Android 10 起后台应用读不到剪贴板
   （不是权限问题，申请也拿不到）。因此同步挂在 `MainActivity.onResume/onPause`
   之间，退到后台就停。这是平台约束，不是缺陷。
-- 无前台服务，应用被切到后台可能被系统回收导致传输中断
+- 远控触控板为 MVP 交互：单指移动 / 轻点单击 / 双指滚动 / 美式布局字符输入；
+  IME 中文文本跳过，拖拽需用「按住拖拽」开关
+- 服务端监听 `0.0.0.0`，未做来源地址门禁（与桌面端同款折中，见审查报告）
 
 ## 待定
 
-- 是否需要常驻前台服务（影响保活与兼容性）
 - 无线调试的引导方式
+- 远控交互的完整形态（滚轮自然方向、中键、多手势）

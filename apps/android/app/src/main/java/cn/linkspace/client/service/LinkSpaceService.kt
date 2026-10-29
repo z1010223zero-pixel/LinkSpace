@@ -44,6 +44,13 @@ class LinkSpaceService private constructor(private val appContext: Context) {
         const val deviceType = "android-phone"
 
         private const val KEY_DISPLAY_NAME = "displayName"
+        /** 同时挂起的配对请求上限，与桌面端 MAX_PENDING 一致 */
+        private const val MAX_PENDING_PAIRINGS = 8
+        /** 配对码最大错误次数，超过即断开对端连接（与桌面端 maxAttempts 一致） */
+        private const val MAX_PAIR_ATTEMPTS = 5
+
+        /** 配对码用 CSPRNG：Math.random 可预测，6 位码可被在线穷举（审查 P1-5） */
+        private val secureRandom = java.security.SecureRandom()
 
         @Volatile
         var deviceIdPrefix: String = ""
@@ -61,6 +68,9 @@ class LinkSpaceService private constructor(private val appContext: Context) {
                 instance ?: LinkSpaceService(context.applicationContext).also { instance = it }
             }
         }
+
+        /** 指纹统一为 64 位小写 hex 再比较，兼容冒号分隔与纯 hex 两种写法 */
+        fun normalizeFingerprint(fp: String): String = fp.replace(":", "").lowercase()
     }
 
     private val filesDir = File(appContext.filesDir, "linkspace")
@@ -80,7 +90,9 @@ class LinkSpaceService private constructor(private val appContext: Context) {
         val deviceType: String,
         val fingerprint: String,
         val code: String,
-        val expiresAt: Long
+        val expiresAt: Long,
+        /** 已错误尝试的次数，达到上限即断开该对端 */
+        val attempts: Int = 0
     )
 
     private val _pendingPairings = MutableStateFlow<List<PendingPairing>>(emptyList())
@@ -129,8 +141,9 @@ class LinkSpaceService private constructor(private val appContext: Context) {
         srv.start()
         server = srv
         _port.value = srv.port
-        srv.controlHandler = { msg -> onControlMessage(msg) }
-        // 对端断连时清掉它留下的待确认配对请求，避免僵尸条目
+        srv.controlHandler = { ctx, msg -> onControlMessage(ctx, msg) }
+        // 对端断连时清掉它留下的待确认配对请求，避免僵尸条目；
+        // 键鼠控制会话同样随断连终止
         srv.controlClosedHandler = { peerId ->
             val stale = pendingMap.values.filter { it.peerId == peerId }
             if (stale.isNotEmpty()) {
@@ -139,6 +152,7 @@ class LinkSpaceService private constructor(private val appContext: Context) {
                 Log.i(TAG, "对端 $peerId 已断连，清理 ${stale.size} 个待确认配对请求")
             }
             announcedConnections.remove(peerId)
+            input.onPeerDisconnected(peerId)
         }
 
         discovery.onChange { list -> _discovered.value = list }
@@ -159,42 +173,60 @@ class LinkSpaceService private constructor(private val appContext: Context) {
     // ---------- 控制通道 ----------
 
     /**
-     * 处理桌面端发来的控制消息。
-     * 信封字段与桌面端一致，`from` 是对端设备 ID。
+     * 处理控制消息。
+     *
+     * 身份一律以 `ctx.peerId` 为准（连接在 announce 时登记、之后固定），
+     * 不再信任消息信封的 `from` 字段；`ctx.tlsFingerprint` 是连入方出示的
+     * 客户端证书指纹，用于把「自报身份」锚定到「真实持有的密钥」上。
      */
-    private fun onControlMessage(msg: JSONObject) {
+    private fun onControlMessage(ctx: TransferServer.ControlContext, msg: JSONObject) {
         val type = msg.optString("type")
-        val from = msg.optString("from")
+        val from = ctx.peerId
         val payload = msg.optJSONObject("payload") ?: JSONObject()
         when (type) {
             Protocol.TYPE_ANNOUNCE -> {
-                Log.i(TAG, "对端声明身份: $from")
-                // 回应自己的身份，让对方知道我们是谁（每连接只回一次）
-                server?.sendControl(
-                    JSONObject().apply {
-                        put("v", Protocol.VERSION)
-                        put("type", Protocol.TYPE_ANNOUNCE)
-                        put("id", java.util.UUID.randomUUID().toString())
-                        put("from", deviceIdPrefix)
-                        put("to", from)
-                        put("ts", System.currentTimeMillis())
-                        put(
-                            "payload", JSONObject().apply {
-                                put("displayName", displayName)
-                                put("deviceType", deviceType)
-                                put("caps", org.json.JSONArray(Protocol.DEFAULT_GRANT_SCOPE))
-                                put("fingerprint", fingerprint)
-                            }
-                        )
+                val claimedFp = normalizeFingerprint(payload.optString("fingerprint"))
+                val actualFp = ctx.tlsFingerprint
+                // 自报指纹与实际证书不符：对方在声称自己不持有的身份，直接断开
+                if (actualFp != null && claimedFp.isNotEmpty() && actualFp != claimedFp) {
+                    Log.w(TAG, "对端 $from 声称的指纹与 TLS 证书不符，断开连接")
+                    ctx.close()
+                    return
+                }
+                // 已信任设备必须有证书且与库存一致——无证书回退只允许未知设备。
+                // 否则任何主机连一次采集到 deviceId+指纹，就能无证书冒充该
+                // 已配对设备（全项目审查 2026-10-29 的桌面 P0 同款攻击链）
+                val known = trust.fingerprintOf(from)
+                if (known != null) {
+                    if (actualFp == null || actualFp != normalizeFingerprint(known)) {
+                        Log.w(TAG, "对端 $from 指纹与信任清单不符（或未出示证书），断开连接")
+                        server?.sendControlTo(from, pairError(from, "设备指纹与已存记录不符，请撤销后重新配对"))
+                        ctx.close()
+                        return
                     }
-                )
+                    Log.i(TAG, "对端 $from 已在信任清单中（证书指纹一致）")
+                } else {
+                    Log.i(TAG, "对端声明身份: $from")
+                }
+                // 回应自己的身份，让对方知道我们是谁（每连接只回一次）
+                if (announcedConnections.add(from)) {
+                    server?.sendControlTo(
+                        from,
+                        envelope(Protocol.TYPE_ANNOUNCE, from) {
+                            put("displayName", displayName)
+                            put("deviceType", deviceType)
+                            put("caps", org.json.JSONArray(Protocol.DEFAULT_GRANT_SCOPE))
+                            put("fingerprint", fingerprint)
+                        }
+                    )
+                }
             }
 
             Protocol.TYPE_PAIR_REQUEST -> handlePairRequest(
-                peerId = from,
-                peerDisplayName = payload.optString("displayName"),
-                peerDeviceType = payload.optString("deviceType"),
-                peerFingerprint = payload.optString("fingerprint")
+                ctx = ctx,
+                displayName = payload.optString("displayName"),
+                deviceType = payload.optString("deviceType"),
+                fingerprint = payload.optString("fingerprint")
             )
 
             Protocol.TYPE_PAIR_SUBMIT -> {
@@ -202,35 +234,36 @@ class LinkSpaceService private constructor(private val appContext: Context) {
                 val code = payload.optString("code")
                 val pending = pendingMap.values.firstOrNull { it.peerId == from }
                 if (pending == null) {
-                    server?.sendControl(pairError(from, "没有待确认的配对请求"))
+                    server?.sendControlTo(from, pairError(from, "没有待确认的配对请求"))
                     return
                 }
                 val result = submitPairingCode(pending.id, code)
                 if (result.isSuccess) {
                     // 信任已建立，通告对端
-                    server?.sendControl(
-                        JSONObject().apply {
-                            put("v", Protocol.VERSION)
-                            put("type", Protocol.TYPE_PAIR_APPROVE)
-                            put("id", java.util.UUID.randomUUID().toString())
-                            put("from", deviceIdPrefix)
-                            put("to", from)
-                            put("ts", System.currentTimeMillis())
-                            put(
-                                "payload", JSONObject().apply {
-                                    put("deviceId", deviceIdPrefix)
-                                    put("displayName", displayName)
-                                    put("deviceType", deviceType)
-                                    put("fingerprint", fingerprint)
-                                    put("scope", org.json.JSONArray(Protocol.DEFAULT_GRANT_SCOPE))
-                                }
-                            )
+                    server?.sendControlTo(
+                        from,
+                        envelope(Protocol.TYPE_PAIR_APPROVE, from) {
+                            put("deviceId", deviceIdPrefix)
+                            put("displayName", displayName)
+                            put("deviceType", deviceType)
+                            put("fingerprint", fingerprint)
+                            put("scope", org.json.JSONArray(Protocol.DEFAULT_GRANT_SCOPE))
                         }
                     )
                 } else {
-                    server?.sendControl(
-                        pairError(from, result.exceptionOrNull()?.message ?: "配对失败")
-                    )
+                    // 错误计数：达到上限即断开，防止在线穷举 6 位配对码
+                    val attempts = pending.attempts + 1
+                    if (attempts >= MAX_PAIR_ATTEMPTS) {
+                        pendingMap.remove(pending.id)
+                        _pendingPairings.value = pendingMap.values.toList()
+                        server?.sendControlTo(from, pairError(from, "配对码错误次数过多"))
+                        server?.closePeer(from)
+                        Log.w(TAG, "对端 $from 配对码错误 $attempts 次，已断开连接")
+                    } else {
+                        pendingMap[pending.id] = pending.copy(attempts = attempts)
+                        _pendingPairings.value = pendingMap.values.toList()
+                        server?.sendControlTo(from, pairError(from, result.exceptionOrNull()?.message ?: "配对失败"))
+                    }
                 }
             }
 
@@ -240,6 +273,17 @@ class LinkSpaceService private constructor(private val appContext: Context) {
             }
 
             Protocol.TYPE_PAIR_REVOKE -> {
+                // 撤销语义是「撤销方撤销它自己」，且必须由持有对应证书的
+                // 连接发出。否则任何能连上的设备都能伪造一条消息，
+                // 定向删除本机对第三方的信任（全项目审查 P0-2）
+                val stored = trust.fingerprintOf(from)
+                if (stored != null) {
+                    val fp = ctx.tlsFingerprint
+                    if (fp == null || fp != normalizeFingerprint(stored)) {
+                        Log.w(TAG, "撤销请求的 TLS 指纹与信任条目不符，已忽略")
+                        return
+                    }
+                }
                 trust.revoke(from)
                 _trusted.value = trust.list()
                 Log.i(TAG, "对端撤销了信任: $from")
@@ -266,7 +310,8 @@ class LinkSpaceService private constructor(private val appContext: Context) {
                 // 而日志里躺着一条难以定位的 403。桌面端从一开始就拒。
                 if (!trust.hasScope(from, "file")) {
                     Log.w(TAG, "拒绝未授权设备的 transfer.offer: $from")
-                    server?.sendControl(
+                    server?.sendControlTo(
+                        from,
                         envelope(Protocol.TYPE_TRANSFER_ERROR, from) {
                             put("code", "SCOPE_DENIED")
                             put("message", "设备未授权")
@@ -275,10 +320,42 @@ class LinkSpaceService private constructor(private val appContext: Context) {
                     return
                 }
                 val transferId = payload.optString("transferId")
+                // transferId 会进数据面 URL 与 `${id}:${name}` 组合键，
+                // 必须与桌面端同一字符集约束，怪字符一律拒绝
+                if (!Regex(Protocol.SESSION_ID_RE).matches(transferId)) {
+                    Log.w(TAG, "拒绝非法 transferId 的 offer")
+                    return
+                }
                 val filesArr = payload.optJSONArray("files") ?: org.json.JSONArray()
+                if (filesArr.length() == 0 || filesArr.length() > 512) {
+                    Log.w(TAG, "拒绝文件数异常的 offer（${filesArr.length()}）")
+                    server?.sendControlTo(
+                        from,
+                        envelope(Protocol.TYPE_TRANSFER_ERROR, from) {
+                            put("code", "BAD_REQUEST")
+                            put("message", "文件清单非法")
+                        }
+                    )
+                    return
+                }
                 val files = (0 until filesArr.length()).map {
                     val o = filesArr.getJSONObject(it)
-                    TransferFile(name = o.optString("name"), size = o.optLong("size"))
+                    // 名字经网络而来，先收敛为基础名再做任何路径拼接
+                    TransferFile(
+                        name = server?.sanitizeFileName(o.optString("name")) ?: "",
+                        size = o.optLong("size", -1L)
+                    )
+                }
+                if (files.any { it.name.isEmpty() || it.size < 0 }) {
+                    Log.w(TAG, "拒绝含非法文件名的 offer")
+                    server?.sendControlTo(
+                        from,
+                        envelope(Protocol.TYPE_TRANSFER_ERROR, from) {
+                            put("code", "BAD_REQUEST")
+                            put("message", "文件名非法")
+                        }
+                    )
+                    return
                 }
                 handleOffer(transferId, files, from)
             }
@@ -297,21 +374,32 @@ class LinkSpaceService private constructor(private val appContext: Context) {
             }
 
             Protocol.TYPE_TRANSFER_CANCEL -> {
-                cancelTransfer(payload.optString("transferId"))
+                // 只能取消本任务对端发来的取消：不核对来源的话，
+                // 旁观连接能凭 id 弄坏别人的传输
+                val transferId = payload.optString("transferId")
+                val task = taskMap[transferId]
+                if (task == null || task.peerId != from) return
+                cancelTransfer(transferId)
             }
 
             Protocol.TYPE_TRANSFER_COMPLETE -> {
                 // 发送方推完了，带着每个文件的整体摘要。
                 // 校验通过才落盘——这一环缺失时文件永远停在 .part。
+                // 来源必须与本任务对端一致：伪造 complete 会按假摘要
+                // 比对失败而删掉 .part，等于让旁观连接弄坏别人的传输
                 val transferId = payload.optString("transferId")
+                val task = taskMap[transferId]
+                if (task == null || task.direction != "receive" || task.peerId != from) return
                 val digestsObj = payload.optJSONObject("digests") ?: JSONObject()
                 val digests = mutableMapOf<String, String>()
                 digestsObj.keys().forEach { k -> digests[k] = digestsObj.optString(k) }
-                server?.let { srv ->
-                    // 走 finalizeTask 的统一入口，保证状态检查与错误处理一致
-                    finalizeTask(transferId, digests)
-                }
+                finalizeTask(transferId, digests)
             }
+
+            // ---------- 安卓→电脑远控（4.6，控制端半边） ----------
+            Protocol.TYPE_SESSION_ACCEPT -> input.onAccepted(from, payload)
+            Protocol.TYPE_SESSION_REJECT -> input.onRejected(from, payload)
+            Protocol.TYPE_SESSION_STOP -> input.onStopped(from, payload)
         }
     }
 
@@ -343,12 +431,13 @@ class LinkSpaceService private constructor(private val appContext: Context) {
      * 收到 pair.request：生成配对码并等待用户确认。
      * 配对码只显示在本机屏幕上，由对方用户人工抄录后经 pair.submit 送回。
      */
-    // 参数带 peer 前缀：pair.request 载荷里的身份是**对端（桌面）自报**的。
-    // 曾用无前缀参数名与 companion 属性同名，快速通道 approve 里
-    // `put("displayName", displayName)` 被遮蔽解析到参数——平板在「我是谁」
-    // 的回执里发成了桌面的名字/类型/指纹，桌面入库后信任清单出现
-    // 「平板证书 + 桌面名字」的缝合条目（真机踩过）。
-    private fun handlePairRequest(peerId: String, peerDisplayName: String, peerDeviceType: String, peerFingerprint: String) {
+    private fun handlePairRequest(
+        ctx: TransferServer.ControlContext,
+        displayName: String,
+        deviceType: String,
+        fingerprint: String
+    ) {
+        val peerId = ctx.peerId
         // 已信任的设备直接放行，不再要求配对码。
         // 必须回 pair.approve：桌面端对已信任对端也是直接 approve
         // （pairing.ts「若已信任，直接放行」），两端语义必须对称——
@@ -356,44 +445,46 @@ class LinkSpaceService private constructor(private val appContext: Context) {
         // UI 表现为「点了配对没反应」（真机踩过）。
         if (trust.isKnown(peerId)) {
             val known = trust.fingerprintOf(peerId)
-            if (known != null && known != peerFingerprint) {
+            // 指纹以 TLS 证书为准；连入方未出示证书的已信任设备
+            // 在 announce 闸门处就已被断开，这里只做双保险
+            if (known != null && (ctx.tlsFingerprint == null || ctx.tlsFingerprint != normalizeFingerprint(known))) {
                 Log.w(TAG, "对端 $peerId 指纹与信任清单不符，可能被替换")
-                server?.sendControl(pairError(peerId, "设备指纹与已存记录不符，请撤销后重新配对"))
+                server?.sendControlTo(peerId, pairError(peerId, "设备指纹与已存记录不符，请撤销后重新配对"))
+                ctx.close()
                 return
             }
             Log.i(TAG, "对端 $peerId 已在信任清单中，直接确认")
             val entry = trust.list().firstOrNull { it.deviceId == peerId }
-            server?.sendControl(
-                JSONObject().apply {
-                    put("v", Protocol.VERSION)
-                    put("type", Protocol.TYPE_PAIR_APPROVE)
-                    put("id", java.util.UUID.randomUUID().toString())
-                    put("from", deviceIdPrefix)
-                    put("to", peerId)
-                    put("ts", System.currentTimeMillis())
-                    put(
-                        "payload", JSONObject().apply {
-                            put("deviceId", deviceIdPrefix)
-                            put("displayName", displayName)
-                            put("deviceType", deviceType)
-                            put("fingerprint", fingerprint)
-                            // 沿用已存条目的授权范围，不重新扩权
-                            put("scope", org.json.JSONArray(entry?.scope ?: Protocol.DEFAULT_GRANT_SCOPE))
-                        }
-                    )
+            server?.sendControlTo(
+                peerId,
+                envelope(Protocol.TYPE_PAIR_APPROVE, peerId) {
+                    put("deviceId", deviceIdPrefix)
+                    put("displayName", displayName)
+                    put("deviceType", deviceType)
+                    put("fingerprint", fingerprint)
+                    // 沿用已存条目的授权范围，不重新扩权
+                    put("scope", org.json.JSONArray(entry?.scope ?: Protocol.DEFAULT_GRANT_SCOPE))
                 }
             )
             return
         }
         if (pendingMap.values.any { it.peerId == peerId }) return
+        // 配对请求不需要任何前置授权就能发起，必须设总量上限，
+        // 否则任意连接都能刷出配对码污染本机界面
+        if (pendingMap.size >= MAX_PENDING_PAIRINGS) {
+            Log.w(TAG, "挂起配对请求已达上限 $MAX_PENDING_PAIRINGS，拒绝新请求")
+            server?.sendControlTo(peerId, pairError(peerId, "配对请求过多，请稍后再试"))
+            return
+        }
 
-        val code = String.format("%06d", (Math.random() * 1_000_000).toInt())
+        val code = String.format("%06d", secureRandom.nextInt(1_000_000))
         val pending = PendingPairing(
             id = java.util.UUID.randomUUID().toString(),
             peerId = peerId,
-            displayName = peerDisplayName,
-            deviceType = peerDeviceType,
-            fingerprint = peerFingerprint,
+            displayName = displayName,
+            deviceType = deviceType,
+            // 落库指纹以 TLS 证书为准，自报值只作拿不到证书时的退路
+            fingerprint = ctx.tlsFingerprint ?: normalizeFingerprint(fingerprint),
             code = code,
             expiresAt = System.currentTimeMillis() + 60_000
         )
@@ -401,19 +492,14 @@ class LinkSpaceService private constructor(private val appContext: Context) {
         _pendingPairings.value = pendingMap.values.toList()
         // 必须回 challenge：发起方靠它知道「该去要配对码了」。
         // 少了这一步，发起方只会静默等待直到心跳超时。
-        server?.sendControl(
-            JSONObject().apply {
-                put("v", Protocol.VERSION)
-                put("type", Protocol.TYPE_PAIR_CHALLENGE)
-                put("id", java.util.UUID.randomUUID().toString())
-                put("from", deviceIdPrefix)
-                put("to", peerId)
-                put("ts", System.currentTimeMillis())
-                put("payload", JSONObject().apply { put("expiresAt", pending.expiresAt) })
+        server?.sendControlTo(
+            peerId,
+            envelope(Protocol.TYPE_PAIR_CHALLENGE, peerId) {
+                put("expiresAt", pending.expiresAt)
             }
         )
-        // 配对码只在日志里留一次，方便联调时读取；界面上也会展示
-        Log.i(TAG, "收到 $peerId 的配对请求，配对码 = ${pending.code}，等待用户确认")
+        // 配对码只进界面不进日志：logcat 任何应用可读，T5 明确禁止（审查 P2）
+        Log.i(TAG, "收到 $peerId 的配对请求，等待用户确认")
     }
 
     /** 用户输入了对方抄来的配对码，校验通过即建立信任 */
@@ -544,6 +630,70 @@ class LinkSpaceService private constructor(private val appContext: Context) {
 
     private val client = LinkSpaceClient(identity)
 
+    // ---------- 安卓→电脑远控（协议 4.6，控制端半边） ----------
+
+    /** 键鼠控制会话的界面状态：idle / waiting / active */
+    data class InputState(
+        val phase: String = "idle",
+        val peerId: String? = null,
+        val remoteScreen: InputController.Screen? = null
+    )
+
+    private val _inputState = MutableStateFlow(InputState())
+    val inputState: StateFlow<InputState> = _inputState
+
+    /** 会话结束原因（一次性提示，界面读后可清空） */
+    private val _inputMessage = MutableStateFlow("")
+    val inputMessage: StateFlow<String> = _inputMessage
+
+    val input: InputController by lazy {
+        InputController(
+            send = { peerId, type, payloadFn ->
+                server?.sendControlTo(peerId, envelope(type, peerId, payloadFn))
+            },
+            listener = object : InputController.Listener {
+                override fun onSessionActive(peerId: String, sessionId: String, remoteScreen: InputController.Screen) {
+                    _inputState.value = InputState("active", peerId, remoteScreen)
+                }
+
+                override fun onSessionEnded(reason: String) {
+                    _inputMessage.value = reason
+                    _inputState.value = InputState()
+                }
+
+                override fun onWaiting(peerId: String) {
+                    _inputState.value = InputState("waiting", peerId)
+                }
+            }
+        )
+    }
+
+    /** 本机屏幕尺寸：控制请求里声明，桌面端据此把本机事件映射过去 */
+    fun localScreen(w: Int, h: Int): InputController.Screen = InputController.Screen(w, h)
+
+    /** 发送目标需要的完整设备 ID（信封 to 与桌面端按全等路由） */
+    fun fullPeerIdOf(idPrefix: String): String = trust.fullDeviceIdOf(idPrefix) ?: idPrefix
+
+    /** 界面展示完会话结束提示后清空 */
+    fun clearInputMessage() {
+        _inputMessage.value = ""
+    }
+
+    /**
+     * 用户主动退出：停掉前台服务持有的全部能力——发现、传输服务、
+     * 剪贴板同步与所有控制连接。对端会立即看到连接断开（键鼠会话
+     * 随之终止），这是「退出 = 语义上的彻底下线」。
+     */
+    fun stopAll() {
+        input.stop("stopped by user")
+        stop()
+        taskMap.clear()
+        _transfers.value = emptyList()
+        pendingMap.clear()
+        _pendingPairings.value = emptyList()
+        Log.i(TAG, "用户主动退出，已断开全部连接")
+    }
+
     /**
      * 向桌面端推送文件（Android 作为发送方）。
      *
@@ -566,6 +716,12 @@ class LinkSpaceService private constructor(private val appContext: Context) {
         // 信封 to 必须是完整设备 ID：桌面端按全等路由，填 12 位前缀的
         // offer 会被静默丢弃——连接看着活着，对面却当没收到
         val peerFullId = trust.fullDeviceIdOf(peer.idPrefix) ?: peer.idPrefix
+        // 对端证书指纹：TLS 握手后必须核对。Android 作为 TLS 客户端时
+        // 若盲信任证书，假 mDNS / ARP 把连接引向攻击者即可整体接管
+        // 控制通道、截获文件全文与数据面 token（全项目审查 P0-1）
+        val expectedFp = trust.fingerprintOf(peerFullId)
+            ?.let { LinkSpaceService.normalizeFingerprint(it) }
+            ?: return Result.failure(IllegalStateException("设备 ${peer.displayName} 未授权，请先配对"))
 
         // 任务先登记再连接：界面从 offer 那一刻起就有进度可看，
         // 而不是等整条链路走完才冒出来
@@ -575,7 +731,7 @@ class LinkSpaceService private constructor(private val appContext: Context) {
 
         return withContext(Dispatchers.IO) {
             runCatching {
-                val conn = client.connectControl(peer.host, peer.port, Protocol.CONTROL_PATH)
+                val conn = client.connectControl(peer.host, peer.port, Protocol.CONTROL_PATH, expectedFp)
                 // 发送期间没有控制消息来回（分块 POST 不走控制通道），
                 // 桌面端 15s 收不到任何消息就判定离线并断连——大文件传输
                 // 会被中途掐断。发送期间周期性发心跳把会话续住。
@@ -643,7 +799,7 @@ class LinkSpaceService private constructor(private val appContext: Context) {
 
                     // 分块上传走独立连接：控制通道已是 WebSocket，
                     // 在它上面再发 HTTP 请求会把对端解析器炸掉
-                    upload = client.connectUpload(peer.host, peer.port)
+                    upload = client.connectUpload(peer.host, peer.port, expectedFp)
 
                     val myId = identity.get().fingerprint.replace(":", "").take(12)
                     val chunk = client.chunkSize()
@@ -661,8 +817,10 @@ class LinkSpaceService private constructor(private val appContext: Context) {
                                 val data = if (n == buf.size) buf else buf.copyOf(n)
                                 val digest = client.chunkDigest(data)
                                 // offset 必须随块上报：桌面端强制偏移衔接（409 对齐冲突），
-                                // 缺省会被当成 0，从第二块起必撞 409
-                                val path = Protocol.chunkPath(key) + "?offset=$offset"
+                                // 缺省会被当成 0，从第二块起必撞 409。
+                                // 组合键必须百分号编码：文件名含空格/中文/+ 时裸拼
+                                // 会发出畸形 URL（审查 P1-8，SAF 文件名极常见）
+                                val path = Protocol.chunkPath(Protocol.encodeTransferKey(key)) + "?offset=$offset"
                                 // 失败重试一次：单块 4MB，重传成本低于整体重来
                                 var attempt = 0
                                 while (true) {
@@ -773,28 +931,29 @@ class LinkSpaceService private constructor(private val appContext: Context) {
         val saveDir = saveDirs[transferId] ?: return Result.failure(IllegalStateException("保存目录丢失"))
 
         val token = java.util.UUID.randomUUID().toString()
-        srv.registerIncoming(transferId, task.files, saveDir)
+        // 落盘登记可能因文件名/磁盘问题抛 IOException——必须变成 Result
+        // 让界面提示，而不是把进程带走（审查 P1-4：点「接收」即崩）
+        try {
+            srv.registerIncoming(transferId, task.files, saveDir)
+        } catch (e: Exception) {
+            taskMap[transferId] = task.copy(state = TransferTask.FAILED, error = e.message ?: "登记落盘失败")
+            _transfers.value = taskMap.values.sortedBy { it.createdAt }
+            return Result.failure(IllegalStateException(e.message ?: "登记落盘失败"))
+        }
         srv.setToken(transferId, token)
         taskMap[transferId] = task.copy(state = TransferTask.ACCEPTED)
         _transfers.value = taskMap.values.sortedBy { it.createdAt }
         // 必须把 accept 和令牌发回发送方：桌面端收到它才会开始推送分块。
         // 少了这一步，界面显示「已接收」但数据永远不来——曾踩过。
+        // 定向发送：token 是数据面唯一凭证，广播等于交给连着的每一台
+        // 设备（包括未认证连接）——全项目审查 P0-2
         val peer = task.peerId
         if (peer.isNotEmpty()) {
-            srv.sendControl(
-                JSONObject().apply {
-                    put("v", Protocol.VERSION)
-                    put("type", Protocol.TYPE_TRANSFER_ACCEPT)
-                    put("id", java.util.UUID.randomUUID().toString())
-                    put("from", deviceIdPrefix)
-                    put("to", peer)
-                    put("ts", System.currentTimeMillis())
-                    put(
-                        "payload", JSONObject().apply {
-                            put("transferId", transferId)
-                            put("token", token)
-                        }
-                    )
+            srv.sendControlTo(
+                peer,
+                envelope(Protocol.TYPE_TRANSFER_ACCEPT, peer) {
+                    put("transferId", transferId)
+                    put("token", token)
                 }
             )
         } else {

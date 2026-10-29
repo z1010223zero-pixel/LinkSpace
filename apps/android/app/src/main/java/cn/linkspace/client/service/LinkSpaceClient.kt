@@ -23,10 +23,10 @@ import javax.net.ssl.X509TrustManager
  * 没有引入 OkHttp——发送路径只需要「连上、发几帧、POST 几个分块」，
  * 引一个 HTTP 库换来的复杂度比省下的多。
  *
- * 证书校验刻意宽松：LinkSpace 的身份模型是 TOFU + 指纹人工核对
- * （见 docs/threat-model.md），配对前不存在可信 CA。真正的信任判定在
- * 控制通道的 pair 流程里做，TLS 层只负责加密与出示身份。
- * **这不是疏忽**：没有 TLS 的话指纹无从核对。
+ * 证书链校验依然宽松（TOFU + 指纹人工核对，无 CA 可依赖），但**指纹
+ * 必须钉住**：调用方传入信任清单里记录的对端指纹，握手后与对端实际
+ * 证书逐一比对，不符即断开。TLS 盲信任曾被审查定性为 P0——假 mDNS
+ * 或 ARP 欺骗把连接引向攻击者，就能整体接管控制通道、截获文件全文。
  */
 class LinkSpaceClient(private val identity: Identity) {
 
@@ -44,7 +44,7 @@ class LinkSpaceClient(private val identity: Identity) {
         override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
     }
 
-    private fun tlsSocket(host: String, port: Int): SSLSocket {
+    private fun tlsSocket(host: String, port: Int, expectFingerprint: String?): SSLSocket {
         val ctx = SSLContext.getInstance("TLS")
         val kmf = javax.net.ssl.KeyManagerFactory.getInstance(
             javax.net.ssl.KeyManagerFactory.getDefaultAlgorithm()
@@ -56,13 +56,32 @@ class LinkSpaceClient(private val identity: Identity) {
         raw.soTimeout = READ_TIMEOUT_MS
         val ssl = ctx.socketFactory.createSocket(raw, host, port, true) as SSLSocket
         ssl.startHandshake()
+
+        // 指纹钉住（TOFU 的「已核对过」半边）：对端证书必须与信任清单
+        // 里配对时记录的指纹一致。桌面端 fingerprintOfCert 是对 DER
+        // 做 SHA-256，这里取证书编码后同样计算
+        if (expectFingerprint != null) {
+            val cert = ssl.session?.peerCertificates?.firstOrNull() as? X509Certificate
+                ?: error("对端未出示证书")
+            val actual = MessageDigest.getInstance("SHA-256").digest(cert.encoded)
+                .joinToString("") { "%02x".format(it) }
+            if (!actual.equals(expectFingerprint.replace(":", "").lowercase(), ignoreCase = true)) {
+                ssl.close()
+                error("对端证书指纹与信任清单不符，可能存在中间人，已断开")
+            }
+        }
         return ssl
     }
 
     /** 连接并完成 WebSocket 客户端握手，返回可读写的连接 */
-    suspend fun connectControl(host: String, port: Int, path: String): ClientConnection =
+    suspend fun connectControl(
+        host: String,
+        port: Int,
+        path: String,
+        expectFingerprint: String? = null
+    ): ClientConnection =
         withContext(Dispatchers.IO) {
-            val ssl = tlsSocket(host, port)
+            val ssl = tlsSocket(host, port, expectFingerprint)
             val key = java.util.Base64.getEncoder()
                 .encodeToString(ByteArray(16).also { java.security.SecureRandom().nextBytes(it) })
             val req = buildString {
@@ -99,9 +118,10 @@ class LinkSpaceClient(private val identity: Identity) {
      * ws 解析器当成畸形帧（RSV2/RSV3 报错，直接炸掉对方进程）。
      * 上传走独立 TLS 连接，对端把它当普通 HTTPS 请求处理。
      */
-    suspend fun connectUpload(host: String, port: Int): SSLSocket = withContext(Dispatchers.IO) {
-        tlsSocket(host, port).also { Log.i(TAG, "上传通道已连接 $host:$port") }
-    }
+    suspend fun connectUpload(host: String, port: Int, expectFingerprint: String? = null): SSLSocket =
+        withContext(Dispatchers.IO) {
+            tlsSocket(host, port, expectFingerprint).also { Log.i(TAG, "上传通道已连接 $host:$port") }
+        }
 
     /**
      * POST 一个分块。
