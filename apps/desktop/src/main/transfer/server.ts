@@ -447,12 +447,17 @@ export async function sendChunk(
   transferId: string,
   offset: number,
   data: Buffer,
-  auth: { deviceId: string; token: string }
+  auth: { deviceId: string; token: string },
+  /**
+   * 测试注入点：覆盖声明的块摘要（模拟发送方声明损坏的场景），
+   * 用于验证接收侧 4.6「摘要不符拒收」的真实路径。产品路径不传。
+   */
+  opts?: { declaredDigest?: string }
 ): Promise<SendChunkResult> {
   const { status, body } = await requestJson(host, port, transferId, offset, data, auth, {
     'X-Chunk-Size': String(data.length),
     // 接收方据此校验块完整性（protocol.md 第 5 节），不符返回 400
-    'X-Chunk-Digest': sha256Hex(data)
+    'X-Chunk-Digest': opts?.declaredDigest ?? sha256Hex(data)
   })
 
   if (status === 409) {

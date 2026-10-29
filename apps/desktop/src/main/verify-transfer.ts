@@ -340,9 +340,54 @@ async function main(): Promise<void> {
     check('并发任务 2 内容一致', (await hashFile(join(outDir, 'con2.bin'))) === d2)
     check('两个任务 id 不同', r1.sendTaskId !== r2.sendTaskId)
 
-    // ---------- 9. 大文件 ----------
+    // ---------- 9. 块级摘要校验（4.6） ----------
+    console.log('\n9. 块级摘要校验（坏摘要拒收，好摘要落盘）')
+    const dgSrc = join(srcDir, 'digest.bin')
+    const dgSize = 100 * 1024
+    await makeFile(dgSrc, dgSize, 9)
+    const dgId = `tr-digest-${Math.random().toString(36).slice(2, 8)}`
+    await h.sender.offer(
+      'dev-receiver-001',
+      [{ name: 'digest.bin', path: dgSrc, size: dgSize }],
+      dgId
+    )
+    await h.receiver.offer('dev-sender-001', [{ name: 'digest.bin', size: dgSize }], dgId, 'receive')
+    await h.receiver.accept(dgId, outDir, { token: 'tok-digest' })
+    h.sender.attachToken(dgId, 'tok-digest')
+
+    const dgChunk = await readChunk(dgSrc, 0, 64 * 1024)
+    // 声明一个错误摘要（模拟发送方声明损坏）：接收方必须拒收且不把坏字节写进 .part
+    let badChunkRejected = false
+    try {
+      await sendChunk(
+        '127.0.0.1',
+        h.port,
+        `${dgId}:digest.bin`,
+        0,
+        dgChunk,
+        { deviceId: 'dev-sender-001', token: 'tok-digest' },
+        { declaredDigest: '0'.repeat(64) }
+      )
+    } catch {
+      badChunkRejected = true
+    }
+    check('坏摘要块被拒收', badChunkRejected)
+    check('坏摘要块未落盘', (await h.receiver.partSize(dgId, 'digest.bin')) === 0)
+    // 同一块带正确摘要重传，应正常落盘
+    await sendChunk('127.0.0.1', h.port, `${dgId}:digest.bin`, 0, dgChunk, {
+      deviceId: 'dev-sender-001',
+      token: 'tok-digest'
+    })
+    check(
+      '正确摘要重传落盘',
+      (await h.receiver.partSize(dgId, 'digest.bin')) === 64 * 1024
+    )
+    // 该任务到此目的已完成，取消掉避免悬挂 .part
+    await h.receiver.cancel(dgId)
+
+    // ---------- 10. 大文件 ----------
     if (process.argv.includes('--large')) {
-      console.log('\n9. 1 GB 大文件')
+      console.log('\n10. 1 GB 大文件')
       const largeSrc = join(srcDir, 'large.bin')
       const largeSize = 1024 * 1024 * 1024
       const t0 = Date.now()
