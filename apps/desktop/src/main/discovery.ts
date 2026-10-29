@@ -259,7 +259,10 @@ export class Discovery {
 
   private publishSelf(): void {
     this.ad = this.bonjour!.publish({
-      name: sanitizeServiceName(this.opts.displayName),
+      // 服务名约定为 `LinkSpace-<displayName>`：Android 端解析时按该前缀
+      // 取显示名（Discovery.kt removePrefix），广播侧漏前缀会让对端把
+      // 原始服务名当显示名展示（实例：平板上显示 "LinkSpace Desktop"）
+      name: sanitizeServiceName(`LinkSpace-${this.opts.displayName}`),
       type: SERVICE_TYPE,
       port: this.opts.port,
       txt: {
