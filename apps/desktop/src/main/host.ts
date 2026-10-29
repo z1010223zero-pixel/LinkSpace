@@ -260,6 +260,9 @@ export class Host {
         this.endpoints.set(conn.peerId, ep)
         this.pendingEndpoints.delete(conn)
       }
+      // 端点先登记再补发：waiting 任务对端 accept 后要立即推送，
+      // 推送依赖 endpoints 里的 host/port
+      this.flushWaitingOffers(conn)
     })
 
     this.pairing
@@ -356,10 +359,27 @@ export class Host {
 
   // ---------- 文件传输 ----------
 
-  /** 发起传输。返回任务，随后由 UI 等对端 accept */
+  /**
+   * 发起传输。返回任务，随后由 UI 等对端 accept。
+   *
+   * 对端离线时不报错、不丢弃（验收 4.9「提示等待」）：只要目标设备
+   * 已配对且持有 file 授权，任务就挂成 waiting，等它重新上线
+   * （device.announce）时自动发出 offer。给未配对/未授权设备排队
+   * 没有意义——信任都不存在，「等它上线」无从谈起，维持明确报错。
+   */
   async offerFiles(peerId: string, files: TransferFile[]): Promise<TransferTask> {
     const conn = this.peers.get(peerId)
-    if (!conn) throw new Error(`设备 ${peerId} 未连接`)
+    if (!conn) {
+      if (!this.trust.isKnown(peerId) || !this.trust.hasScope(peerId, 'file')) {
+        throw new Error(`设备 ${peerId} 未连接或没有文件传输授权`)
+      }
+      const waiting = await this.transfers.offer(peerId, files, undefined, 'send', {
+        waiting: true
+      })
+      log.info(`对端 ${peerId} 离线，传输任务 ${waiting.id} 挂起等待其上线`)
+      this.emit('transferChanged', waiting)
+      return waiting
+    }
     if (!this.trust.hasScope(peerId, 'file')) {
       throw new Error(`设备 ${peerId} 没有文件传输授权`)
     }
@@ -371,6 +391,29 @@ export class Host {
     })
     this.emit('transferChanged', task)
     return task
+  }
+
+  /** 对端是否在线（有完成身份声明的连接）。UI 与测试的离线判定探针 */
+  isConnected(peerId: string): boolean {
+    return this.peers.has(peerId)
+  }
+
+  /**
+   * 对端重新上线：把所有 waiting 的发送任务补发给它。
+   * 状态翻转用 markOffered（幂等，只吃 waiting），重复 announce
+   * 或多任务并发 flush 都不会产生二次 offer。
+   */
+  private flushWaitingOffers(conn: Connection): void {
+    const peerId = conn.peerId
+    for (const task of this.transfers.list()) {
+      if (task.direction !== 'send' || task.state !== 'waiting' || task.peerId !== peerId) continue
+      conn.send('transfer.offer', {
+        transferId: task.id,
+        files: task.files.map((f) => ({ name: f.name, size: f.size })),
+        totalSize: task.totalSize
+      })
+      this.transfers.markOffered(task.id)
+    }
   }
 
   /** 接收方：用户确认保存路径 */

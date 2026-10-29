@@ -204,6 +204,7 @@ function bytes(n: number): string {
 }
 
 const STATE_LABEL: Record<string, string> = {
+  waiting: '等待设备上线',
   offered: '等待对端确认',
   accepted: '传输中',
   completed: '已完成',
@@ -518,7 +519,7 @@ onBeforeUnmount(() => {
             选择位置接收
           </button>
           <button
-            v-if="t.state === 'offered' || t.state === 'accepted'"
+            v-if="t.state === 'offered' || t.state === 'accepted' || t.state === 'waiting'"
             class="btn btn--sm btn--danger"
             @click="cancelTransfer(t.id)"
           >
