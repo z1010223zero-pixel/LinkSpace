@@ -136,6 +136,33 @@
 
 **消息来源门禁**（实现期定型）：`transfer.accept / reject / cancel / complete` 都必须核对「连接身份 == 任务对端」，不匹配一律忽略。传输任务的 id 与 token 只对当事双方可见，其他连接（包括其他已配对设备）不得对别人的任务做任何操作。文件名由发送方经网络提供，接收方必须先收敛为基础名（剥掉任何路径成分）再拼接保存路径，含非法名（清洗后为空 / `.` / `..`）直接拒绝整个 offer。
 
+### 4.6 键鼠共享（阶段 3，第 7 组）
+
+复用 4.3 的会话控制消息（`sessionType: 'input'`），在其上定义输入事件流：
+
+| 类型 | 方向 | payload | 说明 |
+|---|---|---|---|
+| `session.start` | 控制方 → 被控方 | `{ sessionType: 'input', sessionId, params: { screen, displayName } }` | `sessionId` 限定 `[A-Za-z0-9_-]{1,64}`；`screen` 是控制端主屏尺寸（自报，仅作映射基准）；`displayName` 仅用于被控端确认弹窗展示 |
+| `session.accept` | 被控方 → 控制方 | `{ sessionId, screen }` | **用户确认后才发送**。`screen` 是被控端屏幕尺寸，控制端据此做坐标映射 |
+| `session.reject` | 被控方 → 控制方 | `{ sessionId, reason }` | 拒绝（未授权 / 参数非法 / 过期 / 已有活动会话） |
+| `session.stop` | 双向 | `{ sessionId, reason }` | 任一方均可终止；两端各按 sessionId 匹配，不匹配的静默忽略 |
+| `input.event` | 控制方 → 被控方 | `{ events: [...] }` | 批量事件，单条消息 ≤ 64 条（`MAX_EVENTS_PER_MESSAGE`），超限整批丢弃 |
+
+单条事件形状（字段名取短，批量传输）：
+
+- `{ t: 'move', x, y }` — **控制端屏幕绝对坐标**（整数 0..32768）。选绝对坐标而非相对增量：轮询采集天然只有绝对位置，且丢一帧不会造成永久偏移
+- `{ t: 'down', b }` / `{ t: 'up', b }` — `b` ∈ `left / right / middle`
+- `{ t: 'wheel', dx, dy }` — 滚轮刻度，钳 ±1000
+- `{ t: 'key', vk, down }` — Windows 虚拟键码 0..255，布尔按下态
+
+**收敛规则（实现期定型）**：`input.event` 的 payload 完全来自对端，而注入层直接对接 Win32 SendInput，因此编解码集中在 `apps/desktop/src/main/input/protocol.ts` 纯模块，无头测试逐字段钉死边界：
+
+- **整批拒绝制**：一批事件中含任何非法事件（未知类型 / 非法字段 / 越界坐标 / NaN），整批丢弃而非逐条放行——「洗掉非法字段」不能变成可依赖的容错，否则攻击者可借机探测字段语义。
+- **坐标映射在被控端**：`mapPoint` 按两端屏幕比例映射，round 后钳进目标屏幕边界。屏幕尺寸是自报的，不能让越界坐标进注入层。
+- **三重校验**：注入前核对 `peerId == 会话对端`、`sessionId` 匹配活动会话、事件解码通过。旁观连接的事件一律忽略。
+
+**授权语义（9.1）**：control 是**会话级内存态**——被控端 approve 后会话才算建立，结束/断连/撤销信任立即失效；TrustStore 不持久化 control（配对默认只授 `file` + `clipboard`），保证「每次控制请求都有明确提示」。所有终止路径（stop / 断连 / 撤销 / 本机终止）统一走 releaseAll 抬起全部按键，防止对端按键状态下会话被掐导致本机卡键。边缘穿越（7.1）由控制端本机光标位置驱动，触发后走的仍是同一条 `session.start` 链路，被控端照样弹确认。
+
 ---
 
 ## 5. 文件传输子协议

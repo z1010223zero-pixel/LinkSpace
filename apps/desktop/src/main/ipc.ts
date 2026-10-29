@@ -56,6 +56,15 @@ const CHANNELS = [
   'layout:save',
   'profile:get',
   'profile:rename',
+  'clipboard:get',
+  'clipboard:setEnabled',
+  'input:state',
+  'input:request',
+  'input:approve',
+  'input:deny',
+  'input:terminate',
+  'input:exit',
+  'input:setEdge',
   'ping'
 ] as const
 
@@ -66,7 +75,8 @@ const EVENTS = [
   'pairings:changed',
   'transfers:changed',
   'trust:changed',
-  'selfName:changed'
+  'selfName:changed',
+  'input:changed'
 ] as const
 
 /** 渲染层可见的运行时快照来源 */
@@ -74,6 +84,8 @@ export interface RuntimeSource {
   discovered: DiscoveredService[]
   pendingPairings: PendingPairing[]
   transfers: TransferTask[]
+  /** Win32 注入层是否可用（键鼠共享入口降级提示用） */
+  inputNativeReady: boolean
 }
 
 export function registerIpc(
@@ -278,6 +290,86 @@ export function registerIpc(
     if (!result.ok) return fail(result.error ?? '改名失败')
     broadcast(getWindow, 'selfName:changed')
     return { ok: true as const, value: result.name }
+  })
+
+  // ---------- 剪贴板同步开关（6.6） ----------
+
+  invoke('clipboard:get', () => host.isClipboardEnabled())
+
+  ipcMain.handle('clipboard:setEnabled', async (_e, enabled: unknown) => {
+    if (typeof enabled !== 'boolean') return fail('缺少开关状态')
+    host.setClipboardEnabled(enabled)
+    return { ok: true as const, value: host.isClipboardEnabled() }
+  })
+
+  // ---------- 键鼠共享（阶段 3，第 7 组） ----------
+
+  invoke('input:state', () => {
+    const pending = host.pendingInputRequest()
+    const trusted = host.trustedDevices()
+    // 显示名优先取信任清单里的名字；对端改名后跟着变
+    const nameOf = (id: string): string =>
+      trusted.find((t) => t.deviceId === id)?.displayName ?? id
+    const controlledBy = host.controlledByPeer()
+    const controlling = host.controllingPeer()
+    return {
+      pending: pending
+        ? {
+            sessionId: pending.sessionId,
+            peerId: pending.peerId,
+            displayName: pending.displayName,
+            expiresAt: pending.expiresAt
+          }
+        : null,
+      controlledBy: controlledBy ? nameOf(controlledBy) : null,
+      controlling: controlling ? nameOf(controlling) : null,
+      layout: host.inputLayoutStore.all(),
+      nativeReady: runtime.inputNativeReady
+    }
+  })
+
+  ipcMain.handle('input:request', async (_e, peerId: unknown) => {
+    if (typeof peerId !== 'string' || !peerId) return fail('缺少对端 ID')
+    const r = await host.requestInputControl(peerId)
+    broadcast(getWindow, 'input:changed')
+    return r.ok ? { ok: true as const } : fail(r.error)
+  })
+
+  ipcMain.handle('input:approve', (_e, sessionId: unknown) => {
+    if (typeof sessionId !== 'string' || !sessionId) return fail('缺少会话 ID')
+    const r = host.approveInputControl(sessionId)
+    broadcast(getWindow, 'input:changed')
+    return r.ok ? { ok: true as const } : fail(r.error ?? '批准失败')
+  })
+
+  ipcMain.handle('input:deny', (_e, sessionId: unknown) => {
+    if (typeof sessionId !== 'string' || !sessionId) return fail('缺少会话 ID')
+    host.denyInputControl(sessionId)
+    broadcast(getWindow, 'input:changed')
+    return { ok: true as const }
+  })
+
+  ipcMain.handle('input:terminate', () => {
+    host.terminateInputControl()
+    broadcast(getWindow, 'input:changed')
+    return { ok: true as const }
+  })
+
+  // 控制端退出（7.4）。与被控端拔掉是两条独立路径，不能混用：
+  // terminate 走被控状态机，exit 走控制状态机
+  ipcMain.handle('input:exit', () => {
+    host.stopInputControl('stopped by user')
+    broadcast(getWindow, 'input:changed')
+    return { ok: true as const }
+  })
+
+  ipcMain.handle('input:setEdge', (_e, deviceId: unknown, edge: unknown) => {
+    if (typeof deviceId !== 'string' || !deviceId) return fail('缺少设备 ID')
+    if (edge !== null && edge !== 'left' && edge !== 'right' && edge !== 'top' && edge !== 'bottom') {
+      return fail('方位取值不合法')
+    }
+    host.inputLayoutStore.setEdge(deviceId, edge)
+    return { ok: true as const }
   })
 
   invoke('ping', () => 'pong')

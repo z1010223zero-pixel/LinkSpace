@@ -20,6 +20,14 @@ import { Discovery, type DiscoveredService } from './discovery'
 import { LayoutStore } from './layout'
 import { ProfileStore, sanitizeDisplayName } from './profile'
 import { ClipboardSync, type ClipboardIo } from './clipboard'
+import {
+  InputController,
+  InputSessionCoordinator,
+  type InputControlRequest,
+  type ActiveInputSession
+} from './input/session'
+import type { InputEvent, ScreenSize } from './input/protocol'
+import { InputLayoutStore } from './input/layout'
 import { log } from './log'
 
 export interface HostOptions {
@@ -43,6 +51,16 @@ export interface HostOptions {
    * 而自动选择会绑到真实网卡，回环就访问不到了。
    */
   bind?: string
+  /** 本机屏幕尺寸（键鼠共享坐标映射用）。留空走 Electron screen，测试注入假值 */
+  inputLocalScreen?: () => ScreenSize
+  /**
+   * 输入事件注入出口。正常路径由 index.ts 接 Win32 注入层；
+   * 无头测试注入捕获数组。缺省为丢弃并告警——没有注入层的
+   * input.event 不该无声消失。
+   */
+  inputInject?: (events: InputEvent[], session: ActiveInputSession) => void
+  /** 控制会话终止时抬起按住的键（防卡键），测试注入记录 */
+  inputReleaseAll?: () => void
 }
 
 export interface HostEvents {
@@ -64,6 +82,10 @@ export interface HostEvents {
   selfRenamed: [string]
   /** 对端改了它自己的名字，本机信任清单已更新 */
   peerRenamed: [TrustEntry]
+  /** 收到键鼠控制请求，UI 应展示确认弹窗（9.1 授权可见） */
+  inputRequested: [InputControlRequest]
+  /** 键鼠共享状态变化（请求到达/确认/结束），UI 刷新 */
+  inputChanged: []
 }
 
 type Listener<K extends keyof HostEvents> = (...args: HostEvents[K]) => void
@@ -84,11 +106,17 @@ export class Host {
    */
   private selfName: string
   private clipboardSync: ClipboardSync | null = null
+  /** 剪贴板同步用户开关（6.6）。关闭后收发双向静默，不产生任何流量 */
+  private clipboardEnabled = false
   private readonly transfers = new TransferManager()
   private control: ControlNode | null = null
   private pairing: PairingCoordinator | null = null
   private discovery: Discovery | null = null
   private fileServer: StartedServer | null = null
+  /** 键鼠共享：被控端状态机 + 控制端状态机（阶段 3） */
+  private inputCoordinator: InputSessionCoordinator | null = null
+  private inputController: InputController | null = null
+  private readonly inputLayout: InputLayoutStore
   private listeners: { [K in keyof HostEvents]?: Listener<K>[] } = {}
   /** 已连接的对端：deviceId → Connection */
   private readonly peers = new Map<string, Connection>()
@@ -111,6 +139,7 @@ export class Host {
     })
     this.layout = new LayoutStore({ dir: dataDir })
     this.profile = new ProfileStore({ dir: dataDir })
+    this.inputLayout = new InputLayoutStore({ dir: dataDir })
     this.selfName = this.profile.get() || opts.displayName
   }
 
@@ -198,6 +227,7 @@ export class Host {
     this.wireTransferBridge()
     this.wireClipboardBridge()
     this.wireRenameBridge()
+    this.wireInputBridge()
 
     log.info(`LinkSpace 主机已启动，id=${this.deviceId}，端口=${port}`)
   }
@@ -612,7 +642,26 @@ export class Host {
       send: (text) => this.broadcastClipboard(text),
       onSkip: (reason) => log.warn(reason)
     })
+    this.clipboardEnabled = true
     this.clipboardSync.start()
+  }
+
+  /**
+   * 剪贴板同步开关（6.6「关闭同步 → 完全不传输」）。
+   * 关闭走 ClipboardSync.stop()：poll 与 receive 双向失效；
+   * 重新开启时 start() 重读基线——开关期间剪贴板里的内容不是
+   * 「用户刚复制的」，不该在开启瞬间被广播出去。
+   */
+  setClipboardEnabled(enabled: boolean): void {
+    if (enabled === this.clipboardEnabled) return
+    this.clipboardEnabled = enabled
+    if (enabled) this.clipboardSync?.start()
+    else this.clipboardSync?.stop()
+    log.info(`剪贴板同步已${enabled ? '开启' : '关闭'}`)
+  }
+
+  isClipboardEnabled(): boolean {
+    return this.clipboardEnabled
   }
 
   /** 本机剪贴板可能变了，由上层定时调用 */
@@ -653,7 +702,174 @@ export class Host {
     })
   }
 
+  /**
+   * 键鼠共享桥（阶段 3，第 7 组）。
+   *
+   * 与传输/剪贴板同一个模式：Host 只做「消息 ↔ 状态机」的搬运，
+   * 授权判定与会话状态集中在 InputSessionCoordinator（被控端）与
+   * InputController（控制端），两者都是可无头测试的纯逻辑。
+   *
+   * **control 授权是会话级内存态**：被控端 approve 后会话才算建立，
+   * 结束/断连/撤销立即失效。TrustStore 不持久化 control——持久化
+   * 会让 9.1「每次控制请求都有明确提示」形同虚设。
+   */
+  private wireInputBridge(): void {
+    const control = this.control!
+
+    const sendTo = (peerId: string, type: string, payload: Record<string, unknown>): void => {
+      this.peers.get(peerId)?.send(type, payload)
+    }
+
+    this.inputCoordinator = new InputSessionCoordinator({
+      callbacks: {
+        isPeerAuthorized: (peerId) => this.trust.isKnown(peerId),
+        localScreen: () => this.opts.inputLocalScreen?.() ?? this.defaultLocalScreen(),
+        inject: (events, session) =>
+          this.opts.inputInject
+            ? this.opts.inputInject(events, session)
+            : log.warn(`收到 ${events.length} 条输入事件，但未接入注入层，已丢弃`),
+        releaseAll: () => this.opts.inputReleaseAll?.(),
+        send: sendTo,
+        log: (msg) => log.info(msg),
+        onChanged: () => this.emit('inputChanged'),
+        onRequest: (req) => this.emit('inputRequested', req)
+      }
+    })
+
+    this.inputController = new InputController({
+      callbacks: {
+        send: sendTo,
+        log: (msg) => log.info(msg),
+        onAccepted: () => this.emit('inputChanged'),
+        onEnded: () => this.emit('inputChanged')
+      }
+    })
+
+    control.on('session.start', (conn, msg) => {
+      if (!conn.peerId) return
+      this.inputCoordinator!.onStart(conn.peerId, msg.payload)
+    })
+
+    control.on('session.accept', (conn, msg) => {
+      const p = msg.payload as { sessionId?: unknown; screen?: unknown }
+      if (typeof p?.sessionId !== 'string') return
+      this.inputController!.onAccepted(conn.peerId, p.sessionId, p.screen)
+    })
+
+    control.on('session.reject', (conn, msg) => {
+      const p = msg.payload as { sessionId?: unknown; reason?: unknown }
+      if (typeof p?.sessionId !== 'string') return
+      this.inputController!.onRejected(conn.peerId, p.sessionId, String(p.reason ?? ''))
+    })
+
+    control.on('session.stop', (conn, msg) => {
+      const p = msg.payload as { sessionId?: unknown }
+      if (typeof p?.sessionId !== 'string') return
+      // 两端都可能收到 stop：作为控制端收到被控端的终止，
+      // 或作为被控端收到控制端的退出（7.4）。各自按 sessionId 匹配，
+      // 不匹配的就是别人的会话，安全忽略
+      this.inputController!.onStopped(conn.peerId, p.sessionId)
+      this.inputCoordinator!.onStop(conn.peerId, msg.payload)
+    })
+
+    control.on('input.event', (conn, msg) => {
+      if (!conn.peerId) return
+      this.inputCoordinator!.onEvent(conn.peerId, msg.payload)
+    })
+
+    // 断连清理：双方角色都要清。connection 的 peerId 可能还是空
+    // （身份声明前就断了），两个状态机各自按空串匹配自然 no-op
+    control.onClosed((conn) => {
+      this.inputCoordinator?.onPeerDisconnected(conn.peerId)
+      this.inputController?.onPeerDisconnected(conn.peerId)
+    })
+
+    // 信任撤销优先于一切：立即掐断请求与会话（9.1 的安全兜底）
+    this.on('revoked', (deviceId) => {
+      this.inputCoordinator?.onTrustRevoked(deviceId)
+      this.inputController?.onPeerDisconnected(deviceId)
+      this.emit('inputChanged')
+    })
+  }
+
+  /** Electron main 里的本机屏幕尺寸。无头环境回退到常见默认值 */
+  private defaultLocalScreen(): ScreenSize {
+    try {
+      const { screen } = require('electron') as {
+        screen?: { getPrimaryDisplay: () => { size: { width: number; height: number } } }
+      }
+      if (screen && typeof screen.getPrimaryDisplay === 'function') {
+        const d = screen.getPrimaryDisplay()
+        if (d?.size?.width > 0 && d?.size?.height > 0) {
+          return { w: d.size.width, h: d.size.height }
+        }
+      }
+    } catch {
+      /* 打包后的无头测试里 electron 解析为路径字符串，走回退值 */
+    }
+    return { w: 1920, h: 1080 }
+  }
+
+  /** 键鼠共享布局存储：设备位于本机哪一侧（7.3） */
+  get inputLayoutStore(): InputLayoutStore {
+    return this.inputLayout
+  }
+
+  /** 被控端：待确认的控制请求 */
+  pendingInputRequest(): InputControlRequest | null {
+    return this.inputCoordinator?.pendingRequest ?? null
+  }
+
+  /** 被控端：本机正被谁控制（peerId） */
+  controlledByPeer(): string | null {
+    return this.inputCoordinator?.controlledBy ?? null
+  }
+
+  /** 控制端：本机正在控制谁（peerId） */
+  controllingPeer(): string | null {
+    return this.inputController?.controlling ?? null
+  }
+
+  /** UI（控制端）：请求控制对端。对端必须已连接且已配对 */
+  async requestInputControl(
+    peerId: string
+  ): Promise<{ ok: true; sessionId: string } | { ok: false; error: string }> {
+    if (!this.inputController) return { ok: false, error: '主机未启动' }
+    if (!this.peers.has(peerId)) return { ok: false, error: '设备不在线' }
+    if (!this.trust.isKnown(peerId)) return { ok: false, error: '设备未配对' }
+    return this.inputController.request(peerId, this.opts.inputLocalScreen?.() ?? this.defaultLocalScreen(), this.displayName)
+  }
+
+  /** UI（控制端）：本机主动退出控制（7.4 快捷键也走这里）。幂等 */
+  stopInputControl(reason = 'stopped by user'): void {
+    this.inputController?.stop(reason)
+  }
+
+  /** UI（被控端）：同意控制请求。会话建立后 control 授权仅在本会话内有效 */
+  approveInputControl(sessionId: string): { ok: boolean; error?: string } {
+    return this.inputCoordinator?.approve(sessionId) ?? { ok: false, error: '主机未启动' }
+  }
+
+  /** UI（被控端）：拒绝控制请求 */
+  denyInputControl(sessionId: string, reason = 'denied by user'): void {
+    this.inputCoordinator?.deny(sessionId, reason)
+  }
+
+  /** UI（被控端）：随时拔掉正在进行的控制 */
+  terminateInputControl(): void {
+    this.inputCoordinator?.terminate()
+  }
+
+  /** 控制端事件外发（采集层调用）。非活动会话时是安全空操作 */
+  sendInputEvents(events: InputEvent[]): void {
+    this.inputController?.sendEvents(events)
+  }
+
   async stop(): Promise<void> {
+    // 键鼠会话先于通道关闭收尾：让对端收到明确的 session.stop
+    // 而不是等心跳超时，本机的按住状态也一并抬起
+    this.inputController?.stop('app shutdown')
+    this.inputCoordinator?.terminate()
     this.clipboardSync?.stop()
     this.discovery?.stop()
     this.control?.stop()

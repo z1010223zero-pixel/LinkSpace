@@ -189,6 +189,80 @@ async function main(): Promise<void> {
     check('停止后既不发送也不写入', sent.length === 0 && io.value === 'Z')
   }
 
+  // ---------- 11. 快速连续复制（验收 6.4） ----------
+  console.log('\n11. 1s 内连续复制 5 次')
+  {
+    // 逐次轮询：每次都是用户真实复制，各发一次且顺序正确，
+    // 绝不能出现旧值回推（那是回环，不是刷屏）
+    const io = makeIo('')
+    const sent: string[] = []
+    const clock = makeClock()
+    const sync = new ClipboardSync({ io, send: (t) => sent.push(t), now: clock.now })
+    sync.start()
+    const inputs = ['一', '二', '三', '四', '五']
+    for (const v of inputs) {
+      io.value = v
+      clock.advance(200) // 共 800ms < 1s
+      sync.poll()
+    }
+    check('逐次轮询按序发送且无回推', JSON.stringify(sent) === JSON.stringify(inputs), sent.join('|'))
+  }
+  {
+    // 轮询间隔大于复制间隔（800ms 轮询 vs 200ms 复制）：
+    // 状态同步天然合并中间态，只发最终值——这就是「不刷屏」的保证
+    const io = makeIo('')
+    const sent: string[] = []
+    const sync = new ClipboardSync({ io, send: (t) => sent.push(t) })
+    sync.start()
+    for (const v of ['1', '2', '3', '4', 'final']) io.value = v
+    sync.poll() // 只轮询一次
+    check('中间态被合并，只发最终值', sent.length === 1 && sent[0] === 'final', sent.join('|'))
+  }
+
+  // ---------- 12. 敏感内容不留痕（验收 6.7） ----------
+  console.log('\n12. 日志与丢弃原因不含剪贴板明文')
+  {
+    const secret = 'P@ssw0rd-密码内容-0f2c9e'
+    const io = makeIo('')
+    const sent: string[] = []
+    const skipped: string[] = []
+    // 触发所有会留痕的路径：超限丢弃、空内容、回环抑制
+    const sync = new ClipboardSync({
+      io,
+      send: (t) => sent.push(t),
+      maxBytes: 10,
+      onSkip: (r) => skipped.push(r)
+    })
+    sync.start()
+    io.value = secret
+    sync.poll() // 超限 → onSkip
+    sync.receive(secret) // 远端同内容超限 → onSkip
+    io.value = '短'
+    sync.poll()
+    sync.receive('长内容超限'.repeat(10))
+    const all = skipped.join('\n')
+    check('丢弃原因中无明文', !skipped.some((s) => s.includes(secret)), all.slice(0, 200))
+    check('发送路径未发出敏感内容', !sent.includes(secret))
+    check('丢弃原因只含尺寸与原因', skipped.every((s) => s.includes('字节') || s.includes('未接受') || s.includes('超过')), all.slice(0, 200))
+  }
+
+  // ---------- 13. 重新开启后基线重读（Host 开关语义） ----------
+  console.log('\n13. stop 后再 start 不广播存量内容')
+  {
+    const io = makeIo('')
+    const sent: string[] = []
+    const sync = new ClipboardSync({ io, send: (t) => sent.push(t) })
+    sync.start()
+    io.value = '开关期间复制的旧内容'
+    sync.stop()
+    sync.start() // 模拟用户重新打开开关：重读基线
+    sync.poll()
+    check('重新开启不广播存量内容', sent.length === 0, sent.join('|'))
+    io.value = '开启后的新复制'
+    sync.poll()
+    check('开启后的新复制正常同步', sent.length === 1 && sent[0] === '开启后的新复制')
+  }
+
   console.log(`\n=== 结果：${failures === 0 ? '全部通过' : `${failures} 项失败`} ===\n`)
   process.exit(failures === 0 ? 0 : 1)
 }
