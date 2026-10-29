@@ -149,6 +149,7 @@ fun MainScreen(service: LinkSpaceService, onClipboardToggle: (Boolean) -> Unit) 
     val inputState by service.inputState.collectAsStateWithLifecycle()
     val inputMessage by service.inputMessage.collectAsStateWithLifecycle()
     val clipboardEnabled by service.clipboardEnabled.collectAsStateWithLifecycle()
+    val fingerprintText by service.fingerprintText.collectAsStateWithLifecycle()
     var notice by remember { mutableStateOf("") }
 
     val context = LocalContext.current
@@ -208,7 +209,8 @@ fun MainScreen(service: LinkSpaceService, onClipboardToggle: (Boolean) -> Unit) 
                 fontWeight = FontWeight.Medium
             )
             Text(
-                "本机指纹 ${service.fingerprint.take(17)}… · 端口 $port",
+                if (fingerprintText.isEmpty()) "身份初始化中…"
+                else "本机指纹 ${fingerprintText.take(17)}… · 端口 $port",
                 fontSize = 12.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )

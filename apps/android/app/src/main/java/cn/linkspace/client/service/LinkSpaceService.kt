@@ -123,11 +123,38 @@ class LinkSpaceService private constructor(private val appContext: Context) {
 
     val fingerprint: String get() = identity.get().fingerprint
 
+    /**
+     * 界面用的指纹流。start() 异步化后，首次启动时证书生成（RSA 2048 +
+     * BC 签名 + 文件 IO）在后台线程进行，UI 不能再直接调 [fingerprint]——
+     * 那会在主线程上阻塞在同一把 Identity 锁上，把 ANR 从启动线程挪到
+     * 渲染线程。流在证书就绪前为空串，界面据此显示「初始化中」。
+     */
+    private val _fingerprintText = MutableStateFlow("")
+    val fingerprintText: StateFlow<String> = _fingerprintText
+
+    @Volatile
+    private var started = false
+
     fun start() {
+        // 异步化：首次启动的证书生成可能耗时数百毫秒到数秒（低端机），
+        // 在 Application.onCreate 的主线程上同步做会拖慢冷启动甚至 ANR。
+        // 身份就绪前 TransferServer/Discovery 都起不来，所以整个启动
+        // 序列一起挪到后台线程；Identity.get() 自带锁与缓存，并发安全
+        if (!started) {
+            started = true
+            Thread({ startBlocking() }, "linkspace-start").apply {
+                isDaemon = true
+                start()
+            }
+        }
+    }
+
+    private fun startBlocking() {
         trust.load()
         _trusted.value = trust.list()
 
         val cert = identity.get()
+        _fingerprintText.value = cert.fingerprint
         deviceIdPrefix = cert.fingerprint.replace(":", "").take(12)
         displayName = prefs.getString(KEY_DISPLAY_NAME, null)?.takeIf { it.isNotBlank() }
             ?: (android.os.Build.MODEL ?: "Android")
@@ -169,6 +196,9 @@ class LinkSpaceService private constructor(private val appContext: Context) {
         discovery.stopAdvertising()
         server?.stop()
         server = null
+        // 允许同一进程内重新 start（用户退出后再进）：start() 的
+        // 幂等闸门要跟着复位
+        started = false
     }
 
     // ---------- 控制通道 ----------
