@@ -17,7 +17,7 @@ import { existsSync } from 'node:fs'
 import { locateBinaries } from './platform'
 import { log, shortSerial } from './log'
 // StartOptions 必须来自共享契约，避免主进程与渲染层两处定义漂移
-import type { StartOptions } from '../shared/types'
+import type { QualityPreset, StartOptions } from '../shared/types'
 
 export type SessionState = 'starting' | 'running' | 'stopping' | 'stopped' | 'error'
 
@@ -274,6 +274,20 @@ export class ScrcpyAdapter extends EventEmitter {
 }
 
 /**
+ * 画质档位 → scrcpy 参数。码率按 Wi-Fi 实测经验取值：
+ * scrcpy 默认 8M 在高分辨率下明显不足（色块/糊），sharp 不限分辨率
+ * 交给用户自担带宽压力；maxFps 统一 60（设备不支持时 scrcpy 自动降）。
+ */
+const QUALITY_PRESETS: Record<
+  QualityPreset,
+  { maxSize?: number; videoBitRate: number; maxFps: number }
+> = {
+  sharp: { videoBitRate: 20_000_000, maxFps: 60 },
+  balanced: { maxSize: 1600, videoBitRate: 12_000_000, maxFps: 60 },
+  smooth: { maxSize: 1080, videoBitRate: 8_000_000, maxFps: 60 }
+}
+
+/**
  * 过滤来自渲染层的启动参数。IPC 传来的字段类型不可信：
  * 非法数字会变成 `--max-size=NaN` 直通 scrcpy，标题也可能超长。
  * 不认识的类型一律丢弃，而不是猜测转换。
@@ -283,6 +297,8 @@ function sanitizeOptions(opts: StartOptions): StartOptions {
     typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : undefined
   return {
     maxSize: num(opts.maxSize),
+    quality:
+      opts.quality && opts.quality in QUALITY_PRESETS ? opts.quality : undefined,
     windowTitle:
       typeof opts.windowTitle === 'string' && opts.windowTitle.trim()
         ? opts.windowTitle.trim().slice(0, 120)
@@ -303,7 +319,15 @@ function buildArgs(serial: string, opts: StartOptions): string[] {
   if (opts.windowX !== undefined) args.push(`--window-x=${opts.windowX}`)
   if (opts.windowY !== undefined) args.push(`--window-y=${opts.windowY}`)
   if (opts.windowWidth !== undefined) args.push(`--window-width=${opts.windowWidth}`)
-  if (opts.maxSize) args.push(`--max-size=${opts.maxSize}`)
+  // 分辨率与画质：显式 maxSize > 档位 maxSize；码率/帧率只由档位决定。
+  // 码率不再用 scrcpy 默认值——默认 8M 是 1080p 的量级，高分屏会糊。
+  const preset = opts.quality ? QUALITY_PRESETS[opts.quality] : undefined
+  const maxSize = opts.maxSize ?? preset?.maxSize
+  if (maxSize) args.push(`--max-size=${maxSize}`)
+  if (preset) {
+    args.push(`--video-bit-rate=${preset.videoBitRate}`)
+    args.push(`--max-fps=${preset.maxFps}`)
+  }
   if (opts.showTouches) args.push('--show-touches')
   if (opts.stayAwake) args.push('--stay-awake')
   if (opts.noWindow) args.push('--no-window')

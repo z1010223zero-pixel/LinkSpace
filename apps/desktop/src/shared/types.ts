@@ -28,8 +28,16 @@ export interface DeviceView {
   activeSessions: SessionView[]
 }
 
+/** 投屏画质档位。高清不压分辨率，代价是 Wi-Fi 下更吃带宽 */
+export type QualityPreset = 'sharp' | 'balanced' | 'smooth'
+
 export interface StartOptions {
   maxSize?: number
+  /**
+   * 画质档位（App.vue 下拉选择）。与 maxSize 的优先级：显式 maxSize 优先，
+   * 未指定时由档位决定——sharp 不限制分辨率。
+   */
+  quality?: QualityPreset
   windowTitle?: string
   windowX?: number
   windowY?: number

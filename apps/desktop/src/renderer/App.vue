@@ -6,6 +6,7 @@ import type {
   DiscoveredDevice,
   EnvInfo,
   InputStateView,
+  QualityPreset,
   SessionView,
   TransferInfo,
   TransferTaskView,
@@ -43,6 +44,21 @@ async function toggleClipboard(): Promise<void> {
   }
   clipboardOn.value = res.value
 }
+
+// ---------- 投屏画质（档位参数见 scrcpy-adapter QUALITY_PRESETS） ----------
+const QUALITY_OPTIONS: Array<{ value: QualityPreset; label: string }> = [
+  { value: 'sharp', label: '高清（原始分辨率 · 20M 码率）' },
+  { value: 'balanced', label: '均衡（1600p · 12M 码率）' },
+  { value: 'smooth', label: '流畅（1080p · 8M 码率）' }
+]
+const QUALITY_KEY = 'ls.quality'
+
+const quality = ref<QualityPreset>(
+  QUALITY_OPTIONS.some((q) => q.value === localStorage.getItem(QUALITY_KEY))
+    ? (localStorage.getItem(QUALITY_KEY) as QualityPreset)
+    : 'sharp'
+)
+watch(quality, (v) => localStorage.setItem(QUALITY_KEY, v))
 
 // ---------- 键鼠共享（阶段 3，第 7 组） ----------
 const inputState = ref<InputStateView | null>(null)
@@ -389,7 +405,8 @@ async function startMirror(serial: string, index: number): Promise<void> {
     windowTitle: `LinkSpace-${serial}`,
     windowX: 140 + index * 36,
     windowY: 90 + index * 28,
-    maxSize: 1080,
+    // 分辨率/码率由画质档位决定（用户反馈 1080 写死太糊），不再传显式 maxSize
+    quality: quality.value,
     stayAwake: true
   })
   if (!res.ok) {
@@ -604,6 +621,12 @@ onBeforeUnmount(() => {
       <h2 class="section-title">
         设备
         <span v-if="devices.length > 1" class="section-title__hint">拖拽卡片可调整顺序</span>
+        <label class="quality-pick">
+          画质
+          <select v-model="quality" class="edge-select">
+            <option v-for="q in QUALITY_OPTIONS" :key="q.value" :value="q.value">{{ q.label }}</option>
+          </select>
+        </label>
       </h2>
 
       <div v-if="devices.length" class="device-grid">
