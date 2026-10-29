@@ -9,17 +9,21 @@
 | `license-inventory.md` | 依赖许可证核实与合规检查 | 已核实主要项 |
 | `roadmap.md` | 阶段划分、门限、转向判据 | 可用 |
 | `technical-validation.md` | 第 1 周验证清单与记录模板 | 待执行 |
+| `scrcpy-manual-checklist.md` | scrcpy 投屏 28 条人工验证项 | 2 条已验证，26 条待人工 |
+| `design/input-sharing.md` | 跨设备键鼠共享自研方案 | 设计完成，未实现 |
+| `HANDOVER.md` | **交接报告**：环境坑、验证方法、下一步 | 2026-10-29 |
 
 ## 阅读顺序
 
 新接手本项目建议按以下顺序：
 
-1. 根目录 `README.md` —— 项目是什么、现在到哪一步
-2. `architecture.md` —— 系统怎么切分
-3. `protocol.md` —— 设备之间说什么
-4. `threat-model.md` —— 什么不能做
-5. `license-inventory.md` —— 什么代码不能碰
-6. `roadmap.md` + `mvp-acceptance.md` —— 下一步做什么、做到什么算完
+1. **`HANDOVER.md`** —— 交接报告：现在到哪了、怎么跑起来、坑在哪
+2. 根目录 `README.md` —— 项目是什么
+3. `architecture.md` —— 系统怎么切分
+4. `protocol.md` —— 设备之间说什么
+5. `threat-model.md` —— 什么不能做
+6. `license-inventory.md` —— 什么代码不能碰
+7. `roadmap.md` + `mvp-acceptance.md` —— 下一步做什么、做到什么算完
 
 ## 约定
 
