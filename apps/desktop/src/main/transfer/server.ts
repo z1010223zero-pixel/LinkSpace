@@ -172,6 +172,29 @@ export async function startTransferServer(
   })
 }
 
+/**
+ * chunk 路由的响应统一走这里：显式带 Content-Length。
+ * Android 端的手写 HTTP 客户端按 Content-Length 定界读响应，
+ * 缺省时 Node 用 chunked 编码，残帧留在 keep-alive 连接里会让
+ * 下一次响应解析错位（发送方向真机联调踩过）。
+ */
+function respond(
+  res: ServerResponse,
+  status: number,
+  body: string,
+  type = 'text/plain; charset=utf-8'
+): void {
+  res.writeHead(status, {
+    'Content-Type': type,
+    'Content-Length': String(Buffer.byteLength(body))
+  })
+  res.end(body)
+}
+
+function respondJson(res: ServerResponse, status: number, payload: unknown): void {
+  respond(res, status, JSON.stringify(payload), 'application/json')
+}
+
 async function handle(
   ctx: TransferRouteContext,
   req: IncomingMessage,
@@ -180,7 +203,7 @@ async function handle(
   const url = new URL(req.url ?? '/', 'http://localhost')
   const match = /^\/linkspace\/v1\/transfer\/([^/]+)\/chunk$/.exec(url.pathname)
   if (!match) {
-    res.writeHead(404).end('not found')
+    respond(res, 404, 'not found')
     return
   }
 
@@ -189,7 +212,7 @@ async function handle(
   try {
     transferKey = decodeURIComponent(match[1])
   } catch {
-    res.writeHead(400).end('bad transfer id')
+    respond(res, 400, 'bad transfer id')
     return
   }
 
@@ -197,13 +220,13 @@ async function handle(
   const token = String(req.headers['x-transfer-token'] ?? '')
 
   if (!deviceId || !token) {
-    res.writeHead(401).end('missing credentials')
+    respond(res, 401, 'missing credentials')
     return
   }
   // 唯一闸门：设备信任 + 授权范围 + 任务 token。三者由上层统一判定
   if (!ctx.verifyTransfer(transferKey, deviceId, token)) {
     log.warn(`拒绝未授权的数据面请求: ${shortSerial(deviceId)}`)
-    res.writeHead(403).end('unauthorized')
+    respond(res, 403, 'unauthorized')
     return
   }
 
@@ -212,11 +235,11 @@ async function handle(
   if (req.method === 'POST') {
     const target = ctx.resolveIncoming(transferKey)
     if (!target) {
-      res.writeHead(404).end('unknown transfer')
+      respond(res, 404, 'unknown transfer')
       return
     }
     if (!Number.isFinite(offset) || offset < 0) {
-      res.writeHead(400).end('bad offset')
+      respond(res, 400, 'bad offset')
       return
     }
 
@@ -234,7 +257,7 @@ async function handle(
     }
     if (tooLarge) {
       req.destroy()
-      res.writeHead(413).end('chunk too large')
+      respond(res, 413, 'chunk too large')
       return
     }
     const body = Buffer.concat(chunks)
@@ -243,10 +266,12 @@ async function handle(
     // 空体 = 探针：只回报已确认的连续偏移，不写盘。
     // 发送方据此从断点继续，而不是从 0 重传。
     if (received === 0) {
-      res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(
-        JSON.stringify({ ok: true, received: 0, committedOffset: written, expectedSize: target.expectedSize })
-      )
+      respondJson(res, 200, {
+        ok: true,
+        received: 0,
+        committedOffset: written,
+        expectedSize: target.expectedSize
+      })
       return
     }
 
@@ -254,10 +279,11 @@ async function handle(
     // 直接追加会静默产生损坏文件 —— 返回 409 让发送方重新对齐。
     if (offset !== written) {
       log.warn(`分块偏移冲突：请求 ${offset}，对端已写入 ${written}`)
-      res.writeHead(409, { 'Content-Type': 'application/json' })
-      res.end(
-        JSON.stringify({ ok: false, committedOffset: written, expectedSize: target.expectedSize })
-      )
+      respondJson(res, 409, {
+        ok: false,
+        committedOffset: written,
+        expectedSize: target.expectedSize
+      })
       return
     }
 
@@ -266,8 +292,7 @@ async function handle(
     const declaredDigest = String(req.headers['x-chunk-digest'] ?? '')
     if (!declaredDigest || declaredDigest.toLowerCase() !== sha256Hex(body)) {
       log.warn(`分块摘要校验失败：${transferKey}@${offset}`)
-      res.writeHead(400, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ ok: false, error: 'digest mismatch', committedOffset: written }))
+      respondJson(res, 400, { ok: false, error: 'digest mismatch', committedOffset: written })
       return
     }
 
@@ -276,33 +301,27 @@ async function handle(
       // 排队写入放弃、在途写入排空后再删 .part，不会留下残局
       const result = await ctx.appendIncoming(transferKey, offset, body)
       if (!result) {
-        res.writeHead(404).end('unknown transfer')
+        respond(res, 404, 'unknown transfer')
         return
       }
       if (result.conflict !== undefined) {
-        res.writeHead(409, { 'Content-Type': 'application/json' })
-        res.end(
-          JSON.stringify({
-            ok: false,
-            committedOffset: result.conflict,
-            expectedSize: target.expectedSize
-          })
-        )
-        return
-      }
-      res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(
-        JSON.stringify({
-          ok: true,
-          received,
-          /** 接收方已确认的连续偏移，供断点续传 */
-          committedOffset: result.committedOffset,
+        respondJson(res, 409, {
+          ok: false,
+          committedOffset: result.conflict,
           expectedSize: target.expectedSize
         })
-      )
+        return
+      }
+      respondJson(res, 200, {
+        ok: true,
+        received,
+        /** 接收方已确认的连续偏移，供断点续传 */
+        committedOffset: result.committedOffset,
+        expectedSize: target.expectedSize
+      })
     } catch (err) {
       log.error(`写入分块失败: ${err instanceof Error ? err.message : String(err)}`)
-      res.writeHead(500).end('io error')
+      respond(res, 500, 'io error')
     }
     return
   }
@@ -310,12 +329,12 @@ async function handle(
   if (req.method === 'GET') {
     const source = ctx.resolveOutgoing(transferKey)
     if (!source || !existsSync(source.path)) {
-      res.writeHead(404).end('unknown transfer')
+      respond(res, 404, 'unknown transfer')
       return
     }
     const requested = Number(url.searchParams.get('length') ?? String(4 * 1024 * 1024))
     if (!Number.isFinite(requested) || requested <= 0) {
-      res.writeHead(400).end('bad length')
+      respond(res, 400, 'bad length')
       return
     }
     const length = Math.min(requested, MAX_READ_CHUNK)
@@ -329,12 +348,12 @@ async function handle(
       res.end(data)
     } catch (err) {
       log.error(`读取分块失败: ${err instanceof Error ? err.message : String(err)}`)
-      res.writeHead(500).end('io error')
+      respond(res, 500, 'io error')
     }
     return
   }
 
-  res.writeHead(405).end('method not allowed')
+  respond(res, 405, 'method not allowed')
 }
 
 function sha256Hex(buf: Buffer): string {

@@ -1,9 +1,14 @@
 package cn.linkspace.client
 
 import android.content.ClipboardManager
+import android.content.Context
+import android.net.Uri
 import android.os.Bundle
+import android.provider.OpenableColumns
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -11,6 +16,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.font.FontFamily
@@ -18,8 +24,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import cn.linkspace.client.service.ClipboardSync
+import cn.linkspace.client.service.DiscoveredService
 import cn.linkspace.client.service.LinkSpaceService
+import cn.linkspace.client.service.OutgoingFile
 import cn.linkspace.client.service.TransferTask
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     /**
@@ -104,6 +113,21 @@ fun MainScreen(service: LinkSpaceService) {
     val trusted by service.trusted.collectAsStateWithLifecycle()
     val port by service.port.collectAsStateWithLifecycle()
     var notice by remember { mutableStateOf("") }
+
+    // ---------- 发送文件 ----------
+    var sendTarget by remember { mutableStateOf<DiscoveredService?>(null) }
+    var pendingFiles by remember { mutableStateOf<List<OutgoingFile>>(emptyList()) }
+    var sending by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    val context = LocalContext.current
+
+    // SAF 选文件：只回 Uri 不回路径，名字与大小在回调里一并查好，
+    // 对话框展示的就是将要发送的东西，不再有第二次转换
+    val pickFiles = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris ->
+        if (uris.isNotEmpty()) pendingFiles = context.outgoingFiles(uris)
+    }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize().padding(16.dp),
@@ -214,7 +238,9 @@ fun MainScreen(service: LinkSpaceService) {
                                 modifier = Modifier.fillMaxWidth()
                             )
                         }
-                        if (t.state == TransferTask.OFFERED) {
+                        // 接收/拒绝只属于接收方向的任务：发送任务也会短暂处于
+                        // OFFERED（等对方确认），点了「接收」会走错分支
+                        if (t.state == TransferTask.OFFERED && t.direction == "receive") {
                             Spacer(Modifier.height(8.dp))
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 Button(onClick = {
@@ -259,6 +285,13 @@ fun MainScreen(service: LinkSpaceService) {
                     }
                     if (d.paired) {
                         Badge { Text("已配对") }
+                        Spacer(Modifier.height(8.dp))
+                        Button(onClick = {
+                            sendTarget = d
+                            pickFiles.launch(arrayOf("*/*"))
+                        }) {
+                            Text("发送文件")
+                        }
                     }
                 }
             }
@@ -272,6 +305,64 @@ fun MainScreen(service: LinkSpaceService) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
+    }
+
+    // ---------- 发送确认对话框 ----------
+    sendTarget?.let { target ->
+        AlertDialog(
+            onDismissRequest = {
+                // 发送进行中不允许误触关闭：服务层没有取消通道，
+                // 界面先松手会让任务状态没人认领
+                if (!sending) {
+                    sendTarget = null
+                    pendingFiles = emptyList()
+                }
+            },
+            title = { Text("发送文件") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("目标：${target.displayName}")
+                    if (pendingFiles.isEmpty()) {
+                        Text("尚未选择文件")
+                        OutlinedButton(onClick = { pickFiles.launch(arrayOf("*/*")) }) {
+                            Text("选择文件")
+                        }
+                    } else {
+                        pendingFiles.take(5).forEach { f ->
+                            Text("· ${f.name}（${formatBytes(f.size)}）", fontSize = 12.sp)
+                        }
+                        if (pendingFiles.size > 5) {
+                            Text("… 共 ${pendingFiles.size} 个文件", fontSize = 12.sp)
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    enabled = pendingFiles.isNotEmpty() && !sending,
+                    onClick = {
+                        sending = true
+                        scope.launch {
+                            service.sendFiles(target, pendingFiles)
+                                .onSuccess { notice = "已向 ${target.displayName} 发送 $it 个文件" }
+                                .onFailure { notice = it.message ?: "发送失败" }
+                            sending = false
+                            sendTarget = null
+                            pendingFiles = emptyList()
+                        }
+                    }
+                ) { Text(if (sending) "发送中…" else "发送") }
+            },
+            dismissButton = {
+                OutlinedButton(
+                    enabled = !sending,
+                    onClick = {
+                        sendTarget = null
+                        pendingFiles = emptyList()
+                    }
+                ) { Text("取消") }
+            }
+        )
     }
 }
 
@@ -301,3 +392,33 @@ private fun formatBytes(n: Long): String = when {
     n < 1024L * 1024 * 1024 -> "%.1f MB".format(n / 1024.0 / 1024.0)
     else -> "%.2f GB".format(n / 1024.0 / 1024.0 / 1024.0)
 }
+
+/**
+ * 把 SAF 返回的 Uri 转成发送所需的流式描述。
+ * 名字与大小从 OpenableColumns 查询，查不到再退回 openFileDescriptor 的 statSize；
+ * 查询失败的 Uri 直接跳过——发一半坏文件比不发更糟。
+ */
+private fun Context.outgoingFiles(uris: List<Uri>): List<OutgoingFile> =
+    uris.mapNotNull { uri ->
+        runCatching {
+            var name: String? = null
+            var size: Long? = null
+            contentResolver.query(
+                uri,
+                arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE),
+                null, null, null
+            )?.use { c ->
+                if (c.moveToFirst()) {
+                    name = c.getString(0)
+                    if (!c.isNull(1)) size = c.getLong(1)
+                }
+            }
+            OutgoingFile(
+                name = name ?: uri.lastPathSegment ?: "未命名",
+                size = size
+                    ?: contentResolver.openFileDescriptor(uri, "r")?.use { it.statSize }
+                    ?: 0L,
+                open = { contentResolver.openInputStream(uri) ?: error("无法读取文件：$uri") }
+            )
+        }.getOrNull()
+    }

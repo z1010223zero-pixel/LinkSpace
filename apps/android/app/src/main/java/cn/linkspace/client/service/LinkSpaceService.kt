@@ -2,11 +2,32 @@ package cn.linkspace.client.service
 
 import android.content.Context
 import android.util.Log
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
+
+/**
+ * 待发送文件的最小描述。
+ *
+ * SAF 只回 Uri 不回真实路径（把 Uri 转 File 是文档明确不鼓励的做法），
+ * 所以发送侧只约定「名字 + 大小 + 打开输入流」，不依赖 java.io.File。
+ * 流按需开关：offer、分块推送、整体摘要各开一次，
+ * contentResolver 允许对同一 Uri 反复 openInputStream。
+ */
+class OutgoingFile(
+    val name: String,
+    val size: Long,
+    private val open: () -> java.io.InputStream
+) {
+    fun inputStream(): java.io.InputStream = open()
+}
 
 /**
  * LinkSpace 主机：把身份、信任、发现、传输服务组装成一个节点。
@@ -421,6 +442,212 @@ class LinkSpaceService private constructor(private val appContext: Context) {
             sent++
         }
         if (sent > 0) Log.i(TAG, "剪贴板已同步到 $sent 台设备")
+    }
+
+    // ---------- 发送 ----------
+
+    private val client = LinkSpaceClient(identity)
+
+    /**
+     * 向桌面端推送文件（Android 作为发送方）。
+     *
+     * 流程与桌面端 `transfer/manager.ts` 的 push() 对称：
+     *   连接 → announce → offer → 等 accept → 逐块 POST → complete
+     * 桌面端作为接收方的 offer/accept/complete 链路本就完整
+     * （Windows↔Windows 双向对称），所以这里只补「连接 + 推块」。
+     *
+     * @param peer mDNS 发现的桌面端（必须已配对，否则 offer 会被拒）
+     * @param files 待发送文件，内容由调用方通过 SAF 以流的形式提供
+     */
+    suspend fun sendFiles(peer: DiscoveredService, files: List<OutgoingFile>): Result<Int> {
+        if (files.isEmpty()) return Result.failure(IllegalArgumentException("没有待发送的文件"))
+        // 信任判定放在这里而不是等对端拒：提前失败能让界面立刻给出原因，
+        // 而不是等一个 403 回来再猜。
+        // 用前缀匹配：发现的 idPrefix 是 12 位，桌面端信任条目存的是完整 ID
+        if (!trust.hasScopeFor(peer.idPrefix, "file")) {
+            return Result.failure(IllegalStateException("设备 ${peer.displayName} 未授权，请先配对"))
+        }
+        // 信封 to 必须是完整设备 ID：桌面端按全等路由，填 12 位前缀的
+        // offer 会被静默丢弃——连接看着活着，对面却当没收到
+        val peerFullId = trust.fullDeviceIdOf(peer.idPrefix) ?: peer.idPrefix
+
+        // 任务先登记再连接：界面从 offer 那一刻起就有进度可看，
+        // 而不是等整条链路走完才冒出来
+        val transferId = "tr-${java.util.UUID.randomUUID().toString().take(8)}"
+        val totalSize = files.sumOf { it.size }
+        registerOutgoing(transferId, peer.idPrefix, files)
+
+        return withContext(Dispatchers.IO) {
+            runCatching {
+                val conn = client.connectControl(peer.host, peer.port, Protocol.CONTROL_PATH)
+                // 发送期间没有控制消息来回（分块 POST 不走控制通道），
+                // 桌面端 15s 收不到任何消息就判定离线并断连——大文件传输
+                // 会被中途掐断。发送期间周期性发心跳把会话续住。
+                val heartbeat = CoroutineScope(Dispatchers.IO).launch {
+                    while (true) {
+                        delay(4_000)
+                        val alive = runCatching {
+                            client.sendText(
+                                conn,
+                                envelope(Protocol.TYPE_HEARTBEAT, peerFullId) {}.toString()
+                            )
+                        }.isSuccess
+                        if (!alive) return@launch
+                    }
+                }
+                // 上传连接在 accept 之后才建立；提前声明让 finally 能关到它
+                var upload: javax.net.ssl.SSLSocket? = null
+                try {
+                    // announce：对端靠它知道我们是谁，并据此查信任清单。
+                    // 少了这一步，对端会因 peerId 为空而丢弃后续所有消息。
+                    client.sendText(
+                        conn,
+                        envelope(Protocol.TYPE_ANNOUNCE, "") {
+                            put("displayName", displayName)
+                            put("deviceType", deviceType)
+                            put("caps", org.json.JSONArray(Protocol.DEFAULT_GRANT_SCOPE))
+                            put("fingerprint", fingerprint)
+                        }.toString()
+                    )
+
+                    val metas = files.map { f ->
+                        JSONObject().apply {
+                            put("name", f.name)
+                            put("size", f.size)
+                        }
+                    }
+                    client.sendText(
+                        conn,
+                        envelope(Protocol.TYPE_TRANSFER_OFFER, peerFullId) {
+                            put("transferId", transferId)
+                            put("files", org.json.JSONArray(metas))
+                            put("totalSize", totalSize)
+                        }.toString()
+                    )
+                    Log.i(TAG, "已发起传输任务 $transferId，${files.size} 个文件")
+
+                    // 等 accept。拒绝/错误都带 reason，直接抛给调用方展示
+                    var token: String? = null
+                    val deadline = System.currentTimeMillis() + 60_000
+                    while (token == null && System.currentTimeMillis() < deadline) {
+                        val text = client.readText(conn) ?: error("控制通道已关闭")
+                        val msg = runCatching { JSONObject(text) }.getOrNull() ?: continue
+                        when (msg.optString("type")) {
+                            Protocol.TYPE_TRANSFER_ACCEPT ->
+                                token = msg.optJSONObject("payload")?.optString("token")
+                            Protocol.TYPE_TRANSFER_REJECT ->
+                                error("对方拒绝接收：${msg.optJSONObject("payload")?.optString("reason") ?: "未知原因"}")
+                            Protocol.TYPE_TRANSFER_ERROR ->
+                                error("传输失败：${msg.optJSONObject("payload")?.optString("message") ?: "未知原因"}")
+                        }
+                    }
+                    val tok = token ?: error("等待对方确认超时")
+                    Log.i(TAG, "任务 $transferId 已被接受，开始推送")
+                    setOutgoingState(transferId, TransferTask.ACCEPTED)
+
+                    // 分块上传走独立连接：控制通道已是 WebSocket，
+                    // 在它上面再发 HTTP 请求会把对端解析器炸掉
+                    upload = client.connectUpload(peer.host, peer.port)
+
+                    val myId = identity.get().fingerprint.replace(":", "").take(12)
+                    val chunk = client.chunkSize()
+                    var sent = 0L
+                    for (f in files) {
+                        // key 必须是 transferId:fileName：桌面端数据面按该组合键路由，
+                        // 用裸 transferId 会 404（Android 接收侧曾踩过这个坑）
+                        val key = "$transferId:${f.name}"
+                        var offset = 0L
+                        f.inputStream().use { inp ->
+                            val buf = ByteArray(chunk)
+                            while (true) {
+                                val n = inp.read(buf)
+                                if (n <= 0) break
+                                val data = if (n == buf.size) buf else buf.copyOf(n)
+                                val digest = client.chunkDigest(data)
+                                // offset 必须随块上报：桌面端强制偏移衔接（409 对齐冲突），
+                                // 缺省会被当成 0，从第二块起必撞 409
+                                val path = Protocol.chunkPath(key) + "?offset=$offset"
+                                // 失败重试一次：单块 4MB，重传成本低于整体重来
+                                var attempt = 0
+                                while (true) {
+                                    val (status, body) = client.postChunk(
+                                        upload, peer.host, peer.port, path, myId, tok, data, digest
+                                    )
+                                    if (status == 200) break
+                                    attempt++
+                                    if (attempt >= 2) error("分块上传失败 $status: $body")
+                                    Log.w(TAG, "分块 ${key}@$offset 返回 $status，重试")
+                                }
+                                offset += n
+                                sent += n
+                                updateOutgoingProgress(transferId, sent)
+                            }
+                        }
+                    }
+
+                    // complete 带整体摘要：桌面端据此校验，不符则删 .part 不落盘
+                    val digests = JSONObject()
+                    files.forEach { f -> digests.put(f.name, client.fileDigest(f.inputStream())) }
+                    client.sendText(
+                        conn,
+                        envelope(Protocol.TYPE_TRANSFER_COMPLETE, peerFullId) {
+                            put("transferId", transferId)
+                            put("digests", digests)
+                        }.toString()
+                    )
+                    Log.i(TAG, "任务 $transferId 已推送完成，共 $sent 字节")
+                    setOutgoingState(transferId, TransferTask.COMPLETED)
+                    files.size
+                } finally {
+                    // WIP 版本只在成功路径关连接，中途 error() 会把 TLS socket 泄漏掉
+                    heartbeat.cancel()
+                    upload?.let { u -> runCatching { u.close() } }
+                    client.close(conn)
+                }
+            }.onFailure { err ->
+                // 发送中途的任何失败都要在任务列表留下痕迹
+                failOutgoing(transferId, err.message ?: "发送失败")
+            }
+        }
+    }
+
+    // ---------- 发送任务的界面状态推进（接收路径对应 handleOffer / finalizeTask） ----------
+
+    private fun registerOutgoing(transferId: String, peerId: String, files: List<OutgoingFile>) {
+        taskMap[transferId] = TransferTask(
+            id = transferId,
+            direction = "send",
+            peerId = peerId,
+            state = TransferTask.OFFERED,
+            files = files.map { TransferFile(name = it.name, size = it.size) },
+            totalSize = files.sumOf { it.size },
+            transferred = 0,
+            createdAt = System.currentTimeMillis()
+        )
+        _transfers.value = taskMap.values.sortedBy { it.createdAt }
+    }
+
+    private fun setOutgoingState(transferId: String, state: String) {
+        taskMap[transferId]?.let {
+            taskMap[transferId] = it.copy(state = state)
+            _transfers.value = taskMap.values.sortedBy { it.createdAt }
+        }
+    }
+
+    private fun updateOutgoingProgress(transferId: String, transferred: Long) {
+        taskMap[transferId]?.let {
+            taskMap[transferId] = it.copy(transferred = transferred)
+            _transfers.value = taskMap.values.sortedBy { it.createdAt }
+        }
+    }
+
+    private fun failOutgoing(transferId: String, message: String) {
+        taskMap[transferId]?.let {
+            if (it.direction == "send" && it.state != TransferTask.COMPLETED) {
+                taskMap[transferId] = it.copy(state = TransferTask.FAILED, error = message)
+                _transfers.value = taskMap.values.sortedBy { it.createdAt }
+            }
+        }
     }
 
     // ---------- 传输 ----------

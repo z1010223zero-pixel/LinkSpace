@@ -252,6 +252,16 @@ export class ControlNode {
       void node.dispatch(conn, msg)
     })
 
+    ws.on('error', (err) => {
+      // 畸形帧会让 ws 抛 error（如对端在升级后的连接上混发 HTTP）。
+      // 不接住的话它以未处理异常打爆整个进程——一颗坏连接等于一次 DoS
+      log.warn(`控制连接异常断开: ${err instanceof Error ? err.message : String(err)}`)
+      node.conns.delete(ws)
+      node.handlers.get('__closed__')?.forEach((cb) => void cb(conn, {
+        ...emptyEnvelope(node.deviceId)
+      }))
+    })
+
     ws.on('close', () => {
       node.conns.delete(ws)
       node.handlers.get('__closed__')?.forEach((cb) => void cb(conn, {

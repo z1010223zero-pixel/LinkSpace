@@ -54,9 +54,30 @@ class TrustStore(private val file: File) {
     fun hasScope(deviceId: String, scope: String): Boolean =
         entries.any { it.deviceId == deviceId && it.scope.contains(scope) }
 
+    /**
+     * 按设备 ID 前缀判定授权，发送方向专用。
+     *
+     * 桌面端 deviceId 是 20 字符（`dev_` + 16 位指纹），而 mDNS TXT 只广播
+     * 前 12 位；发送前的授权预检拿到的只有这 12 位，全等比对永远失配。
+     * 存储条目以发现前缀开头即视为同一设备——前缀来自自己的通告，
+     * 唯一性由指纹保证，不存在误配空间。
+     */
+    @Synchronized
+    fun hasScopeFor(deviceIdPrefix: String, scope: String): Boolean =
+        entries.any { it.deviceId.startsWith(deviceIdPrefix) && it.scope.contains(scope) }
+
     @Synchronized
     fun fingerprintOf(deviceId: String): String? =
         entries.firstOrNull { it.deviceId == deviceId }?.fingerprint
+
+    /**
+     * 把发现层拿到的 12 位前缀还原成对端完整设备 ID。
+     * 控制消息信封的 `to` 要填完整 ID：桌面端按全等路由，填前缀会被
+     * 静默丢弃（offer 发出去石沉大海）。预检已通过，这里必然能解析。
+     */
+    @Synchronized
+    fun fullDeviceIdOf(deviceIdPrefix: String): String? =
+        entries.firstOrNull { it.deviceId.startsWith(deviceIdPrefix) }?.deviceId
 
     @Synchronized
     fun list(): List<Entry> = entries.toList()
