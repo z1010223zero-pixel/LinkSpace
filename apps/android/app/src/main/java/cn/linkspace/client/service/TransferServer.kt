@@ -89,7 +89,12 @@ class TransferServer(
             javax.net.ssl.KeyManagerFactory.getDefaultAlgorithm()
         )
         kmf.init(identity.keyStore(), CharArray(0))
-        ctx.init(kmf.keyManagers, null, null)
+        // TLS 层只索取、不验证连入方证书（与桌面端 requestCert +
+        // rejectUnauthorized:false 同语义）：对端全是自签证书，没有 CA
+        // 可依赖。真机走查踩过：默认 TrustManager 会拿系统 CA 验客户端
+        // 证书并回 certificate_unknown 告警，握手直接失败。
+        // 信任判定在控制消息层的指纹闸门（LinkSpaceService.onControlMessage）
+        ctx.init(kmf.keyManagers, arrayOf<javax.net.ssl.TrustManager>(PermissiveTrustManager), null)
         val factory: SSLContext = ctx
         val socket = factory.serverSocketFactory.createServerSocket(0, 64) as ServerSocket
         socket.reuseAddress = true
@@ -550,6 +555,27 @@ class TransferServer(
         val obj = runCatching { JSONObject(text) }.getOrNull() ?: return
         val from = obj.optString("from")
         if (from.isEmpty()) return
+        // 协议 §3 语义校验：v 可处理、to 为本机或空（心跳广播）、
+        // ts 在 ±60s 窗口。任一项失败即断开——这是对畸形/重放消息的
+        // 统一防线，桌面端 control/node.ts 同规则
+        val selfPrefix = identity.get().fingerprint.replace(":", "").take(12)
+        if (obj.optInt("v", -1) != Protocol.VERSION) {
+            Log.w(TAG, "协议版本不符（v=${obj.optInt("v", -1)}），断开连接")
+            runCatching { conn.close() }
+            return
+        }
+        val to = obj.optString("to")
+        if (to.isNotEmpty() && to != selfPrefix) {
+            Log.w(TAG, "信封 to 非本机（$to），断开连接")
+            runCatching { conn.close() }
+            return
+        }
+        val ts = obj.optLong("ts", 0L)
+        if (ts <= 0 || kotlin.math.abs(System.currentTimeMillis() - ts) > 60_000) {
+            Log.w(TAG, "信封 ts 超出时钟窗口，断开连接")
+            runCatching { conn.close() }
+            return
+        }
         val registered = controlPeerIds[conn]
         if (registered == null) {
             controlPeerIds[conn] = from
@@ -715,6 +741,17 @@ class TransferServer(
 
 /** 单个文件的落盘信息。提成顶层类：registerIncoming 是 public，返回值不能是私有嵌套类 */
 class PartInfo(val partPath: String, val finalPath: String, val expectedSize: Long)
+
+/**
+ * 服务端对连入方证书的 TLS 层放行器：只索取不出示就拒真的证书校验。
+ * 空实现与 [cn.linkspace.client.service.LinkSpaceClient] 的 BlindTrust
+ * 同款——身份锚定靠应用层指纹闸门，不靠证书链。
+ */
+private object PermissiveTrustManager : javax.net.ssl.X509TrustManager {
+    override fun checkClientTrusted(chain: Array<out java.security.cert.X509Certificate>?, authType: String?) {}
+    override fun checkServerTrusted(chain: Array<out java.security.cert.X509Certificate>?, authType: String?) {}
+    override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = emptyArray()
+}
 
 /** 单个请求头区块的上限，防止无界逐字节拼接吃光内存 */
 private const val MAX_HEADER_BYTES = 32 * 1024

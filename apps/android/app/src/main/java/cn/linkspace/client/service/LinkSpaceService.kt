@@ -784,12 +784,18 @@ class LinkSpaceService private constructor(private val appContext: Context) {
                     )
                     Log.i(TAG, "已发起传输任务 $transferId，${files.size} 个文件")
 
-                    // 等 accept。拒绝/错误都带 reason，直接抛给调用方展示
+                    // 等 accept。拒绝/错误都带 reason，直接抛给调用方展示。
+                    // 信封按协议 §3 过滤：v/to/ts 不合的消息直接跳过
                     var token: String? = null
                     val deadline = System.currentTimeMillis() + 60_000
+                    val myPrefix = identity.get().fingerprint.replace(":", "").take(12)
                     while (token == null && System.currentTimeMillis() < deadline) {
                         val text = client.readText(conn) ?: error("控制通道已关闭")
                         val msg = runCatching { JSONObject(text) }.getOrNull() ?: continue
+                        val to = msg.optString("to")
+                        if (msg.optInt("v", -1) != Protocol.VERSION) continue
+                        if (to.isNotEmpty() && to != myPrefix) continue
+                        if (kotlin.math.abs(System.currentTimeMillis() - msg.optLong("ts", 0L)) > 60_000) continue
                         when (msg.optString("type")) {
                             Protocol.TYPE_TRANSFER_ACCEPT ->
                                 token = msg.optJSONObject("payload")?.optString("token")
