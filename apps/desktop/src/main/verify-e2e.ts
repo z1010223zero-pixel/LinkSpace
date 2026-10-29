@@ -168,6 +168,25 @@ async function main(): Promise<void> {
     check('已连接但未配对的设备无法发起传输', blocked.includes('授权'), blocked)
     await C.stop()
 
+    // 2.4 授权范围：已配对但 scope 被剥掉 file 时，传输同样被拒。
+    // 直接覆写 A 对 B 的信任条目（配对默认给 file+clipboard，
+    // 这里模拟「用户只勾了剪贴板」的授予结果）
+    const abEntry = A.trustStore.list().find((e) => e.deviceId === B.id)
+    if (abEntry) {
+      A.trustStore.grant({ ...abEntry, scope: ['clipboard'] })
+    }
+    let scopeBlocked = ''
+    try {
+      await A.offerFiles(B.id, [{ name: 'x.txt', size: 1 }])
+    } catch (err) {
+      scopeBlocked = err instanceof Error ? err.message : String(err)
+    }
+    check('scope 不含 file 时传输被拒（SCOPE_DENIED 语义）', scopeBlocked.includes('授权'), scopeBlocked)
+    // 恢复授权，后续用例不受影响
+    if (abEntry) {
+      A.trustStore.grant({ ...abEntry, scope: abEntry.scope })
+    }
+
     // ---------- 4. 真实文件传输 ----------
     console.log('\n4. 跨节点文件传输')
     const srcDir = join(workDir, 'src')

@@ -293,20 +293,29 @@ export class ControlNode {
     return this
   }
 
-  /** 启动心跳：周期发送 + 超时判定离线 */
-  startHeartbeat(onTimeout: (conn: Connection) => void): void {
+  /**
+   * 启动心跳：周期发送 + 超时判定离线。
+   * 间隔与超时可注入（无头测试用短周期验证超时路径），产品路径
+   * 不传参数走默认 5s / 15s。
+   */
+  startHeartbeat(
+    onTimeout: (conn: Connection) => void,
+    opts: { intervalMs?: number; timeoutMs?: number } = {}
+  ): void {
+    const intervalMs = opts.intervalMs ?? HEARTBEAT_INTERVAL_MS
+    const timeoutMs = opts.timeoutMs ?? HEARTBEAT_TIMEOUT_MS
     this.heartbeatTimer = setInterval(() => {
       const now = Date.now()
       for (const [ws, conn] of this.conns) {
         if (ws.readyState !== WebSocket.OPEN) continue
-        if (now - conn.lastSeen > HEARTBEAT_TIMEOUT_MS) {
+        if (now - conn.lastSeen > timeoutMs) {
           onTimeout(conn)
           conn.close(4000, 'heartbeat timeout')
           continue
         }
         conn.send('device.heartbeat', {})
       }
-    }, HEARTBEAT_INTERVAL_MS)
+    }, intervalMs)
   }
 
   connections(): Connection[] {
