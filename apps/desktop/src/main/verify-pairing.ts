@@ -33,7 +33,7 @@ interface Node {
   close(): Promise<void>
 }
 
-async function makeNode(id: string, displayName: string): Promise<Node> {
+async function makeNode(id: string, displayName: string, codeTtlMs?: number): Promise<Node> {
   const dir = await mkdtemp(join(tmpdir(), 'linkspace-pair-'))
   setIdentityDir(dir)
 
@@ -55,7 +55,9 @@ async function makeNode(id: string, displayName: string): Promise<Node> {
     trust,
     node: control,
     caps: () => ['file', 'clipboard'],
-    selfFingerprint: () => fingerprint
+    selfFingerprint: () => fingerprint,
+    // 2.7 超时用例注入短 TTL；产品路径不传走默认 60s
+    ...(codeTtlMs !== undefined ? { codeTtlMs } : {})
   })
 
   const node: Node = {
@@ -174,6 +176,39 @@ async function main(): Promise<void> {
     await sleep(300)
     check('撤销后重连不会自动恢复信任', !A.trust.isKnown(B.id) && !B.trust.isKnown(A.id))
     conn2.close()
+
+    // ---------- 6. 配对码超时（2.7）：过期回落，无悬挂状态 ----------
+    // 注入 100ms TTL 的接收方协调器：发起方拿到码后不提交，
+    // 等 TTL 过了再 approve，应被拒且 pending 清空、连接关闭
+    console.log('\n6. 配对码超时回落')
+    const D = await makeNode('dev_D_444444444444', 'Delta', 100)
+    const E = await makeNode('dev_E_555555555555', 'Echo')
+    const connDE = await E.control.connect('127.0.0.1', D.port)
+    E.pairing.introduce(connDE)
+    await waitFor(() => (connDE.peerId === D.id ? connDE : undefined))
+
+    const timeoutPromise = E.pairing.requestPairing(connDE).then(
+      () => 'resolved',
+      (err: unknown) => `rejected: ${err instanceof Error ? err.message : String(err)}`
+    )
+    const pendingDE = await waitFor(() => D.pending.find((p) => p.peerId === E.id))
+    check('D 收到配对请求', Boolean(pendingDE))
+    // 不提交码，等它过期：TTL 定时器会自动清理内部 pending、
+    // 发 pair.error 并关闭连接。approve 返回「已失效/已过期」
+    // 两者都证明内部无悬挂；UI 收集的 pending 数组是快照，不会自动清
+    await sleep(200)
+    const late = D.pairing.approve(pendingDE, pendingDE.code)
+    check('过期配对码被拒绝', !late.ok, late.error ?? '')
+    check(
+      '内部 pending 已清理（无悬挂状态）',
+      late.error?.includes('失效') === true || late.error?.includes('过期') === true,
+      late.error ?? ''
+    )
+    const outcome = await timeoutPromise
+    check('发起方收到失败而非悬挂', outcome.startsWith('rejected'), outcome)
+    check('超时未建立信任', !D.trust.isKnown(E.id) && !E.trust.isKnown(D.id))
+    await D.close()
+    await E.close()
   } finally {
     await A.close()
     await B.close()
