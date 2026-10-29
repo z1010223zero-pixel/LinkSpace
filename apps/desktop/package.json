@@ -21,6 +21,7 @@
     "verify:net": "node scripts/build-verify-net.mjs",
     "verify:heartbeat": "node scripts/build-verify-heartbeat.mjs",
     "verify:clipboard": "node scripts/build-verify-clipboard.mjs",
+    "verify:input": "node scripts/build-verify-input.mjs",
     "verify:mdns": "node scripts/build-mdns-test.mjs",
     "probe:xplat": "esbuild scripts/xplat-probe.ts --bundle --platform=node --format=cjs --outfile=out/verify/xprobe.js --external:electron --external:ws --external:bonjour-service --external:selfsigned"
   },
