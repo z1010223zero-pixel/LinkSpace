@@ -11,60 +11,24 @@
 //     精确的在线/离线由控制通道心跳负责（protocol.md 4.2）。
 //   - 服务名中的显示名必须过滤，否则用户把机器名改成含点或反斜杠的字符串
 //     就能污染 mDNS 应答。
+//
+// 为什么直接解析原始应答包而不用 bonjour-service 的 Browser 事件
+// （真机实证 2026-10-29，两个独立缺陷叠加）：
+//   1. Browser 只在 start() 时发**一次** PTR 查询（dist/lib/browser.js L77），
+//      此后纯被动收听；而 Android NSD 注册后只应答查询、不做周期性通告。
+//      桌面端先于平板启动就永远空列表。→ 下方周期性补查解决。
+//   2. Browser 对内容相同的重复应答**去重后不再发出任何事件**
+//      （L66-71：已有实例仅在 SRV/TXT 变化时才 emit），导致 lastSeen
+//      永不刷新，12s 软过期误删在线设备；且 Browser 内部仍保留该服务，
+//      此后永远不会再发 up——设备在界面上出现约 12s 后永久消失。
+//      → 直接从原始应答驱动 seen 表，每次应答都刷新 lastSeen。
 
-import { networkInterfaces } from 'node:os'
-import { Bonjour, Browser, type Service } from 'bonjour-service'
-import { log } from './log'
+import { Bonjour, type Service } from 'bonjour-service'
 
 export const SERVICE_TYPE = 'linkspace'
 
-/**
- * 选出用于 mDNS 组播的局域网网卡地址。
- *
- * 与 `resolveBindAddress()` 的判据**刻意不同**：那里把 CGNAT 段（100.64/10）
- * 算作「不可公开路由」所以放行，而组播网卡必须选真正能跑 mDNS 的那张。
- * 100.64/10 是运营商级 NAT 段，虚拟网卡（Tailscale、ZeroTier 等）常用它，
- * 选中的结果就是「能收到突发通告但查不过去」——正是本次要修的现象。
- *
- * 选择顺序：环境变量 > 192.168.x > 10.x > 172.16–31.x。
- * 多个同类地址时取第一个并告警：这一步选错发现功能会整体失效，
- * 宁可说出来也不要静默。
- */
-function pickLanInterface(): string | undefined {
-  const override = process.env.LINKSPACE_BIND_IP
-  if (override) return override
-
-  const scored: Array<{ addr: string; score: number }> = []
-  for (const list of Object.values(networkInterfaces())) {
-    for (const ni of list ?? []) {
-      if (ni.family !== 'IPv4' || ni.internal) continue
-      const o = ni.address.split('.').map(Number)
-      if (o.length !== 4 || o.some((n) => !Number.isFinite(n) || n < 0 || n > 255)) continue
-      if (o[0] === 127) continue // 回环
-      if (o[0] === 169 && o[1] === 254) continue // 链路本地
-      if (o[0] === 100 && o[1] >= 64 && o[1] <= 127) continue // CGNAT，不能跑 mDNS
-      let score: number
-      if (o[0] === 192 && o[1] === 168) score = 3
-      else if (o[0] === 10) score = 2
-      else if (o[0] === 172 && o[1] >= 16 && o[1] <= 31) score = 1
-      else continue // 其余一律不当局域网
-      scored.push({ addr: ni.address, score })
-    }
-  }
-
-  if (scored.length === 0) {
-    log.warn('未找到可用的局域网 IPv4 网卡，mDNS 将使用默认接口（可能发现不到设备）')
-    return undefined
-  }
-  // 分数高的优先；同分保持系统枚举顺序（稳定，不随运行变化）
-  scored.sort((a, b) => b.score - a.score)
-  const best = scored[0]
-  const sameGrade = scored.filter((s) => s.score === best.score).map((s) => s.addr)
-  if (sameGrade.length > 1) {
-    log.warn(`检测到多个同级局域网地址（${sameGrade.join(', ')}），mDNS 使用 ${best.addr}；可用 LINKSPACE_BIND_IP 覆盖`)
-  }
-  return best.addr
-}
+/** 本服务的完整 DNS 名，查询与应答匹配都用它 */
+const SERVICE_FQDN = `_${SERVICE_TYPE}._tcp.local`
 
 export type DeviceType = 'win' | 'android-phone' | 'android-tablet'
 
@@ -117,8 +81,7 @@ export function sanitizeServiceName(name: string): string {
   return cleaned.length ? cleaned.slice(0, 60) : 'LinkSpace-Device'
 }
 
-function parseTxt(txt: unknown, fallbackPort: number): TxtRecord | null {
-  const rec = (txt ?? {}) as Record<string, string>
+function parseTxt(rec: Record<string, string>, fallbackPort: number): TxtRecord | null {
   const ver = String(rec.ver ?? '')
   if (ver !== '1') return null
   const port = Number(rec.port ?? fallbackPort)
@@ -135,6 +98,52 @@ function parseTxt(txt: unknown, fallbackPort: number): TxtRecord | null {
   }
 }
 
+// ---- 原始 mDNS 包结构（multicast-dns / dns-packet 的输出形态）----
+//
+// bonjour-service 的类型把底层 server 标为 private，但周期性补查与
+// 逐包解析必须直接触达它；这里按 dns-packet 的实际输出定义最小结构，
+// 用显式断言越过 private（与库行为耦合点已集中在此一处）。
+
+interface RawRecord {
+  type: string
+  name: string
+  ttl: number
+  /** PTR: 实例 fqdn 字符串；SRV: { port, target }；A: IPv4 字符串；TXT: Buffer[] */
+  data: unknown
+}
+
+interface RawPacket {
+  type: string
+  answers: RawRecord[]
+  additionals: RawRecord[]
+}
+
+interface RawMdnsServer {
+  query(name: string, type: string): void
+  on(event: 'response', cb: (packet: RawPacket, rinfo: { address: string; port: number }) => void): void
+  removeListener(event: 'response', cb: (packet: RawPacket, rinfo: { address: string; port: number }) => void): void
+}
+
+/** DNS TXT 记录：每条 character-string 形如 `key=value`（DNS-SD 规范） */
+function decodeTxtRecords(chunks: unknown[]): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const chunk of chunks) {
+    if (!Buffer.isBuffer(chunk)) continue
+    const kv = chunk.toString('utf8')
+    if (!kv) continue
+    const eq = kv.indexOf('=')
+    // `=` 开头的键是 DNS-SD 的「隐藏」键；无 `=` 的键取空值
+    if (eq > 0) out[kv.slice(0, eq)] = kv.slice(eq + 1)
+    else if (eq < 0) out[kv] = ''
+  }
+  return out
+}
+
+/** DNS 名不区分大小写，比较前统一小写 */
+function dnsEqual(a: string, b: string): boolean {
+  return a.toLowerCase() === b.toLowerCase()
+}
+
 /**
  * mDNS 发现。
  *
@@ -147,10 +156,10 @@ function parseTxt(txt: unknown, fallbackPort: number): TxtRecord | null {
 export class Discovery {
   private bonjour: Bonjour | null = null
   private ad: Service | null = null
-  private browser: Browser | null = null
   private readonly seen = new Map<string, DiscoveredService>()
   private readonly staleMs: number
   private sweepTimer: NodeJS.Timeout | null = null
+  private queryTimer: NodeJS.Timeout | null = null
   private started = false
 
   constructor(private readonly opts: DiscoveryOptions) {
@@ -187,30 +196,32 @@ export class Discovery {
     if (this.started) return
     this.started = true
 
-    // 必须显式指定组播网卡。
-    // multicast-dns 的 allInterfaces() 不排除回环地址（判据只有 isIPv4），
-    // 会把 127.0.0.1 也 addMembership；而 defaultInterface() 在 Windows 上
-    // 返回 0.0.0.0，setMulticastInterface('0.0.0.0') 让系统自选接口。
-    // 多网卡机器上选中的往往不是局域网那张，结果是：能收到别人突发式
-    // 的通告（组播包广播到所有接口），但主动查询发不到对端所在的网段，
-    // browser 永远发现不了服务。
-    // 传入 interface 后，库只对该地址 addMembership 并用它发组播。
-    // interface 在运行时有支持（mdns-server 把 opts 原样透传给 multicast-dns），
-    // 但 bonjour-service 的 TS 类型没声明它，这里显式断言并说明原因
+    // 不绑定具体组播网卡（new Bonjour() 默认全接口）。
     // 实测（真机走查 2026-10-29）：Windows 上把组播 socket 绑到具体地址
-    // （interface 选项）会导致**完全收不到组播入包**——绑 0.0.0.0 全接口
-    // 接收才正常。之前为修「查询发不到对端网段」传入 interface，矫枉过正；
-    // 出方向靠系统路由表自选，入方向靠对端周期性通告兜底，不需要绑定。
+    // （multicast-dns 的 interface 选项）会导致**完全收不到组播入包**——
+    // 绑 0.0.0.0 全接口接收才正常。之前为修「查询发不到对端网段」传入
+    // interface，矫枉过正；出方向靠系统路由表自选，入方向再叠加下方的
+    // 周期性补查兜底，不需要绑定。
     this.bonjour = new Bonjour()
     this.publishSelf()
 
-    // find 返回 Browser，直接用它的 up/down 事件。
-    // down 只在收到 goodbye 包时触发，设备直接断网时不会有，
-    // 所以仍保留 sweep() 软过期兜底（两者互补，不冲突）。
-    this.browser = this.bonjour.find({ type: SERVICE_TYPE })
-    this.browser.on('up', (service: Service) => this.handleService(service))
-    this.browser.on('txt-update', (service: Service) => this.handleService(service))
-    this.browser.on('down', (service: Service) => this.handleDown(service))
+    // 应答驱动发现：不用 Browser 事件，理由见文件头注释。
+    const raw = this.rawServer()
+    this.onResponse = (packet, rinfo) => this.handleResponse(packet, rinfo)
+    raw.on('response', this.onResponse)
+
+    // 周期性补发查询，这是发现功能的生命线：Android NSD 注册后只应答
+    // 查询、不做周期性通告，桌面端先启动就会错过所有通告。RFC 6762 §5.2
+    // 允许周期性重查；5s 间隔与 staleMs=12s 的软过期窗口匹配——错过
+    // 2 次查询才会被判离线，短暂丢包不至于闪断。
+    raw.query(SERVICE_FQDN, 'PTR')
+    this.queryTimer = setInterval(() => {
+      try {
+        this.rawServer().query(SERVICE_FQDN, 'PTR')
+      } catch {
+        /* 已停止时忽略 */
+      }
+    }, 5000)
 
     // 软过期扫描：直接断网的设备不会发 goodbye，只能靠超时判定
     this.sweepTimer = setInterval(() => this.sweep(), Math.max(1000, this.staleMs / 2))
@@ -221,10 +232,15 @@ export class Discovery {
     this.started = false
     if (this.sweepTimer) clearInterval(this.sweepTimer)
     this.sweepTimer = null
-    try {
-      this.browser?.stop()
-    } catch {
-      /* 已停止时忽略 */
+    if (this.queryTimer) clearInterval(this.queryTimer)
+    this.queryTimer = null
+    if (this.onResponse) {
+      try {
+        this.rawServer().removeListener('response', this.onResponse)
+      } catch {
+        /* 已销毁时忽略 */
+      }
+      this.onResponse = null
     }
     try {
       this.ad?.stop()
@@ -234,6 +250,13 @@ export class Discovery {
     this.bonjour?.destroy()
     this.bonjour = null
     this.seen.clear()
+  }
+
+  private onResponse: ((packet: RawPacket, rinfo: { address: string; port: number }) => void) | null = null
+
+  private rawServer(): RawMdnsServer {
+    // server 在 bonjour-service 类型里是 private，见 RawMdnsServer 上方说明
+    return (this.bonjour as unknown as { server: { mdns: RawMdnsServer } }).server.mdns
   }
 
   /**
@@ -280,22 +303,57 @@ export class Discovery {
     })
   }
 
-  private handleService(service: Service): void {
+  /** 一条应答包 = 若干实例的通告（PTR）+ 细节（SRV/TXT/A）+ 注销（ttl=0 的 PTR） */
+  private handleResponse(packet: RawPacket, rinfo: { address: string }): void {
+    const records = [...(packet.answers ?? []), ...(packet.additionals ?? [])]
+    // goodbye：ttl=0 的 PTR 表示服务注销（mDNS 规范）
+    for (const rr of records) {
+      if (rr.type === 'PTR' && rr.ttl === 0 && dnsEqual(rr.name, SERVICE_FQDN)) {
+        this.removeByInstance(String(rr.data).split('.')[0])
+      }
+    }
+    for (const rr of records) {
+      if (rr.type === 'PTR' && rr.ttl > 0 && dnsEqual(rr.name, SERVICE_FQDN)) {
+        this.announceInstance(String(rr.data), records, rinfo.address)
+      }
+    }
+  }
+
+  /**
+   * 从一次 PTR 通告重建服务条目。Android NSD 会把 SRV/TXT/A 作为
+   * additional 记录附在同一包里；缺失 SRV 时无法使用（没有端口）。
+   */
+  private announceInstance(fqdn: string, records: RawRecord[], sourceIp: string): void {
+    const instance = fqdn.split('.')[0]
+    if (!instance) return
+    const srv = records.find((rr) => rr.type === 'SRV' && dnsEqual(rr.name, fqdn))
+    if (!srv) return
+    const srvData = srv.data as { port?: unknown; target?: unknown }
+    if (!srvData || typeof srvData.port !== 'number') return
+    const target = typeof srvData.target === 'string' ? srvData.target : ''
+    const txtRec = records.find((rr) => rr.type === 'TXT' && dnsEqual(rr.name, fqdn))
+    const parsed = parseTxt(
+      Array.isArray(txtRec?.data) ? decodeTxtRecords(txtRec.data) : {},
+      srvData.port
+    )
+    if (!parsed) return
+
     // 自己的通告要跳过：同一台机器上 mDNS 会收到自己的广播。
     // 判据用「ID 前缀 + 端口」同时匹配——端口由系统分配，本机唯一。
-    const parsed = parseTxt(service.txt, service.port)
-    if (!parsed) return
     if (parsed.id === this.ownIdPrefix && Number(parsed.port) === this.opts.port) return
 
-    const address = service.addresses?.find((a) => a.includes('.')) ?? service.host
+    // 地址优先取对端自报的 A 记录；拿不到就退回包来源 IP——包能到，
+    // 这个 IP 就一定可达（比 SRV target 的 .local 主机名可靠）。
+    const aRec = records.find((rr) => rr.type === 'A' && target && dnsEqual(rr.name, target))
+    const address = typeof aRec?.data === 'string' ? aRec.data : sourceIp
     if (!address) return
 
-    const key = `${service.name}@${parsed.id}`
+    const key = `${instance}@${parsed.id}`
     const svc: DiscoveredService = {
-      serviceName: service.name,
+      serviceName: instance,
       idPrefix: parsed.id,
       // 服务名是 `LinkSpace-<displayName>`，取回显示名部分
-      displayName: service.name.replace(/^LinkSpace-/, ''),
+      displayName: instance.replace(/^LinkSpace-/, ''),
       deviceType: parsed.type,
       caps: parsed.caps ? parsed.caps.split(',').filter(Boolean) : [],
       host: address,
@@ -310,15 +368,12 @@ export class Discovery {
     else this.emit('up', svc)
   }
 
-  private handleDown(service: Service): void {
-    const parsed = parseTxt(service.txt, service.port)
-    if (!parsed) return
-    if (parsed.id === this.ownIdPrefix && Number(parsed.port) === this.opts.port) return
-    const key = `${service.name}@${parsed.id}`
-    const svc = this.seen.get(key)
-    if (svc) {
-      this.seen.delete(key)
-      this.emit('down', svc)
+  private removeByInstance(instance: string): void {
+    for (const [key, svc] of this.seen) {
+      if (svc.serviceName === instance) {
+        this.seen.delete(key)
+        this.emit('down', svc)
+      }
     }
   }
 

@@ -344,13 +344,40 @@ class LinkSpaceService private constructor(private val appContext: Context) {
      * 配对码只显示在本机屏幕上，由对方用户人工抄录后经 pair.submit 送回。
      */
     private fun handlePairRequest(peerId: String, displayName: String, deviceType: String, fingerprint: String) {
-        // 已信任的设备直接放行，不再要求配对码
+        // 已信任的设备直接放行，不再要求配对码。
+        // 必须回 pair.approve：桌面端对已信任对端也是直接 approve
+        // （pairing.ts「若已信任，直接放行」），两端语义必须对称——
+        // 曾在这里静默 return，发起方永远等不到响应，连接挂到断开，
+        // UI 表现为「点了配对没反应」（真机踩过）。
         if (trust.isKnown(peerId)) {
-            if (trust.fingerprintOf(peerId) != fingerprint) {
+            val known = trust.fingerprintOf(peerId)
+            if (known != null && known != fingerprint) {
                 Log.w(TAG, "对端 $peerId 指纹与信任清单不符，可能被替换")
+                server?.sendControl(pairError(peerId, "设备指纹与已存记录不符，请撤销后重新配对"))
                 return
             }
-            Log.i(TAG, "对端 $peerId 已在信任清单中")
+            Log.i(TAG, "对端 $peerId 已在信任清单中，直接确认")
+            val entry = trust.list().firstOrNull { it.deviceId == peerId }
+            server?.sendControl(
+                JSONObject().apply {
+                    put("v", Protocol.VERSION)
+                    put("type", Protocol.TYPE_PAIR_APPROVE)
+                    put("id", java.util.UUID.randomUUID().toString())
+                    put("from", deviceIdPrefix)
+                    put("to", peerId)
+                    put("ts", System.currentTimeMillis())
+                    put(
+                        "payload", JSONObject().apply {
+                            put("deviceId", deviceIdPrefix)
+                            put("displayName", displayName)
+                            put("deviceType", deviceType)
+                            put("fingerprint", fingerprint)
+                            // 沿用已存条目的授权范围，不重新扩权
+                            put("scope", org.json.JSONArray(entry?.scope ?: Protocol.DEFAULT_GRANT_SCOPE))
+                        }
+                    )
+                }
+            )
             return
         }
         if (pendingMap.values.any { it.peerId == peerId }) return

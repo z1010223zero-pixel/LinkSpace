@@ -52,6 +52,17 @@ class TransferServer(
     private var serverSocket: ServerSocket? = null
     private var thread: Thread? = null
 
+    /**
+     * 控制连接保活心跳。桌面端 15s 收不到对端任何消息就判离线并断连
+     * （control/node.ts startHeartbeat），桌面之间靠双方互发心跳维持。
+     * 本端作为服务端若一声不吭，桌面发起的连接会在配对等待 ~15s 后被
+     * 掐断——用户还没来得及点「接受」，connectAndPair 就报「连接已断开」
+     * （真机踩过）。安卓自己发起的连接此前靠发送方的临时心跳续命，
+     * 服务端方向一直没有，这里补齐两端对称。
+     */
+    @Volatile
+    private var heartbeat: Thread? = null
+
     @Volatile
     var port: Int = 0
         private set
@@ -74,14 +85,40 @@ class TransferServer(
             isDaemon = true
             start()
         }
+        heartbeat = Thread({ heartbeatLoop() }, "linkspace-heartbeat").apply {
+            isDaemon = true
+            start()
+        }
         Log.i(TAG, "文件传输服务已监听 0.0.0.0:$port")
         return port
     }
 
     fun stop() {
+        heartbeat?.interrupt()
+        heartbeat = null
         runCatching { serverSocket?.close() }
         serverSocket = null
         thread = null
+    }
+
+    /** 周期向所有控制连接发心跳。to 留空：保活包是广播性质，桌面端允许空 to */
+    private fun heartbeatLoop() {
+        val selfPrefix = identity.get().fingerprint.replace(":", "").take(12)
+        while (true) {
+            runCatching { Thread.sleep(4_000) }.getOrNull() ?: return
+            val text = JSONObject().apply {
+                put("v", Protocol.VERSION)
+                put("type", Protocol.TYPE_HEARTBEAT)
+                put("id", java.util.UUID.randomUUID().toString())
+                put("from", selfPrefix)
+                put("to", "")
+                put("ts", System.currentTimeMillis())
+                put("payload", JSONObject())
+            }.toString()
+            synchronized(controlConns) {
+                controlConns.toList().forEach { runCatching { it.send(text) } }
+            }
+        }
     }
 
     /** 接收方：登记一个待接收任务（桌面端 offer 到达时调用） */
