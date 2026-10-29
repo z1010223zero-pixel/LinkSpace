@@ -73,7 +73,7 @@ git worktree add ..\LinkSpace-android -b feat/android-b master
 | 日期 | 发现方 | 问题 | 移交给 | 状态 |
 |---|---|---|---|---|
 | （示例）2026-10-29 | B | 桌面心跳 15s 超时偏短 | A | 已修（14dfb12） |
-| 2026-10-29 | B | 安卓→电脑远控的全流程真机走查需要桌面在线配合（确认弹窗 + 输入注入），B 侧已就绪（触控板 UI + InputController，真机安装启动通过） | A | 进展（10-30）：B 已用无头 Host（`.zwork/b/input-walkthrough.ts`，输入只记录不注入）验证到「TLS 握手 → announce 指纹闸门 → pair.request 送达」全绿，顺带修掉 Android 服务端拒收客户端证书的握手 bug（f547ba3）。剩余步骤（读屏配对码 → 点「控制电脑」→ 手势事件核对）被**平板安全锁屏**挡住（secure=true，ADB 无法代解锁），模拟器 shell 亦卡死。续作：解锁平板 → `cd .zwork/b && rm -f pair-code.txt && NODE_PATH=…\apps\desktop\node_modules TABLET_HOST=<平板IP> TABLET_PORT=<端口> node walkthrough.cjs`（后台）→ 截屏读码写入 pair-code.txt → 按 UI 点「控制电脑」→ 手势后查 events.log |
+| 2026-10-29 | B | 安卓→电脑远控的全流程真机走查需要桌面在线配合（确认弹窗 + 输入注入），B 侧已就绪（触控板 UI + InputController，真机安装启动通过） | A | **已完成（10-30）**：无头 Host（`.zwork/b/input-walkthrough.ts`，输入只记录不注入）+ 仅 debug 构建的广播驱动器（ZUI 屏蔽 adb 触摸注入，`am broadcast` 不受限）。验证结论：配对（读屏码 → 提交）→ 会话建立 → move 坐标映射（3200×2000→1920×1080 逐点核对）→ click / wheel / key → stop+releaseAll，**全链路通过**。过程中修掉 Android 服务端拒收客户端证书的握手 bug（f547ba3）与 .gitignore `Debug/` 误伤 `src/debug/` 的入库缺失。唯一未覆盖「真实手指→MotionEvent」（B 计划 T7，人工补手感核对） |
 | 2026-10-29 | B | 文档一致性（审查报告 §4）：根 README 与 apps/desktop/README 的状态段过期，属 A 领地，B 不代改 | A | 待办 |
 | 2026-10-29 | B | 分工文档 §2 原写「GRADLE_USER_HOME=D:\dev\gradle 没问题」与 apps/android/README 实测相反（该路径不可写，报 journal-1.lock 拒绝访问）；且 ANDROID_SDK_ROOT 与 ANDROID_HOME 不一致会让 Gradle 拒绝构建。正确姿势已补进 android README | 双方知晓 | 已更正 |
 

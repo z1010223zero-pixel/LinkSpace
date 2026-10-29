@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 仅 debug 构建追加的清单：走查驱动接收器。release 源集不含本文件 -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application>
+        <receiver
+            android:name=".DebugControlReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="cn.linkspace.client.DEBUG_REQUEST_INPUT" />
+                <action android:name="cn.linkspace.client.DEBUG_SEND_EVENTS" />
+                <action android:name="cn.linkspace.client.DEBUG_STOP_INPUT" />
+            </intent-filter>
+        </receiver>
+    </application>
+
+</manifest>
