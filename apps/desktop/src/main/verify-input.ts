@@ -19,10 +19,12 @@ import { Host } from './host'
 import { fingerprintOfCert, type DeviceCert } from './transfer/identity'
 import type { DiscoveredService } from './discovery'
 import type { PendingPairing } from './pairing'
-import { decodeInputEvents, decodeScreenSize, mapPoint, type InputEvent } from './input/protocol'
+import { decodeInputEvents, decodeScreenSize, mapPoint, type InputEvent, type MouseButton } from './input/protocol'
 import { InputSessionCoordinator, InputController } from './input/session'
 import { EdgeSwitcher, type EdgeLayout } from './input/edge'
 import { InputLayoutStore } from './input/layout'
+import { normalizeAbsolute, buildInputBatch, buildReleaseBatch, INPUT_SIZE, UNION_OFF } from './input/win32/sink'
+import { Win32InputCapture } from './input/win32/capture'
 
 let failures = 0
 
@@ -409,6 +411,157 @@ async function testLayoutStore(workDir: string): Promise<void> {
   check('损坏文件降级为空且不崩溃', Object.keys(store3.all()).length === 0)
 }
 
+// ---------- 纯逻辑：Win32 注入与采集 ----------
+
+function makeFakeNative() {
+  let pos: { x: number; y: number } | null = { x: 0, y: 0 }
+  const down = new Set<number>()
+  return {
+    setPos(p: { x: number; y: number } | null): void {
+      pos = p
+    },
+    press(vk: number): void {
+      down.add(vk)
+    },
+    release(vk: number): void {
+      down.delete(vk)
+    },
+    native: {
+      getCursorPos: () => (pos ? { ...pos } : null),
+      isKeyDown: (vk: number) => down.has(vk)
+    }
+  }
+}
+
+function testWin32(): void {
+  console.log('\n=== 纯逻辑：Win32 注入与采集 ===\n')
+
+  // 绝对坐标归一化
+  const vs = { x: 0, y: 0, w: 1920, h: 1080 }
+  check('绝对坐标原点归零', normalizeAbsolute(0, 0, vs).nx === 0 && normalizeAbsolute(0, 0, vs).ny === 0)
+  const br = normalizeAbsolute(1919, 1079, vs)
+  check('右下角归一化到 65535', br.nx === 65535 && br.ny === 65535, JSON.stringify(br))
+  check('负坐标钳到 0', normalizeAbsolute(-500, -1, vs).nx === 0 && normalizeAbsolute(-500, -1, vs).ny === 0)
+  check('越界钳到 65535', normalizeAbsolute(99999, 99999, vs).nx === 65535)
+  const vs2 = { x: -1920, y: 0, w: 3840, h: 1080 }
+  const off = normalizeAbsolute(-1920, 0, vs2)
+  check('带偏移虚拟屏归一化', off.nx === 0 && normalizeAbsolute(1919, 0, vs2).nx === 65535)
+
+  // INPUT 打包
+  {
+    const keys = new Set<number>()
+    const buttons = new Set<MouseButton>()
+    const buf = buildInputBatch([{ t: 'move', x: 960, y: 540 }], vs, keys, buttons)
+    check('move 打包为 ABSOLUTE|VIRTUALDESK|MOVE', buf !== null && buf.readUInt32LE(UNION_OFF + 12) === 0xc001)
+    // 期望值按归一化公式独立重算（公式边界行为已由上面四项钉死）
+    const expectNx = Math.round((960 * 65535) / 1919)
+    const expectNy = Math.round((540 * 65535) / 1079)
+    check(
+      'move 写入归一化坐标',
+      buf !== null && buf.readInt32LE(UNION_OFF) === expectNx && buf.readInt32LE(UNION_OFF + 4) === expectNy,
+      buf ? `${buf.readInt32LE(UNION_OFF)},${buf.readInt32LE(UNION_OFF + 4)} vs ${expectNx},${expectNy}` : ''
+    )
+
+    const b2 = buildInputBatch([{ t: 'key', vk: 0x25, down: true }], vs, keys, buttons)
+    check('方向键带扩展位', b2 !== null && b2.readUInt32LE(UNION_OFF + 4) === 0x0001 && b2.readUInt16LE(UNION_OFF) === 0x25)
+    const b3 = buildInputBatch([{ t: 'key', vk: 0x41, down: false }], vs, keys, buttons)
+    check('普通键抬起仅 KEYUP 位', b3 !== null && b3.readUInt32LE(UNION_OFF + 4) === 0x0002)
+
+    const b4 = buildInputBatch([{ t: 'wheel', dx: 0, dy: -2 }], vs, keys, buttons)
+    check('滚轮换算 WHEEL_DELTA', b4 !== null && b4.readUInt32LE(UNION_OFF + 12) === 0x0800 && b4.readInt32LE(UNION_OFF + 8) === -240)
+    const b5 = buildInputBatch([{ t: 'wheel', dx: 3, dy: -2 }], vs, keys, buttons)
+    check('双轴滚轮拆两条 INPUT', b5 !== null && b5.length === INPUT_SIZE * 2)
+    check('非法屏幕拒绝打包', buildInputBatch([{ t: 'move', x: 1, y: 1 }], { x: 0, y: 0, w: 0, h: 0 }, keys, buttons) === null)
+
+    // 按下状态记录与 releaseAll
+    const k2 = new Set<number>()
+    const bt2 = new Set<MouseButton>()
+    buildInputBatch([{ t: 'down', b: 'left' }, { t: 'key', vk: 65, down: true }], vs, k2, bt2)
+    check('按下状态被记录', k2.has(65) && bt2.has('left'))
+    const rel = buildReleaseBatch(k2, bt2)
+    check('releaseAll 抬起全部并清空', rel !== null && rel.length === INPUT_SIZE * 2 && k2.size === 0 && bt2.size === 0)
+    check(
+      'releaseAll 内容正确（先键后钮）',
+      rel !== null &&
+        rel.readUInt16LE(UNION_OFF) === 65 &&
+        rel.readUInt32LE(UNION_OFF + 4) === 2 &&
+        rel.readUInt32LE(INPUT_SIZE + UNION_OFF + 12) === 0x0004
+    )
+    check('无按住状态 releaseAll 为空', buildReleaseBatch(new Set(), new Set()) === null)
+  }
+
+  // 采集状态机
+  {
+    const f = makeFakeNative()
+    const edge: Array<{ x: number; y: number }> = []
+    const evts: InputEvent[][] = []
+    const cap = new Win32InputCapture({
+      native: f.native,
+      screen: { w: 1920, h: 1080 },
+      onEvents: (e) => evts.push(e),
+      onEdgeMove: (x, y) => edge.push({ x, y })
+    })
+
+    // idle：只喂边缘
+    cap.tick()
+    f.setPos({ x: 500, y: 300 })
+    cap.tick()
+    check('idle 位移喂边缘检测', edge.length === 1 && edge[0].x === 500 && edge[0].y === 300)
+    f.setPos({ x: -5, y: 1200 })
+    cap.tick()
+    check('多屏负坐标钳入主屏', edge[1].x === 0 && edge[1].y === 1079, JSON.stringify(edge[1]))
+    check('idle 不产输入事件', evts.length === 0)
+    f.setPos(null)
+    cap.tick()
+    f.setPos({ x: 10, y: 10 })
+    cap.tick()
+    check('读取失败重建基线不触发边缘', edge.length === 2)
+
+    // control：采集
+    cap.setMode('control')
+    cap.tick()
+    const base = evts.length
+    check('进入控制态首 tick 无事件', evts.length === base)
+    f.press(65)
+    cap.tick()
+    check(
+      '按键按下被采集',
+      evts.length === base + 1 && evts[base][0].t === 'key' && (evts[base][0] as { down: boolean }).down === true
+    )
+    cap.tick()
+    check('按住不重复上报', evts.length === base + 1)
+    f.release(65)
+    cap.tick()
+    check(
+      '按键抬起被采集',
+      evts.length === base + 2 && (evts[base + 1][0] as { down: boolean }).down === false
+    )
+    f.press(0x01)
+    f.setPos({ x: 1000, y: 500 })
+    cap.tick()
+    check(
+      '移动与鼠标键同帧采集',
+      evts.length === base + 3 && evts[base + 2].length === 2 && evts[base + 2][0].t === 'move' && evts[base + 2][1].t === 'down'
+    )
+    f.release(0x01)
+    cap.tick()
+
+    // 模式切换清基线：切走再切回，首 tick 不得重放旧位置/旧按键
+    const before = evts.length
+    cap.setMode('idle')
+    cap.setMode('control')
+    cap.tick()
+    check('模式切换后重建基线', evts.length === before)
+
+    // 单 tick 大量按键 → 按协议上限分批
+    for (let vk = 0x08; vk < 0x08 + 70; vk++) f.press(vk)
+    cap.tick()
+    const c1 = evts[evts.length - 2]
+    const c2 = evts[evts.length - 1]
+    check('超长采集按 64 条分批', c1.length === 64 && c2.length === 6, `${c1.length}+${c2.length}`)
+  }
+}
+
 // ---------- 双 Host 环路 ----------
 
 async function testE2e(): Promise<void> {
@@ -617,6 +770,7 @@ async function main(): Promise<void> {
   testCoordinator()
   await testController()
   testEdge()
+  testWin32()
 
   const workDir = await mkdtemp(join(tmpdir(), 'linkspace-input-unit-'))
   try {
