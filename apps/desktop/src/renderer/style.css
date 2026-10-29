@@ -490,3 +490,13 @@ button {
   color: var(--text-primary);
   font-size: 12px;
 }
+
+/* 画质选择挂在「设备」标题行右侧，正常字重避免抢标题视觉 */
+.quality-pick {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 400;
+}
