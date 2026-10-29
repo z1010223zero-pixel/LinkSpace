@@ -192,9 +192,9 @@ class LinkSpaceService private constructor(private val appContext: Context) {
 
             Protocol.TYPE_PAIR_REQUEST -> handlePairRequest(
                 peerId = from,
-                displayName = payload.optString("displayName"),
-                deviceType = payload.optString("deviceType"),
-                fingerprint = payload.optString("fingerprint")
+                peerDisplayName = payload.optString("displayName"),
+                peerDeviceType = payload.optString("deviceType"),
+                peerFingerprint = payload.optString("fingerprint")
             )
 
             Protocol.TYPE_PAIR_SUBMIT -> {
@@ -343,7 +343,12 @@ class LinkSpaceService private constructor(private val appContext: Context) {
      * 收到 pair.request：生成配对码并等待用户确认。
      * 配对码只显示在本机屏幕上，由对方用户人工抄录后经 pair.submit 送回。
      */
-    private fun handlePairRequest(peerId: String, displayName: String, deviceType: String, fingerprint: String) {
+    // 参数带 peer 前缀：pair.request 载荷里的身份是**对端（桌面）自报**的。
+    // 曾用无前缀参数名与 companion 属性同名，快速通道 approve 里
+    // `put("displayName", displayName)` 被遮蔽解析到参数——平板在「我是谁」
+    // 的回执里发成了桌面的名字/类型/指纹，桌面入库后信任清单出现
+    // 「平板证书 + 桌面名字」的缝合条目（真机踩过）。
+    private fun handlePairRequest(peerId: String, peerDisplayName: String, peerDeviceType: String, peerFingerprint: String) {
         // 已信任的设备直接放行，不再要求配对码。
         // 必须回 pair.approve：桌面端对已信任对端也是直接 approve
         // （pairing.ts「若已信任，直接放行」），两端语义必须对称——
@@ -351,7 +356,7 @@ class LinkSpaceService private constructor(private val appContext: Context) {
         // UI 表现为「点了配对没反应」（真机踩过）。
         if (trust.isKnown(peerId)) {
             val known = trust.fingerprintOf(peerId)
-            if (known != null && known != fingerprint) {
+            if (known != null && known != peerFingerprint) {
                 Log.w(TAG, "对端 $peerId 指纹与信任清单不符，可能被替换")
                 server?.sendControl(pairError(peerId, "设备指纹与已存记录不符，请撤销后重新配对"))
                 return
@@ -386,9 +391,9 @@ class LinkSpaceService private constructor(private val appContext: Context) {
         val pending = PendingPairing(
             id = java.util.UUID.randomUUID().toString(),
             peerId = peerId,
-            displayName = displayName,
-            deviceType = deviceType,
-            fingerprint = fingerprint,
+            displayName = peerDisplayName,
+            deviceType = peerDeviceType,
+            fingerprint = peerFingerprint,
             code = code,
             expiresAt = System.currentTimeMillis() + 60_000
         )
