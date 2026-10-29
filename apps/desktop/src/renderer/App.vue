@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type {
+  DeviceEdge,
   DeviceView,
   DiscoveredDevice,
   EnvInfo,
+  InputStateView,
   SessionView,
   TransferInfo,
   TransferTaskView,
@@ -40,6 +42,68 @@ async function toggleClipboard(): Promise<void> {
     return
   }
   clipboardOn.value = res.value
+}
+
+// ---------- 键鼠共享（阶段 3，第 7 组） ----------
+const inputState = ref<InputStateView | null>(null)
+
+/** 方位下拉的展示顺序与文案。'' 表示不参与共享 */
+const EDGE_OPTIONS: Array<{ value: DeviceEdge | ''; label: string }> = [
+  { value: '', label: '不参与' },
+  { value: 'left', label: '在左侧' },
+  { value: 'right', label: '在右侧' },
+  { value: 'top', label: '在上方' },
+  { value: 'bottom', label: '在下方' }
+]
+
+function edgeOf(deviceId: string): DeviceEdge | '' {
+  return inputState.value?.layout[deviceId] ?? ''
+}
+
+async function setEdge(deviceId: string, edge: DeviceEdge | ''): Promise<void> {
+  const res = await window.linkspace.setDeviceEdge(deviceId, edge === '' ? null : edge)
+  if (!res.ok) notice.value = res.error.message
+  await loadInputState()
+}
+
+/** 手动发起键鼠控制（7.2）。边缘穿越触发的也是同一条链路 */
+async function requestControl(deviceId: string): Promise<void> {
+  notice.value = ''
+  const res = await window.linkspace.requestInputControl(deviceId)
+  if (!res.ok) notice.value = res.error.message
+}
+
+async function approveControl(sessionId: string): Promise<void> {
+  const res = await window.linkspace.approveInputControl(sessionId)
+  if (!res.ok) notice.value = res.error.message
+  await loadInputState()
+}
+
+async function denyControl(sessionId: string): Promise<void> {
+  await window.linkspace.denyInputControl(sessionId)
+  await loadInputState()
+}
+
+/** 被控端随时拔掉控制（9.1 的安全兜底） */
+async function terminateControl(): Promise<void> {
+  await window.linkspace.terminateInputControl()
+  await loadInputState()
+}
+
+/** 控制端退出（7.4 也可用 Ctrl+Alt+Space） */
+async function exitControl(): Promise<void> {
+  await window.linkspace.exitInputControl()
+  await loadInputState()
+}
+
+async function loadInputState(): Promise<void> {
+  inputState.value = await window.linkspace.inputState().catch(() => null)
+}
+
+/** 方位下拉 change 事件：模板里写不了 TS 断言，在此收口取值 */
+function onEdgeChange(deviceId: string, ev: Event): void {
+  const value = (ev.target as HTMLSelectElement).value as DeviceEdge | ''
+  void setEdge(deviceId, value)
 }
 
 watch(editingName, async (v) => {
@@ -94,6 +158,7 @@ let unsubDiscovered: (() => void) | null = null
 let unsubPairings: (() => void) | null = null
 let unsubTrust: (() => void) | null = null
 let unsubSelfName: (() => void) | null = null
+let unsubInput: (() => void) | null = null
 let pollTimer: number | null = null
 let speedTimer: number | null = null
 
@@ -358,6 +423,7 @@ onMounted(async () => {
   await loadPairings()
   await loadTrusted()
   await loadLayout()
+  await loadInputState()
 
   unsubDevices = window.linkspace.onDevicesChanged(() => {
     void loadDevices()
@@ -382,6 +448,10 @@ onMounted(async () => {
   unsubSelfName = window.linkspace.onSelfNameChanged(async () => {
     selfName.value = await window.linkspace.selfDisplayName().catch(() => selfName.value)
   })
+  // 键鼠状态（请求到达/授权/退出/断线）全部经主进程广播回来，这里只管重拉快照
+  unsubInput = window.linkspace.onInputChanged(() => {
+    void loadInputState()
+  })
 
   // 事件之外的兜底轮询：设备插拔时 adb 不会主动通知
   pollTimer = window.setInterval(() => {
@@ -404,6 +474,7 @@ onBeforeUnmount(() => {
   unsubPairings?.()
   unsubTrust?.()
   unsubSelfName?.()
+  unsubInput?.()
   if (pollTimer !== null) window.clearInterval(pollTimer)
   if (speedTimer !== null) window.clearInterval(speedTimer)
 })
@@ -469,6 +540,50 @@ onBeforeUnmount(() => {
       </div>
 
       <div v-if="notice" class="banner banner--warn">{{ notice }}</div>
+
+      <!-- 键鼠共享（第 7 组）：被控端确认条。9.1 要求每次控制请求都有明确提示 -->
+      <div v-if="inputState?.pending" class="banner banner--warn">
+        <div>
+          <strong>{{ inputState.pending.displayName }}</strong> 请求控制本机的鼠标和键盘。
+          <div class="pairing-hint" style="margin-top: 6px">
+            同意后对方可操作本机键鼠，随时可点「拔掉」终止；授权仅本次会话有效，配对本身不授予该权限。
+          </div>
+        </div>
+        <span class="topbar__spacer" />
+        <button
+          class="btn btn--sm btn--primary"
+          @click="approveControl(inputState.pending.sessionId)"
+        >
+          同意
+        </button>
+        <button class="btn btn--sm btn--danger" @click="denyControl(inputState.pending.sessionId)">
+          拒绝
+        </button>
+      </div>
+
+      <!-- 被控中状态条：用户随时可以拔掉（安全兜底） -->
+      <div v-if="inputState?.controlledBy" class="banner banner--warn">
+        <div>
+          <strong>{{ inputState.controlledBy }}</strong> 正在控制本机的键鼠。
+          <div class="pairing-hint" style="margin-top: 6px">
+            会话结束、对端断开或撤销信任后，控制自动失效。
+          </div>
+        </div>
+        <span class="topbar__spacer" />
+        <button class="btn btn--sm btn--danger" @click="terminateControl">拔掉</button>
+      </div>
+
+      <!-- 控制中状态条：Ctrl+Alt+Space 是主进程注册的全局快捷键（7.4） -->
+      <div v-if="inputState?.controlling" class="banner banner--ok">
+        <div>
+          正在用本机键鼠控制 <strong>{{ inputState.controlling }}</strong>。
+          <div class="pairing-hint" style="margin-top: 6px">
+            按 Ctrl+Alt+Space 或点击右侧按钮退出控制。
+          </div>
+        </div>
+        <span class="topbar__spacer" />
+        <button class="btn btn--sm" @click="exitControl">退出控制</button>
+      </div>
 
       <section v-if="pairings.length" class="sessions">
         <h2 class="section-title">待确认的配对请求</h2>
@@ -589,6 +704,31 @@ onBeforeUnmount(() => {
             <span class="device-card__serial">授权范围：{{ t.scope.join(',') }}</span>
           </span>
           <span class="session-row__spacer" />
+          <!-- 键鼠共享仅 Windows↔Windows（阶段 3 范围），其他设备类型不显示入口 -->
+          <template v-if="t.deviceType === 'win'">
+            <select
+              class="edge-select"
+              :value="edgeOf(t.deviceId)"
+              title="设置对方屏幕相对本机的方位；鼠标移到对应屏幕边缘即可发起跨屏控制"
+              @change="onEdgeChange(t.deviceId, $event)"
+            >
+              <option v-for="o in EDGE_OPTIONS" :key="o.value" :value="o.value">
+                {{ o.label }}
+              </option>
+            </select>
+            <button
+              class="btn btn--sm"
+              :disabled="!inputState?.nativeReady"
+              :title="
+                inputState?.nativeReady
+                  ? '请求控制对方键鼠（对方确认后生效）'
+                  : '本机注入层不可用，无法发起键鼠控制'
+              "
+              @click="requestControl(t.deviceId)"
+            >
+              键鼠控制
+            </button>
+          </template>
           <button class="btn btn--sm" @click="sendFile(t.deviceId)">发送文件</button>
           <button class="btn btn--sm btn--danger" @click="revokeTrust(t.deviceId)">撤销信任</button>
         </div>

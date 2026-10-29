@@ -34,14 +34,15 @@ export type EdgeLayout = Partial<Record<EdgeSide, string>>
 
 export interface EdgeSwitcherOptions {
   onSwitch: (edge: EdgeSide, deviceId: string) => void
-  screen: ScreenSize
+  /** 主屏尺寸。可缺省：Electron 主进程要等 app ready 才能查屏幕，之前 feed 空转 */
+  screen?: ScreenSize
   cooldownMs?: number
   now?: () => number
 }
 
 export class EdgeSwitcher {
   private layout: EdgeLayout = {}
-  private screen: ScreenSize
+  private screen: ScreenSize | null
   private armed = true
   private locked = false
   private lastTriggerAt = 0
@@ -51,7 +52,7 @@ export class EdgeSwitcher {
 
   constructor(opts: EdgeSwitcherOptions) {
     this.onSwitch = opts.onSwitch
-    this.screen = opts.screen
+    this.screen = opts.screen ?? null
     this.cooldownMs = opts.cooldownMs ?? DEFAULT_COOLDOWN_MS
     this.now = opts.now ?? Date.now
   }
@@ -85,7 +86,10 @@ export class EdgeSwitcher {
    * 锁定/未武装状态下只判断是否解除，绝不触发。
    */
   feed(x: number, y: number): void {
-    const { w, h } = this.screen
+    const screen = this.screen
+    // 屏幕尺寸未知（app ready 前）无法判断压边，直接忽略本次采样
+    if (!screen) return
+    const { w, h } = screen
     const nearLeft = x <= EDGE_BAND_PX
     const nearRight = x >= w - 1 - EDGE_BAND_PX
     const nearTop = y <= EDGE_BAND_PX
@@ -110,6 +114,7 @@ export class EdgeSwitcher {
   }
 
   private farFromAllEdges(x: number, y: number): boolean {
+    if (!this.screen) return false
     const { w, h } = this.screen
     return (
       x > LEAVE_BAND_PX &&

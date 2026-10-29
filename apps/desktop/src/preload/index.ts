@@ -5,10 +5,12 @@
 
 import { contextBridge, ipcRenderer } from 'electron'
 import type {
+  DeviceEdge,
   DeviceView,
   DiscoveredDevice,
   EnvInfo,
   IpcResult,
+  InputStateView,
   LinkSpaceApi,
   PendingPairingView,
   SessionView,
@@ -90,13 +92,33 @@ const api: LinkSpaceApi = {
   setClipboardEnabled: (enabled: boolean) =>
     ipcRenderer.invoke('clipboard:setEnabled', enabled) as Promise<IpcResult<boolean>>,
 
+  inputState: () => ipcRenderer.invoke('input:state') as Promise<InputStateView>,
+
+  requestInputControl: (peerId: string) =>
+    ipcRenderer.invoke('input:request', peerId) as Promise<IpcResult<void>>,
+
+  approveInputControl: (sessionId: string) =>
+    ipcRenderer.invoke('input:approve', sessionId) as Promise<IpcResult<void>>,
+
+  denyInputControl: (sessionId: string) =>
+    ipcRenderer.invoke('input:deny', sessionId) as Promise<IpcResult<void>>,
+
+  terminateInputControl: () =>
+    ipcRenderer.invoke('input:terminate') as Promise<IpcResult<void>>,
+
+  exitInputControl: () => ipcRenderer.invoke('input:exit') as Promise<IpcResult<void>>,
+
+  setDeviceEdge: (deviceId: string, edge: DeviceEdge | null) =>
+    ipcRenderer.invoke('input:setEdge', deviceId, edge) as Promise<IpcResult<void>>,
+
   onDevicesChanged: (cb) => subscribe('devices:changed', cb),
   onSessionsChanged: (cb) => subscribe('sessions:changed', cb),
   onTransfersChanged: (cb) => subscribe('transfers:changed', cb),
   onDiscoveredChanged: (cb) => subscribe('discovered:changed', cb),
   onPairingsChanged: (cb) => subscribe('pairings:changed', cb),
   onTrustChanged: (cb) => subscribe('trust:changed', cb),
-  onSelfNameChanged: (cb) => subscribe('selfName:changed', cb)
+  onSelfNameChanged: (cb) => subscribe('selfName:changed', cb),
+  onInputChanged: (cb) => subscribe('input:changed', cb)
 }
 
 contextBridge.exposeInMainWorld('linkspace', api)

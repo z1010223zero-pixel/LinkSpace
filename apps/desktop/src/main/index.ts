@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, Menu, shell } from 'electron'
+import { app, BrowserWindow, clipboard, globalShortcut, Menu, screen, shell } from 'electron'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { DeviceManager } from './device-manager'
@@ -7,6 +7,10 @@ import { registerIpc } from './ipc'
 import { locateBinaries } from './platform'
 import { log } from './log'
 import { Host } from './host'
+import { EdgeSwitcher } from './input/edge'
+import { loadWin32 } from './input/win32/native'
+import { SendInputSink } from './input/win32/sink'
+import { Win32InputCapture } from './input/win32/capture'
 import type { DiscoveredService } from './discovery'
 import type { PendingPairing } from './pairing'
 import type { TransferTask } from './transfer/manager'
@@ -32,9 +36,40 @@ app.commandLine.appendSwitch('in-process-gpu')
 app.commandLine.appendSwitch('disable-gpu-shader-disk-cache')
 app.disableHardwareAcceleration()
 
+// ---------- Win32 键鼠层（阶段 3） ----------
+//
+// 加载失败（非 Windows/缺少 koffi/DLL 异常）一律降级：注入回调缺省，
+// UI 侧用 nativeReady=false 提示，主进程启动不受影响。
+const win32 = loadWin32()
+const inputSink = win32 ? new SendInputSink(win32, (m) => log.warn(m)) : null
+if (!win32) log.warn('Win32 输入层不可用，键鼠共享功能将不可用')
+
 const adapter = new ScrcpyAdapter()
 const devices = new DeviceManager(adapter)
-const host = new Host({ displayName: 'LinkSpace Desktop', deviceType: 'win' })
+const host = new Host({
+  displayName: 'LinkSpace Desktop',
+  deviceType: 'win',
+  // input 能力位让对端在发现列表里知道本机支持键鼠共享；
+  // scrcpy 投屏走 adb 不走局域网控制通道，但保持声明一致
+  caps: ['file', 'clipboard', 'scrcpy', 'input'],
+  inputInject: inputSink ? (events) => inputSink.inject(events) : undefined,
+  inputReleaseAll: inputSink ? () => inputSink.releaseAll() : undefined
+})
+
+// 边缘穿越（7.1）：光标贴到已分配设备的边缘即自动发起控制请求。
+// 采集层只在非控制态喂坐标，控制中不会再次触发。
+const edgeSwitcher = new EdgeSwitcher({
+  onSwitch: (edge, deviceId) => {
+    log.info(`光标到达${edge}边缘，向 ${deviceId} 发起键鼠控制请求`)
+    void host.requestInputControl(deviceId).then((r) => {
+      if (!r.ok) log.info(`键鼠控制请求未发出：${r.error}`)
+    })
+  }
+})
+
+function refreshEdgeLayout(): void {
+  edgeSwitcher.setLayout(host.inputLayoutStore.all())
+}
 
 let mainWindow: BrowserWindow | null = null
 let quitting = false
@@ -43,7 +78,8 @@ let quitting = false
 const runtime = {
   discovered: [] as DiscoveredService[],
   pendingPairings: [] as PendingPairing[],
-  transfers: [] as TransferTask[]
+  transfers: [] as TransferTask[],
+  inputNativeReady: win32 !== null
 }
 
 /** electron-vite 的 preload 输出扩展名随配置而变，这里做兼容探测 */
@@ -157,6 +193,43 @@ function buildAppMenu(): void {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template))
 }
 
+// ---------- 键鼠采集循环 ----------
+//
+// 12ms 一轮（~83Hz）：鼠标轨迹够顺滑，键状态轮询的 CPU 开销可忽略。
+// 采集器 idle 态只喂边缘检测，控制态才转发事件——模式切换由
+// inputChanged 事件驱动（会话建立/结束时触发）。
+const INPUT_TICK_MS = 12
+let inputTimer: NodeJS.Timeout | null = null
+let inputCapture: Win32InputCapture | null = null
+
+function startInputLoop(): void {
+  if (!win32 || inputTimer) return
+  try {
+    const primary = screen.getPrimaryDisplay()
+    const size = { w: primary.size.width, h: primary.size.height }
+    edgeSwitcher.setScreen(size)
+    inputCapture = new Win32InputCapture({
+      native: win32,
+      screen: size,
+      onEvents: (events) => host.sendInputEvents(events),
+      onEdgeMove: (x, y) => edgeSwitcher.feed(x, y)
+    })
+    inputTimer = setInterval(() => inputCapture?.tick(), INPUT_TICK_MS)
+    refreshEdgeLayout()
+    log.info(`键鼠采集循环已启动（${INPUT_TICK_MS}ms）`)
+  } catch (err) {
+    log.error(`键鼠采集循环启动失败: ${String(err)}`)
+  }
+}
+
+function stopInputLoop(): void {
+  if (inputTimer) {
+    clearInterval(inputTimer)
+    inputTimer = null
+  }
+  inputCapture = null
+}
+
 // ---------- 生命周期 ----------
 app.whenReady().then(async () => {
   const b = locateBinaries()
@@ -165,6 +238,10 @@ app.whenReady().then(async () => {
   buildAppMenu()
   registerIpc(() => mainWindow, devices, adapter, host, runtime)
   createWindow()
+
+  // 7.4 退出快捷键：任何时候可退出控制，无需对端同意。未在控制时
+  // stopInputControl 是安全空操作，全局注册即可
+  globalShortcut.register('Control+Alt+Space', () => host.stopInputControl('exit hotkey'))
 
   // 启动主机：证书 → 传输服务 → 控制通道（同端口）→ 配对 → mDNS 发现
   try {
@@ -195,11 +272,22 @@ app.whenReady().then(async () => {
         // 对端改名会更新信任清单，已信任列表要刷新
         broadcast('trust:changed')
       })
+      .on('inputRequested', () => {
+        // 9.1：请求必须让用户看到，渲染层据此弹确认条
+        broadcast('input:changed')
+      })
+      .on('inputChanged', () => {
+        // 会话建立/结束时同步采集模式；布局也可能在会话间隙被 UI 改过
+        inputCapture?.setMode(host.controllingPeer() ? 'control' : 'idle')
+        refreshEdgeLayout()
+        broadcast('input:changed')
+      })
   } catch (err) {
     log.error(`主机启动失败: ${String(err)}`)
   }
 
   startClipboardSync()
+  startInputLoop()
 
   // 首次扫描设备
   await devices.refresh().catch((err) => log.error(`首次设备扫描失败: ${String(err)}`))
@@ -223,6 +311,9 @@ app.on('before-quit', (event) => {
   quitting = true
   log.info('应用退出，清理投屏会话')
   stopClipboardSync()
+  stopInputLoop()
+  // 快捷键挂着全局钩子，退出前必须释放，否则会劫持系统组合键
+  globalShortcut.unregisterAll()
   adapter
     .stopAll()
     .catch((err) => log.error(`清理会话失败: ${String(err)}`))

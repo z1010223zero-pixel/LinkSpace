@@ -126,6 +126,32 @@ export type IpcResult<T> = { ok: true; value: T } | { ok: false; error: IpcError
 
 export type Unsubscribe = () => void
 
+// ---------- 键鼠共享（阶段 3） ----------
+
+/** 设备在本机的哪一侧（7.3）。null 表示未参与键鼠共享 */
+export type DeviceEdge = 'left' | 'right' | 'top' | 'bottom'
+
+/** 被控端待确认的控制请求（9.1：每次控制请求都有明确提示） */
+export interface InputRequestView {
+  sessionId: string
+  peerId: string
+  displayName: string
+  expiresAt: number
+}
+
+export interface InputStateView {
+  /** 被控端：待确认的请求 */
+  pending: InputRequestView | null
+  /** 本机正被谁控制（显示名），无人控制时为 null */
+  controlledBy: string | null
+  /** 本机正在控制谁（显示名），未控制时为 null */
+  controlling: string | null
+  /** 设备方位布局（deviceId → 边），驱动边缘穿越 */
+  layout: Record<string, DeviceEdge>
+  /** Win32 注入层是否可用（不可用时入口降级提示） */
+  nativeReady: boolean
+}
+
 /** preload 暴露给渲染进程的 API 形状 */
 export interface LinkSpaceApi {
   listDevices(): Promise<DeviceView[]>
@@ -158,6 +184,20 @@ export interface LinkSpaceApi {
   /** 剪贴板同步开关（6.6）。关闭后收发双向静默，不产生任何流量 */
   clipboardEnabled(): Promise<boolean>
   setClipboardEnabled(enabled: boolean): Promise<IpcResult<boolean>>
+  /** 键鼠共享状态快照（9.1） */
+  inputState(): Promise<InputStateView>
+  /** 请求控制对端键鼠（对端会收到确认弹窗） */
+  requestInputControl(peerId: string): Promise<IpcResult<void>>
+  /** 被控端：同意控制请求。授权仅本会话内有效 */
+  approveInputControl(sessionId: string): Promise<IpcResult<void>>
+  /** 被控端：拒绝控制请求 */
+  denyInputControl(sessionId: string): Promise<IpcResult<void>>
+  /** 被控端：随时拔掉正在进行的控制 */
+  terminateInputControl(): Promise<IpcResult<void>>
+  /** 控制端：退出当前控制会话（7.4，快捷键也走这里） */
+  exitInputControl(): Promise<IpcResult<void>>
+  /** 设置设备位于本机哪一侧（7.3），null 清除 */
+  setDeviceEdge(deviceId: string, edge: DeviceEdge | null): Promise<IpcResult<void>>
   onDevicesChanged(cb: () => void): Unsubscribe
   onSessionsChanged(cb: () => void): Unsubscribe
   onTransfersChanged(cb: () => void): Unsubscribe
@@ -167,4 +207,6 @@ export interface LinkSpaceApi {
   onTrustChanged(cb: () => void): Unsubscribe
   /** 本机显示名变化（含其他窗口/路径触发的改名） */
   onSelfNameChanged(cb: () => void): Unsubscribe
+  /** 键鼠共享状态变化（请求到达/确认/结束） */
+  onInputChanged(cb: () => void): Unsubscribe
 }

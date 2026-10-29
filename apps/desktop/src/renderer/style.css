@@ -385,6 +385,12 @@ button {
   color: var(--warn);
 }
 
+/* 键鼠共享「控制中」状态条（与 badge--ok 同一套色彩语义） */
+.banner--ok {
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+
 .banner code {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px;
@@ -472,4 +478,15 @@ button {
   border-radius: 6px;
   background: var(--surface);
   color: var(--text-primary);
+}
+
+/* 键鼠共享方位下拉（对齐 code-field 的视觉密度） */
+.edge-select {
+  padding: 5px 8px;
+  margin: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text-primary);
+  font-size: 12px;
 }
