@@ -191,6 +191,10 @@ app.whenReady().then(async () => {
         runtime.transfers = host.transferTasks()
         broadcast('transfers:changed')
       })
+      .on('peerRenamed', () => {
+        // 对端改名会更新信任清单，已信任列表要刷新
+        broadcast('trust:changed')
+      })
   } catch (err) {
     log.error(`主机启动失败: ${String(err)}`)
   }

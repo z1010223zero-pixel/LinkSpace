@@ -54,6 +54,8 @@ const CHANNELS = [
   'env:info',
   'layout:get',
   'layout:save',
+  'profile:get',
+  'profile:rename',
   'ping'
 ] as const
 
@@ -62,7 +64,9 @@ const EVENTS = [
   'sessions:changed',
   'discovered:changed',
   'pairings:changed',
-  'transfers:changed'
+  'transfers:changed',
+  'trust:changed',
+  'selfName:changed'
 ] as const
 
 /** 渲染层可见的运行时快照来源 */
@@ -262,6 +266,18 @@ export function registerIpc(
     }
     host.setLayoutOrder(order as string[])
     return { ok: true as const }
+  })
+
+  // ---------- 本机显示名（5.4） ----------
+
+  invoke('profile:get', () => host.displayName)
+
+  ipcMain.handle('profile:rename', async (_e, name: unknown) => {
+    if (typeof name !== 'string') return fail('缺少显示名')
+    const result = host.setDisplayName(name)
+    if (!result.ok) return fail(result.error ?? '改名失败')
+    broadcast(getWindow, 'selfName:changed')
+    return { ok: true as const, value: result.name }
   })
 
   invoke('ping', () => 'pong')

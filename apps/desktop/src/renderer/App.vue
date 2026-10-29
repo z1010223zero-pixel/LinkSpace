@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type {
   DeviceView,
   DiscoveredDevice,
@@ -22,6 +22,38 @@ const codeInput = ref('')
 const env = ref<EnvInfo | null>(null)
 const notice = ref('')
 let refreshing = false
+
+// ---------- 本机显示名（5.4） ----------
+const selfName = ref('')
+const editingName = ref(false)
+const nameDraft = ref('')
+const nameInput = ref<HTMLInputElement | null>(null)
+
+watch(editingName, async (v) => {
+  if (!v) return
+  await nextTick()
+  nameInput.value?.focus()
+  nameInput.value?.select()
+})
+
+function startRename(): void {
+  nameDraft.value = selfName.value
+  editingName.value = true
+}
+
+/** Enter/blur 都会触发，靠 editingName 复位防双跑 */
+async function saveRename(): Promise<void> {
+  if (!editingName.value) return
+  editingName.value = false
+  const name = nameDraft.value
+  if (name === selfName.value) return
+  const res = await window.linkspace.renameSelf(name)
+  if (!res.ok) {
+    notice.value = res.error.message
+    return
+  }
+  selfName.value = res.value
+}
 
 /** 持久化的设备顺序。主进程返回时已排好，这里只在拖拽后本地更新 */
 const layoutOrder = ref<string[]>([])
@@ -47,6 +79,8 @@ let unsubSessions: (() => void) | null = null
 let unsubTransfers: (() => void) | null = null
 let unsubDiscovered: (() => void) | null = null
 let unsubPairings: (() => void) | null = null
+let unsubTrust: (() => void) | null = null
+let unsubSelfName: (() => void) | null = null
 let pollTimer: number | null = null
 let speedTimer: number | null = null
 
@@ -301,6 +335,7 @@ async function stopMirror(id: string): Promise<void> {
 onMounted(async () => {
   env.value = await window.linkspace.envInfo()
   transferInfo.value = await window.linkspace.transferInfo().catch(() => null)
+  selfName.value = await window.linkspace.selfDisplayName().catch(() => '')
   await loadDevices()
   await loadSessions()
   await loadTransfers()
@@ -326,6 +361,12 @@ onMounted(async () => {
     void loadPairings()
     void loadTrusted()
   })
+  unsubTrust = window.linkspace.onTrustChanged(() => {
+    void loadTrusted()
+  })
+  unsubSelfName = window.linkspace.onSelfNameChanged(async () => {
+    selfName.value = await window.linkspace.selfDisplayName().catch(() => selfName.value)
+  })
 
   // 事件之外的兜底轮询：设备插拔时 adb 不会主动通知
   pollTimer = window.setInterval(() => {
@@ -346,6 +387,8 @@ onBeforeUnmount(() => {
   unsubTransfers?.()
   unsubDiscovered?.()
   unsubPairings?.()
+  unsubTrust?.()
+  unsubSelfName?.()
   if (pollTimer !== null) window.clearInterval(pollTimer)
   if (speedTimer !== null) window.clearInterval(speedTimer)
 })
@@ -359,6 +402,23 @@ onBeforeUnmount(() => {
         LinkSpace
       </div>
       <span class="topbar__subtitle">局域网多设备协作工作空间</span>
+      <span class="topbar__self">
+        <input
+          v-if="editingName"
+          ref="nameInput"
+          v-model="nameDraft"
+          class="code-field topbar__self-input"
+          maxlength="60"
+          placeholder="本机显示名"
+          @keydown.enter="saveRename"
+          @keydown.esc="editingName = false"
+          @blur="saveRename"
+        />
+        <template v-else>
+          <span class="topbar__self-name" :title="'本机显示名（对端可见）'">{{ selfName }}</span>
+          <button class="btn-icon" title="修改本机显示名" @click="startRename">✎</button>
+        </template>
+      </span>
       <div class="topbar__spacer" />
       <div class="topbar__actions">
         <span v-if="env" class="badge" :class="env.ready ? 'badge--ok' : 'badge--warn'">

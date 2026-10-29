@@ -21,6 +21,8 @@ object Protocol {
     const val HEADER_CHUNK_DIGEST = "X-Chunk-Digest"
 
     const val TYPE_ANNOUNCE = "device.announce"
+    /** 本机改名广播（5.4）：payload 只带 displayName，两端语义一致 */
+    const val TYPE_RENAME = "device.rename"
     const val TYPE_PAIR_REQUEST = "pair.request"
     const val TYPE_PAIR_CHALLENGE = "pair.challenge"
     const val TYPE_PAIR_SUBMIT = "pair.submit"

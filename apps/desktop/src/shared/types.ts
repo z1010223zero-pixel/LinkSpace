@@ -150,9 +150,17 @@ export interface LinkSpaceApi {
   getDeviceLayout(): Promise<string[]>
   /** 保存设备卡片顺序，应传入完整列表 */
   saveDeviceLayout(order: string[]): Promise<IpcResult<void>>
+  /** 本机显示名（对端看到的名字） */
+  selfDisplayName(): Promise<string>
+  /** 修改本机显示名，改名会经 device.rename 同步到已连接的对端 */
+  renameSelf(name: string): Promise<IpcResult<string>>
   onDevicesChanged(cb: () => void): Unsubscribe
   onSessionsChanged(cb: () => void): Unsubscribe
   onTransfersChanged(cb: () => void): Unsubscribe
   onDiscoveredChanged(cb: () => void): Unsubscribe
   onPairingsChanged(cb: () => void): Unsubscribe
+  /** 对端改名导致信任清单变化 */
+  onTrustChanged(cb: () => void): Unsubscribe
+  /** 本机显示名变化（含其他窗口/路径触发的改名） */
+  onSelfNameChanged(cb: () => void): Unsubscribe
 }

@@ -273,8 +273,47 @@ async function main(): Promise<void> {
     await waitFor(() => (clipA.value === '在 B 上复制的文本' ? true : undefined))
     check('反向同步同样生效', clipA.value === '在 B 上复制的文本', clipA.value)
 
-    // ---------- 7. 撤销信任后门禁重新生效 ----------
-    console.log('\n7. 撤销信任后门禁重新生效')
+    // ---------- 7. 设备重命名（5.4）：两端同步 + 持久化 ----------
+    console.log('\n7. 设备重命名（device.rename）')
+    // A 改名 → B 的信任条目更新
+    const renameA = A.setDisplayName('E2E-Alpha-改')
+    check('A 改名成功', renameA.ok === true, String(renameA.name))
+    await waitFor(() =>
+      B.trustStore.list().find((e) => e.deviceId === A.id && e.displayName === 'E2E-Alpha-改')
+        ? true
+        : undefined
+    )
+    check('B 的信任条目已同步 A 的新名字', B.trustStore.fingerprintOf(A.id) !== null)
+    const bEntry = B.trustStore.list().find((e) => e.deviceId === A.id)
+    check('B 记录的名字为 A 的新名字', bEntry?.displayName === 'E2E-Alpha-改', bEntry?.displayName)
+
+    // B 改名 → A 的信任条目更新（双向对称）
+    const renameB = B.setDisplayName('E2E-Beta-改')
+    check('B 改名成功', renameB.ok === true, String(renameB.name))
+    await waitFor(() =>
+      A.trustStore.list().find((e) => e.deviceId === B.id && e.displayName === 'E2E-Beta-改')
+        ? true
+        : undefined
+    )
+    const aEntry = A.trustStore.list().find((e) => e.deviceId === B.id)
+    check('A 记录的名字为 B 的新名字', aEntry?.displayName === 'E2E-Beta-改', aEntry?.displayName)
+
+    // 空名字拒绝：清洗后为空必须报错而不是静默回退
+    const emptyName = A.setDisplayName('   ')
+    check('空名字被拒绝', emptyName.ok === false)
+
+    // 接收侧持久化：B 的信任清单已落盘，用全新 TrustStore 重读同一目录，
+    // 名字必须还在——这验证「重启后保持」的一半（对端记录侧）；
+    // 另一半（改名方 profile.json）由 setDisplayName 内的 persist 覆盖
+    const { TrustStore: FreshTrust } = await import('./transfer/trust')
+    const reborn = new FreshTrust({ dir: dirB })
+    check(
+      'B 重启后仍记录 A 的新名字',
+      reborn.list().find((e) => e.deviceId === A.id)?.displayName === 'E2E-Alpha-改'
+    )
+
+    // ---------- 8. 撤销信任后门禁重新生效 ----------
+    console.log('\n8. 撤销信任后门禁重新生效')
     B.revokeTrust(A.id)
     await waitFor(() => (!A.trustStore.isKnown(B.id) ? true : undefined))
     check('A 的信任已撤销', !A.trustStore.isKnown(B.id))

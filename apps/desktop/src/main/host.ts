@@ -18,6 +18,7 @@ import { ControlNode, type Connection } from './control/node'
 import { PairingCoordinator, type PendingPairing } from './pairing'
 import { Discovery, type DiscoveredService } from './discovery'
 import { LayoutStore } from './layout'
+import { ProfileStore, sanitizeDisplayName } from './profile'
 import { ClipboardSync, type ClipboardIo } from './clipboard'
 import { log } from './log'
 
@@ -59,6 +60,10 @@ export interface HostEvents {
   transferOffered: [TransferTask]
   /** 传输任务状态变化 */
   transferChanged: [TransferTask]
+  /** 本机显示名已变更（5.4） */
+  selfRenamed: [string]
+  /** 对端改了它自己的名字，本机信任清单已更新 */
+  peerRenamed: [TrustEntry]
 }
 
 type Listener<K extends keyof HostEvents> = (...args: HostEvents[K]) => void
@@ -72,6 +77,12 @@ export class Host {
   private deviceId = ''
   private readonly trust: TrustStore
   private readonly layout: LayoutStore
+  private readonly profile: ProfileStore
+  /**
+   * 本机显示名。构造时从 profile.json 恢复（5.4 改名要跨重启保持），
+   * 没改过名才退回 opts.displayName 的默认值。
+   */
+  private selfName: string
   private clipboardSync: ClipboardSync | null = null
   private readonly transfers = new TransferManager()
   private control: ControlNode | null = null
@@ -93,11 +104,14 @@ export class Host {
     // dataDir 必须同时管住信任清单与身份证书：只设一半会让身份退回到
     // 进程级单例，同进程多个 Host 会共用同一张证书、同一个指纹。
     if (opts.dataDir) setIdentityDir(opts.dataDir)
+    const dataDir = opts.dataDir ?? app.getPath('userData')
     this.trust = new TrustStore({
-      dir: opts.dataDir ?? app.getPath('userData'),
+      dir: dataDir,
       defaultScope: opts.defaultScope ?? ['file', 'clipboard']
     })
-    this.layout = new LayoutStore({ dir: opts.dataDir ?? app.getPath('userData') })
+    this.layout = new LayoutStore({ dir: dataDir })
+    this.profile = new ProfileStore({ dir: dataDir })
+    this.selfName = this.profile.get() || opts.displayName
   }
 
   on<K extends keyof HostEvents>(event: K, cb: Listener<K>): this {
@@ -113,6 +127,35 @@ export class Host {
 
   get id(): string {
     return this.deviceId
+  }
+
+  /** 本机显示名（对外身份，改名会同步到对端与 mDNS 通告） */
+  get displayName(): string {
+    return this.selfName
+  }
+
+  /**
+   * 本机改名（5.4）：持久化 → 同步配对器/发现层（重发通告）→
+   * 广播 device.rename 给已连接对端。名字由 ProfileStore 落盘，
+   * 对端各自更新自己的信任清单并持久化——两端重启后都保持。
+   */
+  setDisplayName(raw: string): { ok: boolean; name?: string; error?: string } {
+    const clean = sanitizeDisplayName(raw)
+    if (!clean) return { ok: false, error: '名字不能为空' }
+    if (clean === this.selfName) return { ok: true, name: clean }
+    this.selfName = clean
+    this.profile.set(clean)
+    this.pairing?.setDisplayName(clean)
+    // 发现层重发通告：服务名内嵌显示名，对端重新发现时拿到新名字
+    this.discovery?.setDisplayName(clean)
+    let sent = 0
+    for (const conn of this.peers.values()) {
+      conn.send('device.rename', { displayName: clean })
+      sent++
+    }
+    if (sent) log.info(`本机已改名为「${clean}」，通知 ${sent} 台在线设备`)
+    this.emit('selfRenamed', clean)
+    return { ok: true, name: clean }
   }
 
   get trustStore(): TrustStore {
@@ -154,6 +197,7 @@ export class Host {
     this.startDiscovery(port)
     this.wireTransferBridge()
     this.wireClipboardBridge()
+    this.wireRenameBridge()
 
     log.info(`LinkSpace 主机已启动，id=${this.deviceId}，端口=${port}`)
   }
@@ -198,7 +242,7 @@ export class Host {
   private startPairing(cert: DeviceCert): void {
     this.pairing = new PairingCoordinator({
       deviceId: this.deviceId,
-      displayName: this.opts.displayName,
+      displayName: this.selfName,
       deviceType: this.opts.deviceType,
       trust: this.trust,
       node: this.control!,
@@ -232,7 +276,7 @@ export class Host {
 
   private startDiscovery(port: number): void {
     this.discovery = new Discovery({
-      displayName: this.opts.displayName,
+      displayName: this.selfName,
       deviceType: this.opts.deviceType,
       deviceId: this.deviceId,
       port,
@@ -542,6 +586,28 @@ export class Host {
       sent++
     }
     if (sent) log.info(`剪贴板已同步到 ${sent} 台设备`)
+  }
+
+  /**
+   * 对端改名的接收端（5.4）。只信任清单内的设备才能更新条目：
+   * 名字是对端自报的，不给陌生连接改写本机状态的通道。
+   */
+  private wireRenameBridge(): void {
+    this.control!.on('device.rename', (conn, msg) => {
+      const p = msg.payload as { displayName?: string }
+      const peerId = conn.peerId
+      if (!peerId || !this.trust.isKnown(peerId)) {
+        log.warn('忽略未信任连接的 device.rename')
+        return
+      }
+      const clean = sanitizeDisplayName(String(p.displayName ?? ''))
+      if (!clean) return
+      if (this.trust.rename(peerId, clean)) {
+        const entry = this.trust.list().find((e) => e.deviceId === peerId)
+        if (entry) this.emit('peerRenamed', entry)
+        log.info(`对端 ${peerId} 已改名为「${clean}」`)
+      }
+    })
   }
 
   async stop(): Promise<void> {
