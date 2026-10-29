@@ -97,8 +97,8 @@ TwinDesk 是**最接近本项目定位**的参考实现（Electron、无云、�
 - [ ] **deskflow 许可证细节**：确认是否有例外条款或双许可选项。
 - [x] **scrcpy 发行包的实际依赖**：已核实，见下方 1.3
 - [x] **scrcpy server（Android 端）**：随发行版分发，733930 字节，与 scrcpy 同源（Apache-2.0）
-- [ ] **Electron 依赖树**：`node_modules` 全部直接/传递依赖的许可证（用 `license-checker` 或 `pnpm licenses list` 生成）。
-- [ ] **Vue 及前端依赖**：同上。
+- [x] **Electron 依赖树**：已用 `license-checker` 扫描（2026-10-29），生产依赖 54 个，全为 MIT / BSD / ISC / Apache-2.0 / 0BSD 宽松许可，见 `apps/desktop/sbom/third-party-licenses.json`。
+- [ ] **Vue 及前端依赖**：已包含在上条扫描结果内（@vue/* 传递依赖），无额外缺口。
 - [ ] **Android 端依赖**：Kotlin/Compose 相关库逐个记录。
 - [ ] **OpenDisplay**：方案给的是文档站，需定位实际代码仓库并确认许可证后再决定是否参考。
 - [ ] **Windows IddCx 示例**：微软示例代码的许可证（通常为 MIT），需确认具体示例。
@@ -107,11 +107,17 @@ TwinDesk 是**最接近本项目定位**的参考实现（Electron、无云、�
 
 ## 4. SBOM 维护
 
-**生成时机**：每次构建发布产物时自动生成，随发布归档。
+**状态（2026-10-29）**：工具已落地。`apps/desktop` 下运行 `npm run sbom`，
+用 `license-checker` 扫描生产依赖，加上 scrcpy 发行包的手工原生组件条目
+（与 §1.3 逐文件核实表同步维护），输出 `apps/desktop/sbom/third-party-licenses.json`。
 
-**最低字段**：组件名、版本、许可证 SPDX ID、来源 URL、本地修改记录、链接方式。
+**最低字段**：组件名、版本、许可证 SPDX ID、来源 URL、链接方式。FFmpeg 四个
+DLL 因「许可证取决于构建选项、尚未核实」如实标记 UNKNOWN，脚本会在生成时
+打印警告，发布前必须消零。
 
-**工具待定**，候选：`syft`、`cyclonedx` 系列、或 `license-checker` + 手工补全原生组件。scrcpy 等原生二进制无法被 npm 工具扫描，必须手工维护，这部分最容易遗漏，需列入发布检查表（见 `mvp-acceptance.md` 9.6）。
+**scrcpy 等原生二进制无法被 npm 工具扫描，必须手工维护**，这部分最容易遗漏，
+已列入发布检查表（见 `mvp-acceptance.md` 9.6）。每次构建发布产物时重新生成，
+随发布归档。
 
 ---
 
