@@ -28,7 +28,7 @@
 - [x] 无头验证扩到十套（verify / transfer / pairing / e2e / layout / net / heartbeat / clipboard / input / mdns），端到端跑通「发现 → 配对 → 传输 → 取消 → 剪贴板」
 - [x] 监听地址自动收窄 + 来源地址门禁：唯一局域网 IPv4 时绑定之，多网卡回落 `0.0.0.0`（`LINKSPACE_BIND_IP` 可指定）；入站来源不属于局域网 / 链路本地 / ULA 范围在 TLS 握手阶段断开（`verify:net`）
 - [x] Android 客户端（Kotlin + Compose）主体完成并经真机验证：发现、配对、双向文件、双向剪贴板、安卓→电脑远控
-- [x] 两轮代码审查与安全修复（见 [`docs/desktop-review-2026-10-29.md`](docs/desktop-review-2026-10-29.md) 与 [`docs/project-review-2026-10-29.md`](docs/project-review-2026-10-29.md)）：身份锚定到 TLS 证书（无证书冒充已修）、数据面 token / 块摘要、路径穿越、撤销级联
+- [x] 两轮代码审查与安全修复（见 [`docs/desktop-review-2026-10-29.md`](docs/desktop-review-2026-10-29.md) 与 [`docs/project-review-2026-10-29.md`](docs/project-review-2026-10-29.md)）：身份锚定到 TLS 证书（无证书冒充已修）、数据面 token / 块摘要、路径穿越、撤销级联；Android 端安全基线（发送方指纹绑定、服务端索证与 accept 定向、DoS 限长）同步达成（10-30）
 - [x] Windows NSIS 安装包 + SBOM 生成链路（`npm run dist` / `npm run sbom`），安装版冒烟（防火墙授权、菜单退出）通过
 
 **阶段 3：体验完善 —— 主体已完成（2026-10-29，f423ea4）**
@@ -38,18 +38,19 @@
 - [x] 安卓→电脑远控（平板作触控板，桌面被控端，协议 4.6）
 - [x] 控制通道 maxPayload 与消息限频（`verify:heartbeat` 洪泛用例钉死）
 - [ ] scrcpy 窗口内输入（鼠标键盘 / 中文输入法）与断网恢复仍待人工走查（[`docs/scrcpy-manual-checklist.md`](docs/scrcpy-manual-checklist.md)）
-- [ ] 多显示器副屏贴边误触发等 P3 残余（见审查报告 2.4 节）
+- [x] 审查报告 2.4 节桌面 P3 全部清完（2026-10-30，5350f65：副屏贴边、载荷收敛、限频与挂起上限等）
 
 **阶段 4 前置：IddCx 虚拟显示器 —— PoC 进行中**
 
 - [x] EWDK 环境下驱动构建与测试签名（2026-10-30，独立 PoC，不进主构建）
 - [ ] 安装验证（technical-validation 3.2.1 / 3.2.2）——需管理员授权与重启，暂缓
 
-**发行路线**：已定 GPL-2.0/3.0（决策记录见 [`docs/license-inventory.md`](docs/license-inventory.md)），LICENSE 文件尚未落地。
+**发行路线**：已定 **路线 B（保留闭源商业发行选项）**——只复用宽松许可组件，GPL 系代码仅作设计参考（2026-10-30 拍板，见 [`docs/license-inventory.md`](docs/license-inventory.md) §2）；LICENSE 文件在公开发布门限前落地。
 
 已验证范围与缺口见 [`docs/mvp-acceptance.md`](docs/mvp-acceptance.md)。
 跑桌面端见 [`apps/desktop/README.md`](apps/desktop/README.md)（含 5 个本机环境踩坑与解法）。
 阶段 3 真机人工走查清单见 [`docs/manual-walkthrough-stage3.md`](docs/manual-walkthrough-stage3.md)。
+待用户亲手操作的事项（IddCx 安装验证、真机触控走查等）汇总在 [`docs/user-ops-2026-10-30.md`](docs/user-ops-2026-10-30.md)。
 
 ---
 
@@ -91,6 +92,7 @@ docs/                   设计文档
 | [`docs/project-review-2026-10-29.md`](docs/project-review-2026-10-29.md) | 第二次全项目审查报告（桌面 / Android 首审 / 文档一致性 / 修复优先级） |
 | [`docs/manual-walkthrough-stage3.md`](docs/manual-walkthrough-stage3.md) | 阶段 3 真机人工走查清单（键鼠 / 边缘穿越 / 断线安全 / 剪贴板） |
 | [`docs/agent-division.md`](docs/agent-division.md) | 双 Agent 分工、协议契约与移交清单（共享文件） |
+| [`docs/user-ops-2026-10-30.md`](docs/user-ops-2026-10-30.md) | 待用户操作清单（IddCx 安装验证、真机走查余项、发行决策记录） |
 
 ---
 
@@ -106,4 +108,4 @@ docs/                   设计文档
 
 ## 许可证
 
-待定。发行路线（开源优先 / 保留闭源商业选项）尚未确定，这直接影响可复用哪些第三方代码，详见 `docs/license-inventory.md`。在结论确定前，仓库不附加 LICENSE 文件。
+**已定路线 B（保留闭源商业发行选项）**（2026-10-30）：只复用 Apache-2.0 / MIT / BSD 等宽松许可组件，GPL 系代码仅作设计参考、不进代码库。详见 `docs/license-inventory.md` §2。LICENSE 文件在公开发布门限前落地。

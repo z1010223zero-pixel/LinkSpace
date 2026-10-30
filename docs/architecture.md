@@ -234,7 +234,7 @@ export interface AdapterError {
 
 在动手写代码前需要回答，答案回写到本文件：
 
-1. ~~**发行许可证**~~ → **已定：GPL-2.0/3.0**（决策记录见 `docs/license-inventory.md`）。键鼠共享已自研实现，不复用 TwinDesk / Input Leap 代码；LICENSE 文件待落地。
+1. ~~**发行许可证**~~ → **已定：路线 B（保留闭源商业发行选项）**（2026-10-30 拍板，决策记录见 `docs/license-inventory.md` §2）。只复用宽松许可组件，键鼠共享自研实现的现状与此一致，无返工；GPL 系代码仅作设计参考；LICENSE 文件在公开发布门限前落地。
 2. ~~**Electron 是否最终采用**~~ → **已定：采用 Electron 37.10.3**。原型实测内存 340 MB、空闲 CPU 极低，且已验证能管理 scrcpy 子进程生命周期。踩坑与规避见 `apps/desktop/README.md`。
 3. **媒体通道选型**：扩展屏幕若走 WebRTC，与 scrcpy 自有传输如何共存？还是统一走自研低延迟传输？
 4. ~~**Android 端是否需要常驻前台服务**~~ → **已定：需要**。`LinkSpaceForegroundService`（dataSync 型）已实现保活 +「用户退出 = 彻底下线」语义。
