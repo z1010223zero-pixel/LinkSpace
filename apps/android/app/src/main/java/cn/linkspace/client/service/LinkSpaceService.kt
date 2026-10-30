@@ -1003,7 +1003,12 @@ class LinkSpaceService private constructor(private val appContext: Context) {
                 _inputMessage.value = reason
                 _screenStream.value = null
             },
-            onSize = { w, h -> streamFallbackSize = w to h }
+            onSize = { w, h ->
+                streamFallbackSize = w to h
+                // 解码实际尺寸（流内 SPS）回灌 UI：letterbox 等比渲染以它为准
+                // （session.start 时声明的尺寸可能与 ffmpeg 实际推流输出不同）
+                _screenStream.value = ScreenStreamInfo(w, h)
+            }
         )
         streamDecoder = decoder
         synchronized(pendingVideo) {

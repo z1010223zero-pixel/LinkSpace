@@ -24,7 +24,9 @@ import androidx.compose.ui.input.pointer.changedToDown
 import androidx.compose.ui.input.pointer.changedToUp
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.font.FontFamily
@@ -33,6 +35,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlin.math.roundToInt
 import androidx.lifecycle.lifecycleScope
 import cn.linkspace.client.service.ClipboardSync
 import cn.linkspace.client.service.DiscoveredService
@@ -994,37 +997,53 @@ fun ScreenMirrorScreen(service: LinkSpaceService, info: LinkSpaceService.ScreenS
     val scrollAccum = remember { floatArrayOf(0f) }
     // 会话声明的本机屏幕（触控坐标空间基准，来自 session.accept）
     val inputState by service.inputState.collectAsStateWithLifecycle()
+    val density = LocalDensity.current
+
+    // letterbox：容器尺寸 + 视频显示矩形（等比缩放置中，黑边留白）
+    var containerPx by remember { mutableStateOf(androidx.compose.ui.unit.IntSize.Zero) }
+    val videoRect = remember(info.w, info.h, containerPx) {
+        letterboxRect(containerPx.width, containerPx.height, info.w, info.h)
+    }
 
     Box(
         Modifier
             .fillMaxSize()
             .background(Color.Black)
+            .onSizeChanged { containerPx = it }
     ) {
-        AndroidView(
-            factory = { ctx ->
-                android.view.SurfaceView(ctx).apply {
-                    holder.addCallback(object : android.view.SurfaceHolder.Callback {
-                        override fun surfaceCreated(holder: android.view.SurfaceHolder) {
-                            // 渲染面就绪：服务层 accept 桌面 ffmpeg 的连接并起解码
-                            service.connectStreamSurface(holder.surface)
-                        }
+        if (videoRect.width > 0 && videoRect.height > 0) {
+            AndroidView(
+                factory = { ctx ->
+                    android.view.SurfaceView(ctx).apply {
+                        holder.addCallback(object : android.view.SurfaceHolder.Callback {
+                            override fun surfaceCreated(holder: android.view.SurfaceHolder) {
+                                // 渲染面就绪：服务层 accept 桌面 ffmpeg 的连接并起解码
+                                service.connectStreamSurface(holder.surface)
+                            }
 
-                        override fun surfaceChanged(holder: android.view.SurfaceHolder, format: Int, width: Int, height: Int) {}
+                            override fun surfaceChanged(holder: android.view.SurfaceHolder, format: Int, width: Int, height: Int) {}
 
-                        override fun surfaceDestroyed(holder: android.view.SurfaceHolder) {
-                            // 解码器随推流断开自愈退出（桌面杀流 → EOF/异常路径），
-                            // 面已随本 view 销毁被 release
-                        }
-                    })
-                }
-            },
-            modifier = Modifier.fillMaxSize()
-        )
-        // 触控层盖在画面上（SurfaceView 不消费触摸，事件到 Compose）
+                            override fun surfaceDestroyed(holder: android.view.SurfaceHolder) {
+                                // 解码器随推流断开自愈退出（桌面杀流 → EOF/异常路径），
+                                // 面已随本 view 销毁被 release
+                            }
+                        })
+                    }
+                },
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .size(
+                        with(density) { videoRect.width.toDp() },
+                        with(density) { videoRect.height.toDp() }
+                    )
+            )
+        }
+        // 触控层盖在画面上（SurfaceView 不消费触摸，事件到 Compose）；
+        // 触点先折算进视频显示矩形（黑边 clamp 到边缘），再按比例进会话坐标空间
         Box(
             Modifier
                 .fillMaxSize()
-                .pointerInput(info) {
+                .pointerInput(info, videoRect) {
                     awaitPointerEventScope {
                         var downAt = 0L
                         var moved = false
@@ -1067,13 +1086,16 @@ fun ScreenMirrorScreen(service: LinkSpaceService, info: LinkSpaceService.ScreenS
                                         dragArmed = true
                                         sendRemote(controller, listOf(InputController.down("left")))
                                     }
+                                    // 黑边 clamp：触点收敛进视频矩形后按比例换算
+                                    val vx = (c.position.x - videoRect.left).coerceIn(0f, videoRect.width)
+                                    val vy = (c.position.y - videoRect.top).coerceIn(0f, videoRect.height)
                                     sendRemote(
                                         controller,
                                         listOf(
                                             InputController.move(
-                                                (c.position.x / size.width.toFloat() * sessionScreen.w).toInt()
+                                                (vx / videoRect.width * sessionScreen.w).toInt()
                                                     .coerceIn(0, sessionScreen.w - 1),
-                                                (c.position.y / size.height.toFloat() * sessionScreen.h).toInt()
+                                                (vy / videoRect.height * sessionScreen.h).toInt()
                                                     .coerceIn(0, sessionScreen.h - 1)
                                             )
                                         )
@@ -1111,6 +1133,25 @@ fun ScreenMirrorScreen(service: LinkSpaceService, info: LinkSpaceService.ScreenS
             Button(onClick = { service.stopScreenStream() }) { Text("退出投屏") }
         }
     }
+}
+
+/**
+ * letterbox 等比缩放置中：视频按宽高比适配容器，返回其在容器内的
+ * 显示矩形（居中，黑边留白）。任一维度非法时返回 Rect.Zero（UI 据此
+ * 暂不渲染 Surface）。
+ */
+internal fun letterboxRect(cw: Int, ch: Int, vw: Int, vh: Int): androidx.compose.ui.geometry.Rect {
+    if (cw <= 0 || ch <= 0 || vw <= 0 || vh <= 0) return androidx.compose.ui.geometry.Rect.Zero
+    val scale = minOf(cw.toFloat() / vw, ch.toFloat() / vh)
+    // round 而非截断：浮点误差会把整尺寸算成 N-1（2000/1920×1920 → 1999.9999），
+    // 截断丢一行像素且触控映射的除数随之偏移
+    val w = (vw * scale).roundToInt().coerceAtLeast(1)
+    val h = (vh * scale).roundToInt().coerceAtLeast(1)
+    val left = (cw - w) / 2
+    val top = (ch - h) / 2
+    return androidx.compose.ui.geometry.Rect(
+        left.toFloat(), top.toFloat(), (left + w).toFloat(), (top + h).toFloat()
+    )
 }
 
 /** 投屏触控回传：批量分段的发送封装与 TouchpadScreen.send 同构 */
