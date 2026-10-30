@@ -61,6 +61,10 @@ class StreamDecoder(
             decoder.start()
             Log.i(TAG, "解码器就绪：$codecName")
 
+            // 读超时必须设：下面的「15s 无数据」判定只在循环转起来时可达，
+            // 若对端静默死亡，input.read() 会永久阻塞，卡顿检测成为死代码。
+            // 超时让阻塞以 SocketTimeoutException 浮出来，走正常结束路径
+            socket.soTimeout = 15_000
             val input = socket.getInputStream()
             val info = android.media.MediaCodec.BufferInfo()
             var eos = false
