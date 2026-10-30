@@ -31,7 +31,11 @@
 | T5 Identity 后台初始化 | ceb1c66 | 通过：启动线程与主线程分离（日志线程号证据） |
 | T6 第 6 组文件双向走查 | 615c3fc | 通过：下行 1MB 两次推送完成、上行 512KB 两次完成、**SHA-256 双向逐字节一致** |
 | T6 第 7 组剪贴板接收向 | 615c3fc | 通过：scope 门禁路径收到 20 字符 clipboard.share |
-| T7' JVM 单测四套 42 例 | 3cf4f20 | 全绿：ClipboardSync 回环抑制全套 / InputController 状态机与事件编码 / Protocol 编解码往返 / TransferServer 文件名清洗与解码；套件抓到并修掉「pending 请求断连不通知 UI」缺口 |
+| T7' JVM 单测四套 42 例 | 3cf4f20 |
+| B-6 协议登记 | 9c384f7 | screen.stream.* §4.7 + screen.paste §4.8 |
+| B-7 投屏粘贴中文 | 8db82b5+ | screen.paste 三端实现，真机验证发送→处理全通 |
+| B-3 码率自适应 | 8dfa5d9 | 档位阶梯 + 积压探针，t0 真机启动 ✓ |
+| B-9 部分（9.2/9.5） | e64362e 起各轮 | 端口审计 ✓、断连韧性证据 + 全绿：ClipboardSync 回环抑制全套 / InputController 状态机与事件编码 / Protocol 编解码往返 / TransferServer 文件名清洗与解码；套件抓到并修掉「pending 请求断连不通知 UI」缺口 |
 
 第 7 组发送向与「真实手指触控」见 §1 T7（平台约束/需人工）。
 

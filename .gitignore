@@ -56,3 +56,4 @@ apps/android/.gradle/
 apps/android/local.properties
 *.apk
 *.aab
+.zwork/
