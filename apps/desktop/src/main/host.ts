@@ -855,7 +855,18 @@ export class Host {
           if (!this.inputCoordinator?.activeSession) this.screenStream.stop()
           this.emit('inputChanged')
         },
-        onRequest: (req) => this.emit('inputRequested', req)
+        onRequest: (req) => {
+          // 走查自动批准：LINKSPACE_AUTO_APPROVE=1 时跳过人工确认（仅
+          // 显式环境变量开启，真机走查用——approve TTL 30s 与 adb 无线
+          // 链路抖动叠加会让 CDP 驱动的批准链路超时，真机踩过）。
+          // 正常运行（无此变量）走 UI 弹窗人工确认，语义不变。
+          if (process.env.LINKSPACE_AUTO_APPROVE === '1') {
+            log.info(`[walkthrough] 自动批准 ${req.peerId} 的键鼠控制请求`)
+            this.approveInputControl(req.sessionId)
+            return
+          }
+          this.emit('inputRequested', req)
+        }
       }
     })
 

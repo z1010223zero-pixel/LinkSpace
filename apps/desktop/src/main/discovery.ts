@@ -44,6 +44,9 @@ export const SERVICE_TYPE = 'linkspace'
 /** 本服务的完整 DNS 名，查询与应答匹配都用它 */
 const SERVICE_FQDN = `_${SERVICE_TYPE}._tcp.local`
 
+/** 周期重通告间隔：对端 NSD 的主动查询会随时间衰减，靠本端重发维持可见性 */
+const REANNOUNCE_MS = 45_000
+
 /** mDNS 标准组播组 */
 const MCAST_GROUP = '224.0.0.251'
 
@@ -213,6 +216,7 @@ export class Discovery {
   private readonly seen = new Map<string, DiscoveredService>()
   private readonly staleMs: number
   private sweepTimer: NodeJS.Timeout | null = null
+  private reAnnounceTimer: NodeJS.Timeout | null = null
   private queryTimer: NodeJS.Timeout | null = null
   private started = false
 
@@ -289,6 +293,21 @@ export class Discovery {
 
     // 软过期扫描：直接断网的设备不会发 goodbye，只能靠超时判定
     this.sweepTimer = setInterval(() => this.sweep(), Math.max(1000, this.staleMs / 2))
+
+    // 周期重通告：bonjour 只在发布时做启动 burst（RFC 6762），此后 75min
+    // TTL 内不再主动发。对端（Android NSD 的 mdnsd）的主动查询窗口会随
+    // browse 时长衰减（实测 40s → 90s+ → 更长），一旦错过启动 burst，
+    // 对端发现列表就永久空窗——真机 B-1 验证踩过。周期性重发（停旧发新，
+    // 与 refreshAdvertisement 同路径）让任何时刻启动的对端都能在
+    // 一个周期内看到本机。
+    this.reAnnounceTimer = setInterval(() => {
+      if (!this.started) return
+      try {
+        this.refreshAdvertisement()
+      } catch {
+        /* 重发冲突等瞬时问题，下一个周期再试 */
+      }
+    }, REANNOUNCE_MS)
   }
 
   stop(): void {
@@ -296,6 +315,8 @@ export class Discovery {
     this.started = false
     if (this.sweepTimer) clearInterval(this.sweepTimer)
     this.sweepTimer = null
+    if (this.reAnnounceTimer) clearInterval(this.reAnnounceTimer)
+    this.reAnnounceTimer = null
     if (this.queryTimer) clearInterval(this.queryTimer)
     this.queryTimer = null
     if (this.onResponse) {
