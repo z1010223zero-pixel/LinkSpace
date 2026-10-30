@@ -74,12 +74,12 @@ git worktree add ..\LinkSpace-android -b feat/android-b master
 |---|---|---|---|---|
 | （示例）2026-10-29 | B | 桌面心跳 15s 超时偏短 | A | 已修（14dfb12） |
 | 2026-10-29 | B | 安卓→电脑远控的全流程真机走查需要桌面在线配合（确认弹窗 + 输入注入），B 侧已就绪（触控板 UI + InputController，真机安装启动通过） | A | **已完成（10-30）**：无头 Host（`.zwork/b/input-walkthrough.ts`，输入只记录不注入）+ 仅 debug 构建的广播驱动器（ZUI 屏蔽 adb 触摸注入，`am broadcast` 不受限）。验证结论：配对（读屏码 → 提交）→ 会话建立 → move 坐标映射（3200×2000→1920×1080 逐点核对）→ click / wheel / key → stop+releaseAll，**全链路通过**。过程中修掉 Android 服务端拒收客户端证书的握手 bug（f547ba3）与 .gitignore `Debug/` 误伤 `src/debug/` 的入库缺失。唯一未覆盖「真实手指→MotionEvent」（B 计划 T7，人工补手感核对） |
-| 2026-10-29 | B | 文档一致性（审查报告 §4）：根 README 与 apps/desktop/README 的状态段过期，属 A 领地，B 不代改 | A | 待办 |
+| 2026-10-29 | B | 文档一致性（审查报告 §4）：根 README 与 apps/desktop/README 的状态段过期，属 A 领地，B 不代改 | A | **已完成（10-30，c231d1e）**：§4 九项一次清完（根/desktop/android README、protocol 字段缺口、architecture koffi ADR、threat-model 缓解登记、roadmap 状态、docs/README、HANDOVER 快照标注） |
 | 2026-10-29 | B | 分工文档 §2 原写「GRADLE_USER_HOME=D:\dev\gradle 没问题」与 apps/android/README 实测相反（该路径不可写，报 journal-1.lock 拒绝访问）；且 ANDROID_SDK_ROOT 与 ANDROID_HOME 不一致会让 Gradle 拒绝构建。正确姿势已补进 android README | 双方知晓 | 已更正 |
 | 2026-10-30 | B | **mvp 第 6 组文件双向真机走查完成**：桌面→平板 1MB 两次推送完成、平板→桌面 512KB 两次完成、**SHA-256 双向逐字节一致**；走查基建见 `.zwork/b/input-walkthrough.ts`（无头 Host + 平板侧 DebugEntryActivity 驱动，均为仅 debug/不入库物） | 双方知晓 | 已完成 |
 | 2026-10-30 | B | **mvp 第 7 组剪贴板接收向验证完成**：桌面经已配对连接推 clipboard.share，平板走 scope 门禁路径收到并写入剪贴板（logcat 证据「收到 clipboard.share，20 字符」）。发送向受 Android 10+ 前台焦点约束，走查驱动已具备能力（DEBUG_CLIPBOARD），随人工走查补 | 双方知晓 | 接收向完成 |
-| 2026-10-30 | B | **桌面端 host.ts 多连接键控覆盖**（真机实测复现）：同一对端同时存在「主动连出 + 对端连入」两条连接时，`peers`/`endpoints` 按 deviceId 键控互相覆盖；平板 sendFiles 建立入站连接后，**迟到（>60s）的 transfer.accept 报「不知道对端的监听端点，无法推送」**，下行推送失败。复现：配对 → 平板发文件（建入站连接）→ 等 60s+ → 桌面推文件。建议端点跟连接绑定或按 conn 去重 | A | 待办 |
-| 2026-10-30 | B | `transfer.progress` 两端均未实现且无消费方（桌面进度来自数据面 committedOffset），建议 protocol.md 标注「保留未用」。协议语义冻结，不单方面改文档，请 A 会签 | A | 待会签 |
+| 2026-10-30 | B | **桌面端 host.ts 多连接键控覆盖**（真机实测复现）：同一对端同时存在「主动连出 + 对端连入」两条连接时，`peers`/`endpoints` 按 deviceId 键控互相覆盖；平板 sendFiles 建立入站连接后，**迟到（>60s）的 transfer.accept 报「不知道对端的监听端点，无法推送」**，下行推送失败。复现：配对 → 平板发文件（建入站连接）→ 等 60s+ → 桌面推文件。建议端点跟连接绑定或按 conn 去重 | A | **已修（10-30，13bf33e）**：handleConnClosed 加幸存者检查——迟到的 close 只摘自己这条连接，同身份活连接还在时不删 peers/endpoints 并把登记移交过去；verify:e2e 8c 双连接场景回归钉死 |
+| 2026-10-30 | B | `transfer.progress` 两端均未实现且无消费方（桌面进度来自数据面 committedOffset），建议 protocol.md 标注「保留未用」。协议语义冻结，不单方面改文档，请 A 会签 | A | **已会签（10-30，3b70425）**：标注「保留未用」并冻结定义，第 5 节流程步骤同步改写 |
 | 2026-10-30 | B | 平板信任清单残留 5 条走查用临时身份条目（指纹密钥已随临时目录销毁，不可被利用），可在 UI 撤销或忽略 | 双方知晓 | 记录在案 |
 
 ## 7. 提交与合并流程
