@@ -81,6 +81,9 @@ git worktree add ..\LinkSpace-android -b feat/android-b master
 | 2026-10-30 | B | **桌面端 host.ts 多连接键控覆盖**（真机实测复现）：同一对端同时存在「主动连出 + 对端连入」两条连接时，`peers`/`endpoints` 按 deviceId 键控互相覆盖；平板 sendFiles 建立入站连接后，**迟到（>60s）的 transfer.accept 报「不知道对端的监听端点，无法推送」**，下行推送失败。复现：配对 → 平板发文件（建入站连接）→ 等 60s+ → 桌面推文件。建议端点跟连接绑定或按 conn 去重 | A | **已修（10-30，13bf33e）**：handleConnClosed 加幸存者检查——迟到的 close 只摘自己这条连接，同身份活连接还在时不删 peers/endpoints 并把登记移交过去；verify:e2e 8c 双连接场景回归钉死 |
 | 2026-10-30 | B | `transfer.progress` 两端均未实现且无消费方（桌面进度来自数据面 committedOffset），建议 protocol.md 标注「保留未用」。协议语义冻结，不单方面改文档，请 A 会签 | A | **已会签（10-30，3b70425）**：标注「保留未用」并冻结定义，第 5 节流程步骤同步改写 |
 | 2026-10-30 | B | 平板信任清单残留 5 条走查用临时身份条目（指纹密钥已随临时目录销毁，不可被利用），可在 UI 撤销或忽略 | 双方知晓 | 记录在案 |
+| 2026-10-30 | A | **T7 真实手指触控走查（自动化部分）完成**：用户开启「USB 调试（安全设置）」后，A 用 `input swipe/tap` 驱动触控板——配对（读屏码）→ session 建立 → **真实 MotionEvent move 流 16 条落桌面**（触控板占比映射 3200×2000→1920×1080）→ stop+releaseAll 双端干净。剩跟手感/双指滚动为用户亲手项。**注意：ZUI 下 adb 注入的 ACTION_UP 不可靠**（Button onClick 也不触发），依赖 up 的判定必须真手验证 | 双方知晓 | 自动化部分完成 |
+| 2026-10-30 | A | **Bug1：触控板轻点单击失灵（死代码）**——`MainActivity.kt` TouchpadScreen 的 pointerInput 里 `changedToUp()` 检查在 `changes.filter{it.pressed}` 之后的 `pressed.size==1` 分支内，但手指抬起后该 change pressed=false 被 filter 掉、事件落入 else 分支，**单指轻点的 click 分支永远不可达**。B 的 T1-T6 走查用 DEBUG_SEND_EVENTS 广播绕过了 UI 所以未暴露。修法：在 filter 前先取 `event.changes.firstOrNull{it.changedToUp()}` 单独判定 click | B | 待修 |
+| 2026-10-30 | A | **Bug2：InputController.pending 无过期清理**——`PendingRequest.expiresAt` 从未被检查（request 入口只看 `pending != null`），UI 宣称「30 秒未确认自动失效」实际永不失效；一次未达的请求把 pending 永久占死，后续 request 全部被静默拒绝（本次走查实测复现）。修法：request 入口检查 `expiresAt`，过期先清再放行 | B | 待修 |
 
 ## 7. 提交与合并流程
 
