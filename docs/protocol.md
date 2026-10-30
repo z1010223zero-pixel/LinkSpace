@@ -61,6 +61,8 @@
 
 **校验规则**：接收方必须校验 `v` 可处理、`to` 为自身、`ts` 在 ±60s 窗口内、`from` 为已知或待配对设备。任一项失败即断开连接并记录告警。
 
+> **实现现状（2026-10-30）**：`v` / `to` / `ts` 的信封级校验两端均未实现——当前防线是连接级身份门禁（announce 指纹锚定 + TLS 证书）与各消息处理器的来源核对。信封校验列为待办，不得据此声称已实现。
+
 ---
 
 ## 4. 消息定义
@@ -73,6 +75,7 @@
 | `pair.request` | 发起方 → 接收方 | `{ displayName, deviceType, pubkeyFingerprint, pairingCode? }` | 配对码由接收方生成并展示 |
 | `pair.challenge` | 接收方 → 发起方 | `{ expiresAt }` | 提示发起方「去要配对码」。⚠️ **不携带配对码本身**：配对码若经网络传输，任何能连上的人都可直接拿到，配对口令形同虚设。码只显示在接收方屏幕，由人工抄录到发起端 |
 | `pair.approve` | 接收方 → 发起方 | `{ deviceId, trustScope }` | 用户确认后发送。⚠️ `deviceId` 是**发送方自己**的 id（让对端知道是谁批准的），不是被批准的设备 id |
+| `pair.submit` | 发起方 → 接收方 | `{ code }` | 发起方提交人工抄录的配对码。码 60s 过期，错码累计 5 次断连（两端同款参数） |
 | `pair.reject` | 接收方 → 发起方 | `{ reason }` | 用户拒绝或超时 |
 | `pair.revoke` | 双向 | `{ deviceId }` | 撤销信任，立即生效。⚠️ `deviceId` 是**撤销方自己**的 id（让对端知道该删掉谁的信任条目）。⚠️ **来源校验**：接收方必须核对 `deviceId == from == conn.peerId`，且该连接的 TLS 证书指纹与信任条目一致；拿不到证书或指纹不符一律忽略。否则任何能连上控制通道的设备都能伪造撤销、定向删除第三方信任 |
 | `pair.error` | 双向 | `{ code, message }` | 配对失败，code 见第 7 节 |
@@ -91,7 +94,7 @@
 
 | 类型 | 方向 | payload | 说明 |
 |---|---|---|---|
-| `device.heartbeat` | 双向 | `{ sessions: [...] }` | 建议 5s 一次，携带会话摘要用于状态对账 |
+| `device.heartbeat` | 双向 | `{}` | 建议 5s 一次。payload 当前为空对象：`sessions` 会话摘要字段保留未实现（两端均发空对象，状态对账靠 session.* 消息本身），字段语义冻结为将来扩展预留 |
 | `device.capabilities` | 双向 | `{ caps: [...] }` | 能力变更时推送（如开启无线 ADB） |
 | `device.disconnect` | 双向 | `{ reason }` | 优雅断连，避免等待心跳超时 |
 
@@ -129,7 +132,7 @@
 | `transfer.accept` | 接收方 → 发送方 | `{ transferId, token }` | **用户确认保存路径后**发送。`token` 由接收方生成（randomUUID），是数据面唯一凭证；保存目录是本机路径，不出网 |
 | `transfer.reject` | 接收方 → 发送方 | `{ transferId, reason }` | 拒绝或路径不可写 |
 | `transfer.chunk` | 双向 | HTTP 分块体，非 WS 消息 | 见第 5 节 |
-| `transfer.progress` | 接收方 → 发送方 | `{ transferId, receivedBytes }` | 节流推送（≥200ms） |
+| `transfer.progress` | 接收方 → 发送方 | `{ transferId, receivedBytes }` | **保留未用**（2026-10-30 双端会签）：两端均未实现发送与消费，进度实际来自数据面 `committedOffset` 与 409 偏移对账。消息定义冻结保留，将来接收方需要主动节流上报时启用 |
 | `transfer.complete` | 接收方 → 发送方 | `{ transferId, digests }` | 校验通过后发送。`digests` 是文件名 → 整体 SHA-256 的映射（多文件任务每文件一项） |
 | `transfer.cancel` | 双向 | `{ transferId, reason }` | 取消，已写入部分按策略处理 |
 | `transfer.error` | 双向 | `{ transferId, code, message }` | 失败，可重试的错误在 `code` 中标识 |
@@ -146,7 +149,7 @@
 | `session.accept` | 被控方 → 控制方 | `{ sessionId, screen }` | **用户确认后才发送**。`screen` 是被控端屏幕尺寸，控制端据此做坐标映射 |
 | `session.reject` | 被控方 → 控制方 | `{ sessionId, reason }` | 拒绝（未授权 / 参数非法 / 过期 / 已有活动会话） |
 | `session.stop` | 双向 | `{ sessionId, reason }` | 任一方均可终止；两端各按 sessionId 匹配，不匹配的静默忽略 |
-| `input.event` | 控制方 → 被控方 | `{ events: [...] }` | 批量事件，单条消息 ≤ 64 条（`MAX_EVENTS_PER_MESSAGE`），超限整批丢弃 |
+| `input.event` | 控制方 → 被控方 | `{ sessionId, events: [...] }` | `sessionId` 必须匹配活动会话，不匹配整批忽略。批量事件单条消息 ≤ 64 条（`MAX_EVENTS_PER_MESSAGE`），超限整批丢弃 |
 
 单条事件形状（字段名取短，批量传输）：
 
@@ -182,7 +185,7 @@ GET    /linkspace/v1/transfer/:transferId/chunk?offset=N&length=M
 1. 发送方 `transfer.offer`，携带文件清单与总大小。
 2. 接收方展示确认 UI（保存路径 + 覆盖提醒），用户确认后 `transfer.accept`。
 3. 发送方按固定块大小（默认 4 MiB）顺序推送，块级校验。
-4. 接收方校验每块摘要，落盘，节流回报 `transfer.progress`。
+4. 接收方校验每块摘要，落盘。进度不走控制消息回报（`transfer.progress` 保留未用，见 4.5），发送方以数据面写入确认与偏移探针对账推进。
 5. 全部完成且整体摘要匹配 → `transfer.complete`。
 6. 任一方 `transfer.cancel` 或连接中断 → 进入恢复流程。
 
