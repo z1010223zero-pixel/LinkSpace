@@ -11,7 +11,7 @@
 |---|---|---|
 | 代码领地 | `apps/desktop/**`（含 scripts/、docs 中桌面实现文档） | `apps/android/**` |
 | 技术栈 | Electron 37 / Vue 3 / TS / Win32 | Kotlin / Jetpack Compose / NSD |
-| 主线任务 | ① 阶段 4 前置：IddCx 虚拟显示器技术验证（独立实验项目，见 §3）② mvp-acceptance 第 9 组安全与隐私（桌面侧）③ NSIS 打包 / SBOM / 发布链路 | ① 真机反馈补齐：文件共享 UI 入口（发送/接收）、剪贴板开关界面 ② 安卓→电脑远控（Android 作控制端，桌面被控端协议已就绪，**无需改桌面代码**）③ 杀后台仍可控的合理化（前台服务通知 / 退出策略） |
+| 主线任务 | ① 阶段 4 前置：IddCx 虚拟显示器技术验证（独立实验项目，见 §3）② mvp-acceptance 第 9 组安全与隐私（桌面侧）③ NSIS 打包 / SBOM / 发布链路 | **2026-10-30 重分配**（旧三条已全部完成销账，见 §6）：① 投屏绿屏修复真机验证闭环（B-1，首要基线）② 投屏 letterbox 等比渲染（B-2）③ screen.stream.* 协议登记与会签（B-6）④ 排队：码率自适应 / 硬编 / 音频流 / 投屏粘贴中文（B-3/B-5/B-4/B-7），详见 §3 |
 | 验收依据 | mvp-acceptance.md 第 9 组 + manual-walkthrough-stage3 桌面侧 | mvp-acceptance.md 安卓侧项 + manual-walkthrough-stage3 移动侧 |
 | 构建产物 | NSIS 安装包、SBOM | debug APK |
 
@@ -39,10 +39,32 @@ git worktree add ..\LinkSpace-android -b feat/android-b master
 2. **第 9 组安全与隐私**（桌面侧）：按 mvp-acceptance 第 9 组逐项实现/走查（剪贴板开关默认值、信任清单一目了然、撤销即断连等）。
 3. **打包链路**：NSIS、SBOM、许可证清单随版本更新（镜像变量见 project_memory）。
 
-### Agent B
-1. **文件共享 UI**：平板端发送/接收入口（发送链路 `LinkSpaceClient.sendFiles` 已通，缺 UI）。
-2. **安卓→电脑远控**：Android 端 InputController + 会话 UI；桌面被控端已有 `session.start/accept/reject/stop` 协议与确认弹窗，B 直接对接。
-3. **杀后台行为**：`am force-stop` 后连接残留问题——明确前台服务通知与「用户主动退出 = 断开所有控制会话」语义。
+### Agent B（2026-10-30 重分配：旧三条已完成，投屏时代任务如下）
+
+> 优先级即编号顺序。**B-1 通过前其余不开工**（它是后续一切的验证基线）；B-3/B-4/B-7 涉及协议新增，动手前先按 §4 规则登记 protocol.md。
+
+1. **B-1（首要）投屏绿屏修复真机验证闭环**：master 最新（9108929，WS 二进制流改造）装机 → `DEBUG_REQUEST_CONTROL` → 桌面 CDP approve → `DEBUG_SCREEN_STREAM` → screencap 确认画面正常非绿屏 → 触控滑动映射回归 → §6 销账。不通过按 §3.1 备忘定位。
+2. **B-2 投屏 letterbox 等比渲染**：流为 1920×1080、屏 3200×2000，当前直接铺满拉伸变形。SurfaceView 按流宽高比居中留黑边；触控坐标按实际显示区域映射（黑边 clamp），注意与 `streamFallbackSize`/解码回读尺寸的基准关系。
+3. **B-6 screen.stream.* 协议登记与会签**：四消息两端已实现并联测通过，但 protocol.md 未正式登记（A 打了 [PROTOCOL] 待会签）。补登四消息 + **WS 二进制帧分流约定**（0x1 文本 JSON / 0x2 二进制视频块 / 帧上限 32MB）。
+4. **B-3 码率/分辨率自适应**：StreamDecoder 队列满丢块的计数上报告桌面，桌面动态调 scale 档位与 x264 crf/maxrate（必要时下调 preset）。新消息类型走 [PROTOCOL]。
+5. **B-5 硬编探索**：libx264 软编桌面 CPU 占用可观，试 h264_nvenc（低延迟 tune）与 h264_mf，探测失败自动回退软编；结论回写 screen-stream.ts 头注（含为何弃用）。
+6. **B-4 音频流**：系统声音采集 → AAC → WS 二进制帧（需与视频块区分的帧子约定，随 B-6 一并登记）→ 平板 AudioTrack 播放。
+7. **B-7 投屏粘贴中文**：投屏场景平板剪贴板中文无法经键盘通道上屏（vk=0 跳过），设计剪贴板/粘贴消息通道（可与第 7 组 clipboard.share 复用思路）。
+
+#### §3.1 B-1 环境备忘（A 会话实测，拿去即用）
+
+- **Android 构建**（仓库无 wrapper，用 .toolchain 内置发行版；两个 SDK 变量必须指向同处，否则 Gradle 拒绝构建——实测踩坑）：
+  ```powershell
+  $env:GRADLE_USER_HOME='D:\test\testforai\LinkSpace\.toolchain\gradle-home'
+  $env:ANDROID_HOME='D:\test\testforai\LinkSpace\.toolchain\android-sdk'
+  $env:ANDROID_SDK_ROOT=$env:ANDROID_HOME
+  & 'D:\test\testforai\LinkSpace\.toolchain\gradle-8.10.2\bin\gradle.bat' -p d:\test\testforai\LinkSpace\apps\android :app:testDebugUnitTest :app:assembleDebug
+  ```
+- **桌面 dev 实例必须重启**：9108929 之前的实例跑的是旧推流逻辑（TCP 监听），WS 二进制改造在桌面侧三个文件（screen-stream.ts / host.ts / node.ts）。B 本轮验证允许起 CDP 9222 实例（A 会话已结束让出）；approve 弹窗可用 `.zwork/a/cdp-eval.ps1` 驱动。
+- **平板无线调试端口随重连变化**：`adb connect <ip>:<当前端口>`（上轮为 192.168.101.111:42369，端口会变）。
+- **debug 广播链**：`am broadcast -a cn.linkspace.DEBUG_REQUEST_CONTROL`（发起控制）→ CDP approve → `am broadcast -a cn.linkspace.DEBUG_SCREEN_STREAM`（发起投屏）→ `adb exec-out screencap -p > cap.png` 验画面。
+- **logcat**：`adb logcat -s LinkSpace/Stream LinkSpace/Service LinkSpace/Client`（解码器选型/输出尺寸/喂入队列、帧分流、连接层）。
+- **排查要点**：若仍绿屏，先看「选用解码器」日志确认落在 c2.qti 且输出尺寸=1920×1080（FORMAT_CHANGED）；再核对桌面 ffmpeg 命令含 `scale=1920:-2 -profile:v baseline`；若黑屏不出首帧，查 pendingVideo 缓冲是否在 connectStreamSurface 前已到（SPS/PPS 在流头，WS 帧先于 UI 切换到达是常态）。
 
 ### 禁区
 - A 不得改 `apps/android/**`；B 不得改 `apps/desktop/**`。发现对方域的 bug → 在 `docs/agent-division.md` §6 挂「待办移交清单」，或口头移交，不直接动手。
@@ -89,7 +111,8 @@ git worktree add ..\LinkSpace-android -b feat/android-b master
 | 2026-10-30 | A | **触控板体验整改（用户实测反馈）**：①绝对映射改**相对移动**——本地虚拟光标按灵敏度累积、跨手势保持（修「移动慢」+「抬起再按跳点」），协议仍发绝对坐标桌面零改动；②灵敏度滑杆 0.5x-5x 持久化；③文本框 hint 标注需英文输入法（Vk 只映射 ASCII，中文 IME 上屏内容 vk=0 跳过）；④debug 构建新增 `am broadcast -a cn.linkspace.DEBUG_REQUEST_CONTROL` 走查驱动（ZUI 注入 ACTION_UP 不可靠点不了按钮）。**adb 全链路自测通过**：光标 700→1076→1424（相对连续）、轻点注入 left click、键盘 xyz 实际写进记事本 | 双方知晓 | 已完成 |
 | 2026-10-30 | A | **双屏映射 + 流畅度（用户实测反馈第二批）**：①指针只在一屏一半——根因是 mapPoint 目标用 Electron `getPrimaryDisplay().size`（DIP 逻辑分辨率）而 SendInput 归一化基准是虚拟屏**物理**像素（GetSystemMetrics 系），DPI 缩放 + 只映射主屏双重错位；修法：`inputLocalScreen` 改用 `win32.virtualScreen()` 物理 bounds，注入前补回负 origin 偏移，指针覆盖全部显示器（自测：光标到达虚拟屏左右边界 -4389/2878）；②指针卡顿——出站 socket 未禁 Nagle（高频小帧被攒包）+ 每帧一条消息开销；修法：`tcpNoDelay=true` + 触控板 move 攒批（16 条或 30ms 合并，一条消息一次 SendInput），up/轻点前 flush 保序。**投屏到平板（电脑画面流到平板触控）为全新大特性，需单独立项（桌面 DXGI 采集→编码→流传输→平板 MediaCodec 渲染→触控回传），不在 bugfix 轮实现** | B 会签（涉及被控端映射语义变化：session.accept 的 screen 现在是虚拟屏物理尺寸） | 已完成/待会签 |
 | 2026-10-30 | A | **屏幕投屏 MVP 实现（上条立项的落地）**：①桌面 `screen-stream.ts`——ffmpeg gdigrab 抓桌面（不传 offset/size：gdigrab 不支持负 offset，desktop 模式默认抓多显示器并集）+ libx264 ultrafast/zerolatency → 裸 H.264 Annex-B over TCP；②协议新增 `screen.stream.request/start/stop/error` 四消息（**[PROTOCOL]** 待 B 会签），投屏寄生在键鼠会话内（同 peer active 会话才受理，会话结束/断连/撤销自动杀流）；③平板 `StreamDecoder`——MediaCodec 硬解（跳过软解实现）直喂 64KB 块，输出实际分辨率回读供触控映射；④平板 UI：触控板加「投屏」按钮，流就绪整屏切投屏画面，手势 VNC 惯例（滑动=移动/轻点=单击/静置长按拖=左键拖拽/双指=滚轮） | B 会签（协议新增） | 桌面完成 |
-| 2026-10-30 | A | **投屏真机联测通过（三坑连修）**：①桌面 listen 被防火墙拦（ffmpeg 无放行规则，SYN 静默丢弃 10 秒超时）→ **连接方向反转**：平板起 ServerSocket 随机端口随 request 上行，桌面 ffmpeg 连出（conn.remoteAddress 此前从未赋值，补自 ws._socket）；②mDNS 解析地址错乱：先后拿到 169.254 链路本地与 **VMware VMnet8 的 192.168.101.1（与家里路由器撞号）**→ Discovery 解析加可路由性过滤（链路本地/CGNAT/.1 结尾排除）；③解码秒退：MediaCodec 输入缓冲是 direct buffer，ib.array() 抛无消息异常 → 临时数组+put；触控坐标空间修正为 session.start 声明屏（桌面 mapPoint 的 from）。**端到端验证**：投屏界面出现（6720×2160 硬解）、画面滑动驱动桌面光标精确移动。debug 广播新增 DEBUG_SCREEN_STREAM（ZUI 注入点不了按钮）。B 的读超时修复（621e9b5）已 rebase 合入回归 | B 会签（协议新增四消息） | 双端联测通过 |
+| 2026-10-30 | A | **投屏真机联测通过（三坑连修）**：①桌面 listen 被防火墙拦（ffmpeg 无放行规则，SYN 静默丢弃 10 秒超时）→ **连接方向反转**：平板起 ServerSocket 随机端口随 request 上行，桌面 ffmpeg 连出（conn.remoteAddress 此前从未赋值，补自 ws._socket）；②mDNS 解析地址错乱：先后拿到 169.254 链路本地与 **VMware VMnet8 的 192.168.101.1（与家里路由器撞号）**→ Discovery 解析加可路由性过滤（链路本地/CGNAT/.1 结尾排除）；③解码秒退：MediaCodec 输入缓冲是 direct buffer，ib.array() 抛无消息异常 → 临时数组+put；触控坐标空间修正为 session.start 声明屏（桌面 mapPoint 的 from）。**端到端验证**：投屏界面出现（6720×2160 硬解）、画面滑动驱动桌面光标精确移动。debug 广播新增 DEBUG_SCREEN_STREAM（ZUI 注入点不了按钮）。B 的读超时修复（621e9b5）已 rebase 合入回归 | B 会签（协议新增四消息） | 双端联测通过（后被绿屏问题推翻重改，见下条） |
+| 2026-10-30 | A | **投屏绿屏（用户截图满屏绿）三根因修复（9108929）**：①网络方向推翻上条方案——实测平板侧**所有 TCP 入站端口对桌面不通**（ICMP 通、TCP 全拒），ServerSocket 方案根本不成立；视频块改走 **WS 二进制帧复用平板主动连出的控制连接**（TCP 全双工，读循环按 opcode 分流），ffmpeg 改 pipe:1；②骁龙 6 系 AVC 硬解上限 1080p 级（6720 宽流仅顶部条带正常）→ 桌面 `scale=1920:-2`，解码 MAX 尺寸 8192 防 stride 错位；③x264 多 slice 流在 c2.qti 块级损坏 → `baseline + sliced-threads=0`。StreamDecoder 改 feed 模式（16 深队列满丢旧），渲染面前块缓冲在服务层。typecheck/单测/装配全绿，**真机画面验证未做**（A 会话转交接） | B | **待 B-1 验证闭环（首要）** |
 
 ## 7. 提交与合并流程
 
