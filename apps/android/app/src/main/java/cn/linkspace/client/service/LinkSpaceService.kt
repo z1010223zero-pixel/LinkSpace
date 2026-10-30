@@ -704,15 +704,34 @@ class LinkSpaceService private constructor(private val appContext: Context) {
     private val _inputMessage = MutableStateFlow("")
     val inputMessage: StateFlow<String> = _inputMessage
 
+    /**
+     * 出站控制连接的串行写执行器。键鼠事件从 Compose 触摸处理器（主线程）
+     * 进来，直接写 TLS socket 会 NetworkOnMainThreadException 崩掉整个
+     * 应用（T7 走查实录，崩溃栈直达 ClientConnection.sendText）；单线程
+     * 顺带保住 down/up 事件的提交顺序——TLS 层的 synchronized(out) 只保
+     * 帧原子不保跨消息顺序。与 WebSocketConnection.send 的 submitWrite
+     * 同一设计。daemon 线程常驻不随服务关闭（空转无消耗，shutdown 会让
+     * 用户退出后再进时提交被拒）。
+     */
+    private val outboundWriter =
+        java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+            Thread(r, "linkspace-outbound-write").apply { isDaemon = true }
+        }
+
     val input: InputController by lazy {
         InputController(
             send = { peerId, type, payloadFn ->
                 // 出站连接（本端主动连出的控制通道）优先：桌面端只把消息
                 // 投递给自己 accept 进来的连接，主动发起控制时只有这条
-                // 出站链路能把 session.start/事件送进桌面端
+                // 出站链路能把 session.start/事件送进桌面端。
+                // 提交到写线程执行，禁止在调用线程（可能是 UI 线程）直接写
                 val out = outbound
                 if (out != null && out.peerId == peerId) {
-                    client.sendText(out.conn, envelope(type, peerId, payloadFn).toString())
+                    val text = envelope(type, peerId, payloadFn).toString()
+                    val conn = out.conn
+                    outboundWriter.execute {
+                        runCatching { client.sendText(conn, text) }
+                    }
                 } else {
                     server?.sendControlTo(peerId, envelope(type, peerId, payloadFn))
                 }
