@@ -26,6 +26,8 @@ interface Node {
   id: string
   dir: string
   port: number
+  /** 本机证书指纹：攻击用例要冒用它构造自报身份 */
+  fingerprint: string
   trust: TrustStore
   control: ControlNode
   pairing: PairingCoordinator
@@ -64,6 +66,7 @@ async function makeNode(id: string, displayName: string, codeTtlMs?: number): Pr
     id,
     dir,
     port,
+    fingerprint,
     trust,
     control,
     pairing,
@@ -209,6 +212,49 @@ async function main(): Promise<void> {
     check('超时未建立信任', !D.trust.isKnown(E.id) && !E.trust.isKnown(D.id))
     await D.close()
     await E.close()
+
+    // ---------- 7. 无证书连接冒充已信任设备（审查 2.1 P0 的回归钉） ----------
+    // 服务端 requestCert 只索取不强制，攻击者可不出示证书完成 TLS 握手；
+    // 修复前 announce 自报「受害者 deviceId + 受害者指纹」即可通过已知
+    // 设备闸（presented 回退到自报值），随后顶掉真连接、收走剪贴板广播。
+    console.log('\n7. 无证书连接冒充已信任设备')
+    const F = await makeNode('dev_F_666666666666', 'Foxtrot')
+    const G = await makeNode('dev_G_777777777777', 'Golf')
+    // 手动建立 G→F 信任，聚焦身份闸本身（不重走配对 UI 流程）
+    G.trust.grant({ deviceId: F.id, displayName: 'Foxtrot', deviceType: 'win', fingerprint: F.fingerprint, scope: ['file', 'clipboard'] })
+    check('G 已信任 F（前提构造）', G.trust.isKnown(F.id))
+
+    const { default: RawWs } = await import('ws')
+    const attackResult = await new Promise<{ code: number; reason: string }>((resolve) => {
+      const ws = new RawWs(`wss://127.0.0.1:${G.port}/linkspace/v1/control`, {
+        rejectUnauthorized: false
+        // 关键：不带 cert/key —— 模拟不出示客户端证书的攻击者
+      })
+      const finish = (code: number, reason: string): void => resolve({ code, reason })
+      ws.on('open', () => {
+        ws.send(JSON.stringify({
+          v: 1,
+          type: 'device.announce',
+          id: 'attack-probe-1',
+          from: F.id, // 冒充受害者 deviceId
+          to: '',
+          ts: Date.now(),
+          payload: {
+            displayName: 'Foxtrot',
+            deviceType: 'win',
+            caps: ['file', 'clipboard'],
+            fingerprint: F.fingerprint // 自报受害者的真实指纹（可公开采集）
+          }
+        }))
+      })
+      ws.on('close', (code: number, reason: Buffer) => finish(code, reason.toString()))
+      ws.on('error', () => finish(-1, 'ws error'))
+      setTimeout(() => finish(-1, 'timeout-未断开'), 8000)
+    })
+    check('无证书冒充已信任设备被断开（4006）', attackResult.code === 4006, `code=${attackResult.code} reason=${attackResult.reason}`)
+    check('G 信任清单未被污染', G.trust.fingerprintOf(F.id) === F.fingerprint)
+    await F.close()
+    await G.close()
   } finally {
     await A.close()
     await B.close()

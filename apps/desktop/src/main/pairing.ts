@@ -386,26 +386,33 @@ export class PairingCoordinator {
       return
     }
 
-    // 已信任的设备重新连入：与信任清单比对。此时以 TLS 证书为准
-    // （可取得时），证书拿不到才退回对方自称的指纹——那已是最后的防线。
-    // 不符说明身份被替换或中间人，必须断开而不是留在连接表里：
-    // 留下的连接会以被冒用设备的 ID 占据 peers 表，后续 offer 会发给冒用者。
+    // 已信任的设备重新连入：与信任清单比对。已信任身份意味着剪贴板
+    // 广播、挂起任务补发等授权都会对着这条连接敞开，因此**必须出示
+    // TLS 证书**且指纹与库存一致——无证书一律断开（审查 2.1 P0）。
+    // 此前 `presented = actualFp ?? claimedFp` 的自报回退让攻击者只要
+    // 自报受害者的指纹即可冒充已配对设备。自报回退仅对未知设备保留：
+    // 未知连接拿不到任何授权（各处 hasScope 闸），风险止于显示层。
     const known = this.trust.fingerprintOf(peerId)
     if (known) {
-      const presented = actualFp ?? claimedFp
-      if (!presented || presented !== normalizeFingerprint(known)) {
+      if (!actualFp) {
+        log.warn(`对端 ${peerId} 未出示 TLS 证书却声称已信任身份，断开连接（疑似冒充）`)
+        conn.send('pair.error', { code: 'NOT_TRUSTED', message: '已信任设备必须出示证书，请撤销后重新配对' })
+        conn.close(4006, 'certificate required')
+        return
+      }
+      if (actualFp !== normalizeFingerprint(known)) {
         log.warn(`对端 ${peerId} 指纹与信任清单不符，可能被替换或存在中间人，断开连接`)
         conn.send('pair.error', { code: 'NOT_TRUSTED', message: '设备指纹与已存记录不符，请撤销后重新配对' })
         conn.close(4006, 'fingerprint mismatch')
         return
       }
-      log.info(`对端 ${peerId} 已在信任清单中`)
+      log.info(`对端 ${peerId} 已在信任清单中（证书指纹核验通过）`)
       this.peers.set(conn, {
         deviceId: peerId,
         displayName: p.displayName,
         deviceType: p.deviceType,
         caps: p.caps,
-        fingerprint: presented
+        fingerprint: actualFp
       })
       conn.peerId = peerId
       this.uiPaired?.forEach((cb) => cb(this.trust.list().find((e) => e.deviceId === peerId)!))

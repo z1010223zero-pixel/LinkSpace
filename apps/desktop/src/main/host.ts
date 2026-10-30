@@ -303,6 +303,16 @@ export class Host {
       })
       .onRevoked((deviceId) => {
         this.peers.delete(deviceId)
+        // 撤销必须级联（审查 2.2 P1）：不清任务的话，被撤销方持原证书
+        // 重连即可收到挂起任务的 offer 并完成 accept/token 交换。
+        // 先删 peers 再取消：cancelRequested 的通知就找不到连接，不会
+        // 把「我撤销了你」这件事再发给被撤销方。
+        this.endpoints.delete(deviceId)
+        for (const task of this.transfers.list()) {
+          if (task.peerId !== deviceId) continue
+          if (task.state === 'completed' || task.state === 'failed' || task.state === 'cancelled') continue
+          void this.transfers.cancel(task.id).catch(() => {})
+        }
         this.emit('revoked', deviceId)
       })
   }
@@ -435,6 +445,11 @@ export class Host {
    */
   private flushWaitingOffers(conn: Connection): void {
     const peerId = conn.peerId
+    // 补发前复查信任与授权（审查 2.2 P1）：announce 只锚定了「这条连接
+    // 的证书确实是它声称的那把」，不保证此刻它仍在信任清单——已撤销
+    // 设备持原证书重连能过身份闸，若不在此拦截，挂起任务的 offer
+    // （文件名/大小元数据）会继续流向被撤销方。
+    if (!this.trust.isKnown(peerId) || !this.trust.hasScope(peerId, 'file')) return
     for (const task of this.transfers.list()) {
       if (task.direction !== 'send' || task.state !== 'waiting' || task.peerId !== peerId) continue
       conn.send('transfer.offer', {
@@ -537,6 +552,13 @@ export class Host {
       const p = msg.payload as { transferId?: string; token?: string }
       if (!p.transferId) return
       const transferId = p.transferId
+      // 授权复查前置（审查 2.2 P1）：accept 携带数据面 token，未授权
+      // 连接（已撤销/从未配对）不该能把它挂到任何任务上；通过后才
+      // 允许注册进 peers 表。
+      if (!conn.peerId || !this.trust.hasScope(conn.peerId, 'file')) {
+        log.warn(`拒绝未授权连接对任务 ${transferId} 的 transfer.accept`)
+        return
+      }
       this.peers.set(conn.peerId, conn)
       const task = this.transfers.get(transferId)
       // 只有本任务的对端才能交还 token，其他连接的 accept 一律无视
