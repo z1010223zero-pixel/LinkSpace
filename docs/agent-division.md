@@ -84,6 +84,8 @@ git worktree add ..\LinkSpace-android -b feat/android-b master
 | 2026-10-30 | A | **T7 真实手指触控走查（自动化部分）完成**：用户开启「USB 调试（安全设置）」后，A 用 `input swipe/tap` 驱动触控板——配对（读屏码）→ session 建立 → **真实 MotionEvent move 流 16 条落桌面**（触控板占比映射 3200×2000→1920×1080）→ stop+releaseAll 双端干净。剩跟手感/双指滚动为用户亲手项。**注意：ZUI 下 adb 注入的 ACTION_UP 不可靠**（Button onClick 也不触发），依赖 up 的判定必须真手验证 | 双方知晓 | 自动化部分完成 |
 | 2026-10-30 | A | **Bug1：触控板轻点单击失灵（死代码）**——`MainActivity.kt` TouchpadScreen 的 pointerInput 里 `changedToUp()` 检查在 `changes.filter{it.pressed}` 之后的 `pressed.size==1` 分支内，但手指抬起后该 change pressed=false 被 filter 掉、事件落入 else 分支，**单指轻点的 click 分支永远不可达**。B 的 T1-T6 走查用 DEBUG_SEND_EVENTS 广播绕过了 UI 所以未暴露。修法：在 filter 前先取 `event.changes.firstOrNull{it.changedToUp()}` 单独判定 click | B | 待修 |
 | 2026-10-30 | A | **Bug2：InputController.pending 无过期清理**——`PendingRequest.expiresAt` 从未被检查（request 入口只看 `pending != null`），UI 宣称「30 秒未确认自动失效」实际永不失效；一次未达的请求把 pending 永久占死，后续 request 全部被静默拒绝（本次走查实测复现）。修法：request 入口检查 `expiresAt`，过期先清再放行 | B | 待修 |
+| 2026-10-30 | A | **Bug3：控制请求缺建连步骤（用户 T7 走查被阻塞）**——平板点「控制电脑」时若与桌面无已登记的控制连接，`sendControlTo` 按 `controlPeerIds[conn]` 匹配不到任何连接，session.start **静默丢弃**（电脑无授权提示、平板永久等待）。真机实测：netstat 零连接 + 电脑无弹窗。走查没暴露是因为无头 Host 反向连了平板（平板作为 server 有入站连接）；真实场景平板需**主动连桌面**（sendFiles 有建连逻辑但发送完即关连接，控制会话无处复用）。修法要点：request 前确保连接（复用 connectControl+announce 握手），且主动连出的 conn 必须注册进 controlConns/controlPeerIds 才能被 sendControlTo 命中 | B | 待修 |
+| 2026-10-30 | A | **Bug4：pending 态点「取消」无反应**——等待对话框取消按钮调 `InputController.stop()`，其中 `pending = null` 后 `val a = active ?: return` 提前返回，**不触发 onSessionEnded**，`_inputState` 停在 "waiting"，对话框永远关不掉（用户实测复现）。修法：stop() 里 pending 被清且 active 为空时也要 `listener?.onSessionEnded("已取消")` | B | 待修 |
 
 ## 7. 提交与合并流程
 
