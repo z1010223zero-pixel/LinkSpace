@@ -67,6 +67,10 @@ const host = new Host({
   inputLocalScreen,
   inputInject: inputSink
     ? (events) => {
+        // 走查诊断：键盘注入链路取证（含 key 的批次低频，move 不打）
+        if (events.some((ev) => ev.t === 'key')) {
+          console.log('[inject-key]', JSON.stringify(events))
+        }
         // mapPoint 产出的是「虚拟屏相对坐标」（0..w-1）；注入归一化
         // 需要虚拟屏绝对坐标（可为负），这里补回 origin 偏移
         const vs = win32!.virtualScreen()

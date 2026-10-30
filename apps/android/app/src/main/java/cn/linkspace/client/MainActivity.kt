@@ -664,6 +664,10 @@ fun TouchpadScreen(service: LinkSpaceService) {
     var sensitivity by remember {
         mutableStateOf(prefs.getFloat("touchpadSensitivity", 2.0f))
     }
+    // 自绘键盘面板（可选展开）：系统 IME 的 composition 不可控
+    var keyboardOpen by remember { mutableStateOf(false) }
+    var shiftSticky by remember { mutableStateOf(false) }
+    var numericLayer by remember { mutableStateOf(false) }
 
     fun send(events: List<org.json.JSONObject>) {
         // 每条消息上限 64 条（协议 4.6），分段发送
@@ -720,6 +724,13 @@ fun TouchpadScreen(service: LinkSpaceService) {
             FilledTonalButton(onClick = { send(InputController.tap(0x27)) }) { Text("→") }
             Spacer(Modifier.weight(1f))
             FilledTonalButton(
+                onClick = { keyboardOpen = !keyboardOpen },
+                colors = ButtonDefaults.filledTonalButtonColors(
+                    containerColor = if (keyboardOpen) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.secondaryContainer
+                )
+            ) { Text("键盘") }
+            FilledTonalButton(
                 onClick = { ctrlSticky = !ctrlSticky },
                 colors = ButtonDefaults.filledTonalButtonColors(
                     containerColor = if (ctrlSticky) MaterialTheme.colorScheme.primary
@@ -733,6 +744,50 @@ fun TouchpadScreen(service: LinkSpaceService) {
                     else MaterialTheme.colorScheme.secondaryContainer
                 )
             ) { Text("Alt") }
+        }
+
+        // ---------- 自绘键盘（可选展开）----------
+        // 为什么不用上方文本框吃所有输入：系统输入法（豆包/搜狗）的
+        // composition 在 String 重载的文本框上行为不可控——拼音逐字母
+        // 下发到电脑、选字后整段退格重输还发不出中文；自绘键盘点击
+        // 直接发键码，零 IME 依赖。文本框保留给英文 IME 用户
+        if (keyboardOpen) {
+            val rows = if (numericLayer) {
+                listOf("1234567890", "@/#$&_+-()/", "*'\":;!?=")
+            } else {
+                listOf("qwertyuiop", "asdfghjkl", "zxcvbnm,.")
+            }
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.padding(vertical = 4.dp)) {
+                rows.forEachIndexed { ri, row ->
+                    Row(horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                        when {
+                            ri == 0 -> KeyCap(if (numericLayer) "ABC" else "123", Modifier.weight(1.2f), numericLayer) {
+                                numericLayer = !numericLayer
+                            }
+                            ri == 1 -> KeyCap("⇧", Modifier.weight(1.2f), shiftSticky) { shiftSticky = !shiftSticky }
+                            ri == 2 -> Spacer(Modifier.weight(1f))
+                        }
+                        row.forEach { ch ->
+                            KeyCap(ch.uppercaseChar().toString(), Modifier.weight(1f)) {
+                                val c = if (shiftSticky && ch in 'a'..'z') ch.uppercaseChar() else ch
+                                send(typeChar(c))
+                                // 单字符即释放粘滞键（与文本框路径同一语义）
+                                shiftSticky = false
+                                ctrlSticky = false
+                                altSticky = false
+                            }
+                        }
+                        when (ri) {
+                            1 -> KeyCap("⌫", Modifier.weight(1.2f)) { send(listOf(InputController.key(0x08, true), InputController.key(0x08, false))) }
+                            2 -> Spacer(Modifier.weight(1f))
+                        }
+                    }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                    KeyCap("空格", Modifier.weight(5f)) { send(typeChar(' ')) }
+                    KeyCap("↵", Modifier.weight(1.5f)) { send(InputController.tap(0x0D)) }
+                }
+            }
         }
 
         // ---------- 文本输入（美式布局映射；中文等 IME 内容跳过） ----------
@@ -899,6 +954,34 @@ fun TouchpadScreen(service: LinkSpaceService) {
 
 /** 协议常量的本文件别名，避免与 Compose 命名冲突 */
 private const val PROTO_MAX_EVENTS = 64
+
+/** 自绘键盘的键帽。modifier 由调用点带 RowScope.weight 决定行内宽度，active 为粘滞键高亮 */
+@Composable
+private fun KeyCap(
+    label: String,
+    modifier: Modifier = Modifier,
+    active: Boolean = false,
+    onClick: () -> Unit
+) {
+    FilledTonalButton(
+        onClick = onClick,
+        modifier = modifier.height(40.dp),
+        colors = if (active) {
+            ButtonDefaults.filledTonalButtonColors(containerColor = MaterialTheme.colorScheme.primary)
+        } else {
+            ButtonDefaults.filledTonalButtonColors()
+        },
+        contentPadding = PaddingValues(horizontal = 2.dp, vertical = 1.dp)
+    ) {
+        Text(
+            label,
+            fontSize = 12.sp,
+            maxLines = 1,
+            modifier = Modifier.fillMaxWidth(),
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center
+        )
+    }
+}
 
 /**
  * 文本框内容差分 → 键盘事件。
