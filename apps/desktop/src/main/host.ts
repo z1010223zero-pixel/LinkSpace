@@ -28,6 +28,7 @@ import {
 } from './input/session'
 import type { InputEvent, ScreenSize } from './input/protocol'
 import { InputLayoutStore } from './input/layout'
+import { ScreenStreamService } from './screen-stream'
 import { log } from './log'
 
 export interface HostOptions {
@@ -66,6 +67,13 @@ export interface HostOptions {
    * 无头测试注入短周期，把「超时清理」路径钉进秒级回归（审查 P2-4）
    */
   heartbeat?: { intervalMs?: number; timeoutMs?: number }
+  /**
+   * ffmpeg 可执行路径（屏幕投屏推流用）。留空视为本机不支持投屏，
+   * 平板的 screen.stream.request 会收到 error 回告
+   */
+  screenFfmpegPath?: string
+  /** 虚拟屏 bounds（投屏采集范围，物理像素）。与注入 normalizeAbsolute 同基准 */
+  inputVirtualScreen?: () => { x: number; y: number; w: number; h: number }
 }
 
 export interface HostEvents {
@@ -126,6 +134,8 @@ export class Host {
   /** 键鼠共享：被控端状态机 + 控制端状态机（阶段 3） */
   private inputCoordinator: InputSessionCoordinator | null = null
   private inputController: InputController | null = null
+  /** 屏幕投屏推流（寄生在键鼠会话内，见 screen-stream.ts） */
+  private readonly screenStream = new ScreenStreamService()
   private readonly inputLayout: InputLayoutStore
   private listeners: { [K in keyof HostEvents]?: Listener<K>[] } = {}
   /** 已连接的对端：deviceId → Connection */
@@ -839,7 +849,12 @@ export class Host {
         releaseAll: () => this.opts.inputReleaseAll?.(),
         send: sendTo,
         log: (msg) => log.info(msg),
-        onChanged: () => this.emit('inputChanged'),
+        onChanged: () => {
+          // 会话结束（active 变 null 的过渡）时投流随之终止：画面是
+          // 会话授权的一部分，没有会话就没有画面
+          if (!this.inputCoordinator?.activeSession) this.screenStream.stop()
+          this.emit('inputChanged')
+        },
         onRequest: (req) => this.emit('inputRequested', req)
       }
     })
@@ -884,6 +899,39 @@ export class Host {
       if (!conn.peerId) return
       this.inputCoordinator!.onEvent(conn.peerId, msg.payload)
     })
+
+    // ---------- 屏幕投屏（寄生在键鼠会话内，见 screen-stream.ts） ----------
+    control.on('screen.stream.request', (conn, _msg) => {
+      const peerId = conn.peerId
+      if (!peerId) return
+      const active = this.inputCoordinator?.activeSession
+      if (!active || active.peerId !== peerId) {
+        sendTo(peerId, 'screen.stream.error', { message: '投屏需要先建立键鼠会话' })
+        return
+      }
+      if (!this.opts.screenFfmpegPath || !this.opts.inputVirtualScreen) {
+        sendTo(peerId, 'screen.stream.error', { message: '本机缺少 ffmpeg，无法投屏' })
+        return
+      }
+      this.screenStream
+        .start(this.opts.screenFfmpegPath, this.opts.inputVirtualScreen())
+        .then((info) => sendTo(peerId, 'screen.stream.start', { port: info.port, w: info.w, h: info.h }))
+        .catch((err) => {
+          const tail = this.screenStream.lastErrors().join(' | ')
+          log.warn(`[screen-stream] 启动失败: ${String(err)} ${tail}`)
+          sendTo(peerId, 'screen.stream.error', { message: `投屏启动失败：${String(err)}` })
+        })
+    })
+    control.on('screen.stream.stop', (conn, _msg) => {
+      if (!conn.peerId) return
+      this.screenStream.stop()
+      sendTo(conn.peerId, 'screen.stream.stop', {})
+    })
+    // ffmpeg 意外退出（平板断开/编码器崩溃）：通知对端清 UI
+    this.screenStream.onEnded = () => {
+      const peer = this.inputCoordinator?.activeSession?.peerId
+      if (peer) sendTo(peer, 'screen.stream.stop', {})
+    }
 
     // 断连清理收口在 handleConnClosed（startControl 注册，带幸存者
     // 检查）。这里曾再注册一份 onClosed 推 onPeerDisconnected——双连接

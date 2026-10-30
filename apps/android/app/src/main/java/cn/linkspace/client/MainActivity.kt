@@ -9,6 +9,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -30,6 +31,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import cn.linkspace.client.service.ClipboardSync
@@ -37,6 +39,7 @@ import cn.linkspace.client.service.DiscoveredService
 import cn.linkspace.client.service.InputController
 import cn.linkspace.client.service.LinkSpaceService
 import cn.linkspace.client.service.OutgoingFile
+import cn.linkspace.client.service.StreamDecoder
 import cn.linkspace.client.service.TransferTask
 import kotlinx.coroutines.launch
 
@@ -209,9 +212,15 @@ fun MainScreen(service: LinkSpaceService, onClipboardToggle: (Boolean) -> Unit) 
         }
     }
 
-    // 控制会话激活时整屏切到触控板
+    // 控制会话激活时整屏切到触控板；投屏流就绪再切到投屏画面
+    val screenStreamInfo by service.screenStream.collectAsStateWithLifecycle()
     if (inputState.phase == "active") {
-        TouchpadScreen(service)
+        val ss = screenStreamInfo
+        if (ss != null) {
+            ScreenMirrorScreen(service, ss)
+        } else {
+            TouchpadScreen(service)
+        }
         return
     }
 
@@ -708,6 +717,9 @@ fun TouchpadScreen(service: LinkSpaceService) {
                 }
                 controller.stop()
             }) { Text("结束控制") }
+            // 屏幕投屏：桌面画面流到本机全屏显示，触点按画面比例直接
+            // 映射成绝对坐标事件（寄生在当前键鼠会话内）
+            OutlinedButton(onClick = { service.requestScreenStream() }) { Text("投屏") }
         }
 
         // ---------- 特殊按键行 ----------
@@ -954,6 +966,164 @@ fun TouchpadScreen(service: LinkSpaceService) {
 
 /** 协议常量的本文件别名，避免与 Compose 命名冲突 */
 private const val PROTO_MAX_EVENTS = 64
+
+/**
+ * 投屏画面：桌面虚拟屏的视频流全屏渲染，触摸按画面比例映射为绝对
+ * 坐标事件回传（与键鼠注入同一基准，无需额外换算）。
+ *
+ * 手势语义（VNC 惯例）：
+ *   - 单指滑动 = 移动光标（绝对坐标，无按键）
+ *   - 轻点（<250ms 无位移）= 左键单击
+ *   - 静置 300ms 后拖动 = 按住左键拖拽（抬起释放）
+ *   - 双指滑动 = 滚轮
+ */
+@Composable
+fun ScreenMirrorScreen(service: LinkSpaceService, info: LinkSpaceService.ScreenStreamInfo) {
+    val controller = service.input
+    var endedNotice by remember { mutableStateOf("") }
+    val decoderRef = remember { java.util.concurrent.atomic.AtomicReference<StreamDecoder?>(null) }
+    val scrollAccum = remember { floatArrayOf(0f) }
+
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(Color.Black)
+    ) {
+        AndroidView(
+            factory = { ctx ->
+                android.view.SurfaceView(ctx).apply {
+                    holder.addCallback(object : android.view.SurfaceHolder.Callback {
+                        override fun surfaceCreated(holder: android.view.SurfaceHolder) {
+                            if (decoderRef.get() != null) return
+                            try {
+                                val sock = java.net.Socket(info.host, info.port)
+                                sock.tcpNoDelay = true
+                                val d = StreamDecoder(sock, holder.surface) { reason ->
+                                    endedNotice = reason
+                                }
+                                decoderRef.set(d)
+                                d.start()
+                            } catch (e: Exception) {
+                                endedNotice = e.message ?: "无法连接推流端口"
+                            }
+                        }
+
+                        override fun surfaceChanged(holder: android.view.SurfaceHolder, format: Int, width: Int, height: Int) {}
+
+                        override fun surfaceDestroyed(holder: android.view.SurfaceHolder) {
+                            decoderRef.getAndSet(null)?.shutdown()
+                        }
+                    })
+                }
+            },
+            modifier = Modifier.fillMaxSize()
+        )
+        // 触控层盖在画面上（SurfaceView 不消费触摸，事件到 Compose）
+        Box(
+            Modifier
+                .fillMaxSize()
+                .pointerInput(info) {
+                    awaitPointerEventScope {
+                        var downAt = 0L
+                        var moved = false
+                        var dragArmed = false
+                        // 触控映射基准 = 解码输出的实际画面尺寸（gdigrab
+                        // 输出与桌面虚拟屏可能差一个 DPI 虚拟化因子），
+                        // 流头未解出前回退到 start 消息携带的 w/h
+                        fun vw() = decoderRef.get()?.outWidth?.takeIf { it > 0 } ?: info.w
+                        fun vh() = decoderRef.get()?.outHeight?.takeIf { it > 0 } ?: info.h
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            val pressed = event.changes.filter { it.pressed }
+                            if (pressed.size >= 2) {
+                                var dy = 0f
+                                pressed.forEach { dy += it.positionChange().y }
+                                scrollAccum[0] += dy / pressed.size
+                                while (kotlin.math.abs(scrollAccum[0]) >= 48f) {
+                                    val tick = if (scrollAccum[0] > 0) -1 else 1
+                                    sendRemote(
+                                        controller,
+                                        listOf(InputController.wheel(0, tick))
+                                    )
+                                    scrollAccum[0] -= tick * 48f
+                                }
+                                event.changes.forEach {
+                                    if (it.positionChange() != androidx.compose.ui.geometry.Offset.Zero) it.consume()
+                                }
+                            } else if (pressed.size == 1) {
+                                val c = pressed.first()
+                                if (c.changedToDown()) {
+                                    downAt = System.currentTimeMillis()
+                                    moved = false
+                                    dragArmed = false
+                                }
+                                val delta = c.positionChange()
+                                if (delta != androidx.compose.ui.geometry.Offset.Zero) {
+                                    moved = moved || kotlin.math.abs(delta.x) > 2f || kotlin.math.abs(delta.y) > 2f
+                                    // 静置长按后进入拖拽：一次 down(left)，此后 move 都带按键
+                                    if (!dragArmed && !moved && System.currentTimeMillis() - downAt > 300) {
+                                        dragArmed = true
+                                        sendRemote(controller, listOf(InputController.down("left")))
+                                    }
+                                    sendRemote(
+                                        controller,
+                                        listOf(
+                                            InputController.move(
+                                                (c.position.x / size.width.toFloat() * vw()).toInt().coerceIn(0, vw() - 1),
+                                                (c.position.y / size.height.toFloat() * vh()).toInt().coerceIn(0, vh() - 1)
+                                            )
+                                        )
+                                    )
+                                    c.consume()
+                                }
+                            } else {
+                                val up = event.changes.firstOrNull { it.changedToUp() }
+                                if (up != null) {
+                                    if (dragArmed) {
+                                        sendRemote(controller, listOf(InputController.up("left")))
+                                    } else if (System.currentTimeMillis() - downAt < 250 && !moved) {
+                                        sendRemote(
+                                            controller,
+                                            listOf(InputController.down("left"), InputController.up("left"))
+                                        )
+                                    }
+                                }
+                                scrollAccum[0] = 0f
+                            }
+                        }
+                    }
+                }
+        )
+        // 顶栏：状态 + 退出
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .background(Color.Black.copy(alpha = 0.45f))
+                .padding(horizontal = 12.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("投屏中 · ${info.w}x${info.h}", color = Color.White, fontSize = 13.sp)
+            Spacer(Modifier.weight(1f))
+            Button(onClick = { service.stopScreenStream() }) { Text("退出投屏") }
+        }
+        if (endedNotice.isNotEmpty()) {
+            Text(
+                endedNotice,
+                color = Color.White,
+                fontSize = 13.sp,
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .background(Color.Black.copy(alpha = 0.6f))
+                    .padding(10.dp)
+            )
+        }
+    }
+}
+
+/** 投屏触控回传：批量分段的发送封装与 TouchpadScreen.send 同构 */
+private fun sendRemote(controller: InputController, events: List<org.json.JSONObject>) {
+    events.chunked(PROTO_MAX_EVENTS).forEach { controller.sendEvents(it) }
+}
 
 /** 自绘键盘的键帽。modifier 由调用点带 RowScope.weight 决定行内宽度，active 为粘滞键高亮 */
 @Composable

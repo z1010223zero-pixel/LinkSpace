@@ -46,6 +46,16 @@ object Protocol {
     const val TYPE_SESSION_STOP = "session.stop"
     const val TYPE_INPUT_EVENT = "input.event"
 
+    /**
+     * 屏幕投屏（寄生在键鼠会话内，[PROTOCOL] 新增）：
+     * request 由平板发（需同 peer 的 active 会话）；start/stop/error 由
+     * 桌面回。start 携带推流 TCP 端口与虚拟屏物理尺寸（触控映射基准）。
+     */
+    const val TYPE_SCREEN_STREAM_REQUEST = "screen.stream.request"
+    const val TYPE_SCREEN_STREAM_START = "screen.stream.start"
+    const val TYPE_SCREEN_STREAM_STOP = "screen.stream.stop"
+    const val TYPE_SCREEN_STREAM_ERROR = "screen.stream.error"
+
     /** sessionId 约束，与桌面端 SESSION_ID_RE 一致 */
     const val SESSION_ID_RE = "[A-Za-z0-9_-]{1,64}"
 

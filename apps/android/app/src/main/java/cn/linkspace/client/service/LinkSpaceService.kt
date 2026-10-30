@@ -746,6 +746,8 @@ class LinkSpaceService private constructor(private val appContext: Context) {
 
                 override fun onSessionEnded(reason: String) {
                     _inputMessage.value = reason
+                    // 会话结束投屏随终（桌面端同步杀流，这里清 UI 状态）
+                    _screenStream.value = null
                     _inputState.value = InputState()
                 }
 
@@ -867,6 +869,20 @@ class LinkSpaceService private constructor(private val appContext: Context) {
                     Protocol.TYPE_SESSION_ACCEPT -> input.onAccepted(from, payload)
                     Protocol.TYPE_SESSION_REJECT -> input.onRejected(from, payload)
                     Protocol.TYPE_SESSION_STOP -> input.onStopped(from, payload)
+                    // ---------- 屏幕投屏 ----------
+                    Protocol.TYPE_SCREEN_STREAM_START -> {
+                        _screenStream.value = ScreenStreamInfo(
+                            host = outbound?.conn?.host ?: "",
+                            port = payload.optInt("port", 0),
+                            w = payload.optInt("w", 0),
+                            h = payload.optInt("h", 0)
+                        )
+                    }
+                    Protocol.TYPE_SCREEN_STREAM_STOP -> _screenStream.value = null
+                    Protocol.TYPE_SCREEN_STREAM_ERROR -> {
+                        _screenStream.value = null
+                        _inputMessage.value = payload.optString("message", "投屏失败")
+                    }
                     // announce/heartbeat 等其余类型与本连接无关，静默忽略
                 }
             }
@@ -903,10 +919,43 @@ class LinkSpaceService private constructor(private val appContext: Context) {
     private fun closeOutbound() {
         val out = outbound
         outbound = null
+        _screenStream.value = null
         if (out != null) {
             out.jobs.cancel()
             runCatching { client.close(out.conn) }
         }
+    }
+
+    // ---------- 屏幕投屏（寄生在键鼠会话内，[PROTOCOL] screen.stream.*） ----------
+
+    /** 进行中的投屏流信息。null = 无投屏。host 为桌面地址（出站连接对端） */
+    data class ScreenStreamInfo(val host: String, val port: Int, val w: Int, val h: Int)
+
+    private val _screenStream = MutableStateFlow<ScreenStreamInfo?>(null)
+    val screenStream: StateFlow<ScreenStreamInfo?> = _screenStream
+
+    /**
+     * 请求桌面开启投屏。必须已有 active 键鼠会话（投屏的画面可见性
+     * 是会话授权的一部分，桌面端会校验会话归属）；结果经 screenStream
+     * 状态流到达（start）或 inputMessage 提示（error）。
+     */
+    fun requestScreenStream() {
+        val out = outbound ?: run {
+            _inputMessage.value = "没有到桌面的控制连接"
+            return
+        }
+        val text = envelope(Protocol.TYPE_SCREEN_STREAM_REQUEST, out.peerId) {}.toString()
+        outboundWriter.execute { runCatching { client.sendText(out.conn, text) } }
+    }
+
+    /** 平板侧主动停止投屏。桌面停流后会回 stop 确认 */
+    fun stopScreenStream() {
+        val out = outbound
+        if (out != null) {
+            val text = envelope(Protocol.TYPE_SCREEN_STREAM_STOP, out.peerId) {}.toString()
+            outboundWriter.execute { runCatching { client.sendText(out.conn, text) } }
+        }
+        _screenStream.value = null
     }
 
     /**

@@ -1,4 +1,5 @@
 import { app, BrowserWindow, clipboard, globalShortcut, Menu, screen, shell } from 'electron'
+import { spawnSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { DeviceManager } from './device-manager'
@@ -58,6 +59,19 @@ const inputLocalScreen = win32
       return { w: vs.w, h: vs.h }
     }
   : undefined
+
+// ffmpeg 探测（屏幕投屏推流用）：PATH 命中即可用，找不到则投屏能力
+// 关闭，平板的 screen.stream.request 会收到「缺少 ffmpeg」回告
+function locateFfmpeg(): string | undefined {
+  try {
+    const r = spawnSync('ffmpeg', ['-version'], { timeout: 5000 })
+    if (r.status === 0) return 'ffmpeg'
+  } catch {
+    /* PATH 里没有 */
+  }
+  return undefined
+}
+
 const host = new Host({
   displayName: 'LinkSpace Desktop',
   deviceType: 'win',
@@ -65,6 +79,8 @@ const host = new Host({
   // scrcpy 投屏走 adb 不走局域网控制通道，但保持声明一致
   caps: ['file', 'clipboard', 'scrcpy', 'input'],
   inputLocalScreen,
+  screenFfmpegPath: locateFfmpeg(),
+  inputVirtualScreen: win32 ? () => win32.virtualScreen() : undefined,
   inputInject: inputSink
     ? (events) => {
         // 走查诊断：键盘注入链路取证（含 key 的批次低频，move 不打）
