@@ -124,6 +124,8 @@ git worktree add ..\LinkSpace-android -b feat/android-b master
 | 2026-10-31 | B | **B-1 投屏真机验证完成（绿屏修复确认）**：全链路控制会话 → WS 二进制流 → c2.qti 硬解 → FORMAT_CHANGED 1920x1200（桌面 2880x1800 等比）→ 渲染内容干净无绿色伪影。过程中抓到并修掉 **9108929 喂入模型重构的缺口**（视频块只进缓冲、无持续 feed 路径，解码线程饿死——a5bf900/c30ed96）、推流 socket 无读超时（621e9b5）、桌面 mDNS 无周期重通告（e64362e）、平板 STALE_MS 与 NSD 再上报节奏错配（300s）。剩余：真实桌面内容的目视确认与触控手感（user-ops §7，PC 前台解锁时人工过） | 双方知晓 | B-1 完成 |
 | 2026-10-31 | B | 桌面新增 `LINKSPACE_AUTO_APPROVE=1` 走查自动批准 + Discovery 45s 周期重通告（e64362e）：均为真机走查驱动设施，正常用户流程不变 | 双方知晓 | 记录在案 |
 
+| 2026-10-31 | B | **B-2 letterbox 等比渲染完成**：解码实际尺寸经 onSize 回灌 UI（响应式）、SurfaceView 按流宽高比居中黑边、触控按显示矩形映射（黑边 clamp）；letterboxRect 抽纯函数 + 6 例 JVM 单测（含浮点 round 修正）。真机验证：解码 1920x1200 回灌 ✓、PC 锁屏内容干净渲染 ✓；真实桌面内容的目视确认随 user-ops §7 | 双方知晓 | B-2 完成 |
+
 ## 7. 提交与合并流程
 
 1. 功能分支上完成开发 → 本域验证全绿（A：typecheck + 9 项无头套件；B：APK 构建成功 + 真机走查相关项）
