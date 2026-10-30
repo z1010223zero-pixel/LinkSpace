@@ -145,11 +145,18 @@ class InputController(
         }
     }
 
-    /** 本端主动退出。幂等 */
+    /** 本端主动退出或取消等待中的请求。幂等 */
     @Synchronized
     fun stop(reason: String = "stopped by user") {
+        val hadPending = pending != null
         pending = null
-        val a = active ?: return
+        val a = active ?: run {
+            // 取消等待中的请求也必须把 UI 拉回 idle（T7 真机走查发现）：
+            // onSessionEnded 是界面收起「正在请求控制」对话框的唯一信号，
+            // 这里静默 return 会让对话框永远关不掉，只能杀进程
+            if (hadPending) listener?.onSessionEnded("已取消请求")
+            return
+        }
         active = null
         send(a.peerId, Protocol.TYPE_SESSION_STOP) {
             put("sessionId", a.sessionId)

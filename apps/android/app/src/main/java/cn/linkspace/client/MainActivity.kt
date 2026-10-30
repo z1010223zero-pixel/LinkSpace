@@ -389,17 +389,22 @@ fun MainScreen(service: LinkSpaceService, onClipboardToggle: (Boolean) -> Unit) 
                         }) {
                             Text("发送文件")
                         }
-                        // 安卓→电脑远控（协议 4.6）：桌面被控端会弹确认框
+                        // 安卓→电脑远控（协议 4.6）：桌面被控端会弹确认框。
+                        // 请求前必须先建出站控制连接（T7 走查 Bug3）：桌面端
+                        // 只向自己 accept 进来的连接投递消息，没有连接时
+                        // session.start 会石沉大海。失败原因显示在 notice
                         Button(onClick = {
                             val metrics = context.resources.displayMetrics
-                            service.input.request(
-                                peerId = service.fullPeerIdOf(d.idPrefix),
-                                screen = InputController.Screen(
-                                    metrics.widthPixels.coerceAtLeast(1),
-                                    metrics.heightPixels.coerceAtLeast(1)
-                                ),
-                                displayName = selfName
-                            )
+                            scope.launch {
+                                service.requestInputControl(
+                                    peer = d,
+                                    screen = InputController.Screen(
+                                        metrics.widthPixels.coerceAtLeast(1),
+                                        metrics.heightPixels.coerceAtLeast(1)
+                                    ),
+                                    displayName = selfName
+                                ).onFailure { notice = it.message ?: "请求失败" }
+                            }
                         }) {
                             Text("控制电脑")
                         }

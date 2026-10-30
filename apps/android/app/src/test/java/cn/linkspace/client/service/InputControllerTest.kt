@@ -251,6 +251,28 @@ class InputControllerTest {
     }
 
     @Test
+    fun `取消等待中的请求会收起 UI 等待态且不发 session_stop`() {
+        val h = Harness()
+        val c = h.make()
+        val reasons = mutableListOf<String>()
+        h.ended = { reasons += it }
+
+        c.request("dev_peer_0001", InputController.Screen(100, 100), "A")
+        // T7 真机走查 Bug4：等待中点「取消」时 onSessionEnded 是界面
+        // 收起「正在请求控制」对话框的唯一信号，这里静默返回会让
+        // 等待框永远关不掉，只能杀进程
+        c.stop("stopped by user")
+        assertEquals(listOf("已取消请求"), reasons)
+        assertTrue("等待态取消不应发送 session.stop", h.sent.none { it.second == "session.stop" })
+
+        // 取消后 pending 已清，重新发起请求不被旧状态挡住
+        var waitingAgain = false
+        h.waiting = { waitingAgain = true }
+        c.request("dev_peer_0001", InputController.Screen(100, 100), "A")
+        assertTrue(waitingAgain)
+    }
+
+    @Test
     fun `sendEvents 批量超过上限时截断到 64 条`() {
         val h = Harness()
         val c = h.make()

@@ -196,6 +196,9 @@ class LinkSpaceService private constructor(private val appContext: Context) {
         discovery.stopAdvertising()
         server?.stop()
         server = null
+        // 出站控制连接随服务一起下线；先停 server 再关，input.stop 已在
+        // stopAll 里把 session.stop 发出去
+        closeOutbound()
         // 允许同一进程内重新 start（用户退出后再进）：start() 的
         // 幂等闸门要跟着复位
         started = false
@@ -704,7 +707,15 @@ class LinkSpaceService private constructor(private val appContext: Context) {
     val input: InputController by lazy {
         InputController(
             send = { peerId, type, payloadFn ->
-                server?.sendControlTo(peerId, envelope(type, peerId, payloadFn))
+                // 出站连接（本端主动连出的控制通道）优先：桌面端只把消息
+                // 投递给自己 accept 进来的连接，主动发起控制时只有这条
+                // 出站链路能把 session.start/事件送进桌面端
+                val out = outbound
+                if (out != null && out.peerId == peerId) {
+                    client.sendText(out.conn, envelope(type, peerId, payloadFn).toString())
+                } else {
+                    server?.sendControlTo(peerId, envelope(type, peerId, payloadFn))
+                }
             },
             listener = object : InputController.Listener {
                 override fun onSessionActive(peerId: String, sessionId: String, remoteScreen: InputController.Screen) {
@@ -732,6 +743,148 @@ class LinkSpaceService private constructor(private val appContext: Context) {
     /** 界面展示完会话结束提示后清空 */
     fun clearInputMessage() {
         _inputMessage.value = ""
+    }
+
+    // ---------- 平板主动连出的控制通道（T7 真机走查 Bug3） ----------
+
+    /**
+     * 出站控制连接：桌面端 ControlNode 只把控制消息投递给它自己 accept
+     * 进来的连接（按「已登记连接 × peerId」匹配），平板点「控制电脑」时
+     * 若没有任何连接，session.start 会被静默丢弃——桌面看不到授权提示、
+     * 平板的等待框只能等 32 秒空转。修法与 sendFiles 同源：先主动
+     * connectControl + announce 建链，之后的 session.* 与 input.event
+     * 都改走这条连接（见 input 的 send 回调）。
+     */
+    private class OutboundControl(
+        val peerId: String,
+        val conn: LinkSpaceClient.ClientConnection,
+        val jobs: kotlinx.coroutines.Job
+    )
+
+    @Volatile
+    private var outbound: OutboundControl? = null
+
+    /**
+     * 确保到对端的出站控制连接已建立，然后发起键鼠控制请求。
+     * 连接已存在且未断时直接复用（取消请求后重新点不需要重新握手）。
+     * 结果经 Result 返回：失败时界面拿到原因即可，UI 状态统一由
+     * InputController 回调维护——失败不会进入 waiting 态。
+     */
+    suspend fun requestInputControl(
+        peer: DiscoveredService,
+        screen: InputController.Screen,
+        displayName: String
+    ): Result<Unit> {
+        // 配对预检与桌面端 session.start 的门禁（trust.isKnown，不查
+        // input scope——键鼠共享随配对整体授予）对齐：解析不出完整
+        // 设备 ID 就是没有配对，提前失败让界面立刻给出原因
+        val fullId = trust.fullDeviceIdOf(peer.idPrefix)
+            ?: return Result.failure(IllegalStateException("设备 ${peer.displayName} 未配对，请先配对"))
+        val expectedFp = trust.fingerprintOf(fullId)
+            ?.let { normalizeFingerprint(it) }
+            ?: return Result.failure(IllegalStateException("设备 ${peer.displayName} 未配对，请先配对"))
+
+        return withContext(Dispatchers.IO) {
+            runCatching {
+                ensureOutboundControl(peer, fullId, expectedFp)
+                input.request(peerId = fullId, screen = screen, displayName = displayName)
+            }.onFailure { err ->
+                Log.w(TAG, "发起键鼠控制失败: ${err.message}")
+            }
+        }
+    }
+
+    /**
+     * 确保到对端的出站控制连接存在。三段式：锁内快查 → 挂起建链（锁外，
+     * Kotlin 禁止 suspend 点进 synchronized 临界区）→ 锁内提交登记。
+     * 并发窗口内建成两条时提交阶段只留一条，浪费可忽略（窗口极小）。
+     */
+    private suspend fun ensureOutboundControl(
+        peer: DiscoveredService,
+        fullId: String,
+        expectedFp: String
+    ) {
+        if (outboundReusable(fullId)) return
+        val conn = client.connectControl(peer.host, peer.port, Protocol.CONTROL_PATH, expectedFp)
+        // announce：桌面端靠首条消息登记连接身份，缺了它后续消息全部对不上号
+        // （displayName/deviceType 用服务级属性——tablet 自报自己的身份）
+        client.sendText(
+            conn,
+            envelope(Protocol.TYPE_ANNOUNCE, "") {
+                put("displayName", displayName)
+                put("deviceType", deviceType)
+                put("caps", org.json.JSONArray(Protocol.DEFAULT_GRANT_SCOPE))
+                put("fingerprint", fingerprint)
+            }.toString()
+        )
+        val jobs = CoroutineScope(Dispatchers.IO).launch {
+            // 心跳：桌面端 15s 收不到任何消息即断连，等待确认期间必须续住
+            // （与 sendFiles 的发送期心跳同一依据）
+            launch {
+                while (true) {
+                    delay(4_000)
+                    val alive = runCatching {
+                        client.sendText(conn, envelope(Protocol.TYPE_HEARTBEAT, fullId) {}.toString())
+                    }.isSuccess
+                    if (!alive) return@launch
+                }
+            }
+            // 读循环：桌面端的 session.accept/reject/stop 从这条连接回来
+            val myPrefix = identity.get().fingerprint.replace(":", "").take(12)
+            while (true) {
+                val text = runCatching { client.readText(conn) }.getOrNull() ?: break
+                val msg = runCatching { JSONObject(text) }.getOrNull() ?: continue
+                // 信封按协议 §3 过滤（同 sendFiles）：v/to/ts 不合的直接跳过
+                val to = msg.optString("to")
+                if (msg.optInt("v", -1) != Protocol.VERSION) continue
+                if (to.isNotEmpty() && to != myPrefix) continue
+                if (kotlin.math.abs(System.currentTimeMillis() - msg.optLong("ts", 0L)) > 60_000) continue
+                val from = msg.optString("from")
+                val payload = msg.optJSONObject("payload") ?: JSONObject()
+                when (msg.optString("type")) {
+                    Protocol.TYPE_SESSION_ACCEPT -> input.onAccepted(from, payload)
+                    Protocol.TYPE_SESSION_REJECT -> input.onRejected(from, payload)
+                    Protocol.TYPE_SESSION_STOP -> input.onStopped(from, payload)
+                    // announce/heartbeat 等其余类型与本连接无关，静默忽略
+                }
+            }
+            // 读循环退出 = 连接断开：清登记并让 UI 收掉等待/控制状态。
+            // 主动关闭（stopAll/换目标）时 outbound 已被置空，不再误报
+            if (outbound?.conn === conn) {
+                outbound = null
+                input.onPeerDisconnected(fullId)
+            }
+        }
+        // 提交登记：已有同目标的活连接（并发窗口内别人建成）就丢弃本条
+        synchronized(this) {
+            val cur = outbound
+            if (cur != null && cur.peerId == fullId && !cur.conn.socket.isClosed) {
+                jobs.cancel()
+                runCatching { conn.close() }
+                return
+            }
+            if (cur != null) {
+                cur.jobs.cancel()
+                runCatching { cur.conn.close() }
+            }
+            outbound = OutboundControl(fullId, conn, jobs)
+        }
+    }
+
+    /** 已登记的出站连接是否可复用（同目标且未断） */
+    private fun outboundReusable(fullId: String): Boolean = synchronized(this) {
+        val cur = outbound
+        cur != null && cur.peerId == fullId && !cur.conn.socket.isClosed
+    }
+
+    /** 关闭出站控制连接（用户退出/服务停止时调用） */
+    private fun closeOutbound() {
+        val out = outbound
+        outbound = null
+        if (out != null) {
+            out.jobs.cancel()
+            runCatching { client.close(out.conn) }
+        }
     }
 
     /**
