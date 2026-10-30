@@ -466,6 +466,8 @@ function testWin32(): void {
     check('方向键带扩展位', b2 !== null && b2.readUInt32LE(UNION_OFF + 4) === 0x0001 && b2.readUInt16LE(UNION_OFF) === 0x25)
     const b3 = buildInputBatch([{ t: 'key', vk: 0x41, down: false }], vs, keys, buttons)
     check('普通键抬起仅 KEYUP 位', b3 !== null && b3.readUInt32LE(UNION_OFF + 4) === 0x0002)
+    const b3x = buildInputBatch([{ t: 'key', vk: 0x25, down: false }], vs, keys, buttons)
+    check('扩展键抬起带 EXTENDEDKEY（审查 P3）', b3x !== null && b3x.readUInt32LE(UNION_OFF + 4) === 0x0003)
 
     const b4 = buildInputBatch([{ t: 'wheel', dx: 0, dy: -2 }], vs, keys, buttons)
     check('滚轮换算 WHEEL_DELTA', b4 !== null && b4.readUInt32LE(UNION_OFF + 12) === 0x0800 && b4.readInt32LE(UNION_OFF + 8) === -240)
@@ -509,13 +511,20 @@ function testWin32(): void {
     check('idle 位移喂边缘检测', edge.length === 1 && edge[0].x === 500 && edge[0].y === 300)
     f.setPos({ x: -5, y: 1200 })
     cap.tick()
-    check('多屏负坐标钳入主屏', edge[1].x === 0 && edge[1].y === 1079, JSON.stringify(edge[1]))
+    // 审查 P3：主屏之外（副屏/负坐标）不再喂边缘——钳到主屏边界后
+    // nearRight/nearBottom 恒真，移向副屏会误触发边缘穿越
+    check('多屏负坐标不喂边缘', edge.length === 1)
+    f.setPos({ x: 1920, y: 400 }) // 主屏右边界之外（右侧副屏）
+    cap.tick()
+    f.setPos({ x: 2000, y: 500 })
+    cap.tick()
+    check('右侧副屏坐标不喂边缘', edge.length === 1)
     check('idle 不产输入事件', evts.length === 0)
     f.setPos(null)
     cap.tick()
     f.setPos({ x: 10, y: 10 })
     cap.tick()
-    check('读取失败重建基线不触发边缘', edge.length === 2)
+    check('读取失败重建基线不触发边缘', edge.length === 1)
 
     // control：采集
     cap.setMode('control')

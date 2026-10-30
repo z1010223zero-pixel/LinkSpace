@@ -98,8 +98,11 @@ export class Win32InputCapture {
     }
 
     if (this.mode === 'idle') {
-      // 位置无变化不喂：EdgeSwitcher 只关心移动轨迹
-      if (this.lastPos && (this.lastPos.x !== x || this.lastPos.y !== y)) {
+      // 光标在主屏之外（副屏）不喂边缘检测（审查 P3）：坐标钳到主屏边界
+      // 后 nearRight 恒真，移向副屏即误触发边缘穿越。主屏在虚拟屏坐标系
+      // 的原点恰为 (0,0)，越界判定不需要副屏信息
+      const onPrimary = raw.x >= 0 && raw.x < w && raw.y >= 0 && raw.y < h
+      if (onPrimary && this.lastPos && (this.lastPos.x !== x || this.lastPos.y !== y)) {
         this.deps.onEdgeMove?.(x, y)
       }
       this.lastPos = { x, y }

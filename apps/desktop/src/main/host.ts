@@ -93,6 +93,11 @@ export interface HostEvents {
   inputChanged: []
 }
 
+/** 对端 device.rename 的最小受理间隔（审查 P3）：每次受理都伴随落盘与 UI 事件 */
+const RENAME_MIN_INTERVAL_MS = 10_000
+/** 挂起传输任务的最大存活时间（审查 P3）：对端不上线即过期清扫 */
+const TRANSFER_MAX_AGE_MS = 24 * 60 * 60 * 1000
+
 type Listener<K extends keyof HostEvents> = (...args: HostEvents[K]) => void
 
 export class Host {
@@ -125,6 +130,8 @@ export class Host {
   private listeners: { [K in keyof HostEvents]?: Listener<K>[] } = {}
   /** 已连接的对端：deviceId → Connection */
   private readonly peers = new Map<string, Connection>()
+  /** 对端 device.rename 的最近受理时间，配合 RENAME_MIN_INTERVAL_MS 限频（审查 P3） */
+  private readonly renameLastAt = new Map<string, number>()
   /** 发起连接时记住的服务名 → 连接，供 UI 按发现列表里的服务名找回连接 */
   private readonly serviceConns = new Map<string, Connection>()
   /** 对端可达端点。只有主动连出去时才知道对方的监听端口 */
@@ -694,9 +701,10 @@ export class Host {
         log.warn(`拒绝未授权设备的 clipboard.share：${peerId}`)
         return
       }
-      // 只认文本。图片与文件走传输通道，不进剪贴板
-      if (p.kind && p.kind !== 'text') return
-      this.clipboardSync?.receive(String(p.text ?? ''))
+      // 只认文本（图片与文件走传输通道），且必须是字符串（审查 P3 收紧）：
+      // String() 会把对象强转成 "[object Object]" 写进剪贴板
+      if (typeof p.text !== 'string' || (p.kind && p.kind !== 'text')) return
+      this.clipboardSync?.receive(p.text)
     })
   }
 
@@ -741,6 +749,15 @@ export class Host {
    * 在构造后调这个归位——用户上次关掉的，重启后不能悄悄打开。
    * 未设置过 = 默认关。
    */
+  /**
+   * 清扫超龄挂起任务（审查 P3）：对端永远不上线的 waiting/offered 任务
+   * 由 index.ts 周期驱动到这里统一取消，不再无限堆积。
+   */
+  sweepStaleTransfers(): void {
+    const swept = this.transfers.sweepExpired(TRANSFER_MAX_AGE_MS)
+    if (swept > 0) log.info(`已清扫 ${swept} 个超龄挂起传输任务`)
+  }
+
   restoreClipboardSwitch(): boolean {
     const saved = this.profile.getClipboardEnabled()
     if (!saved) this.setClipboardEnabled(false)
@@ -777,6 +794,14 @@ export class Host {
       }
       const clean = sanitizeDisplayName(String(p.displayName ?? ''))
       if (!clean) return
+      // 按设备限频（审查 P3）：rename 每次受理都同步落盘并广播 UI 事件，
+      // 不限频会被已配对对端刷 IO
+      const lastAt = this.renameLastAt.get(peerId) ?? 0
+      if (Date.now() - lastAt < RENAME_MIN_INTERVAL_MS) {
+        log.warn(`忽略 ${peerId} 的高频 device.rename`)
+        return
+      }
+      this.renameLastAt.set(peerId, Date.now())
       if (this.trust.rename(peerId, clean)) {
         const entry = this.trust.list().find((e) => e.deviceId === peerId)
         if (entry) this.emit('peerRenamed', entry)

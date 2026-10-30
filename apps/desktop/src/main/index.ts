@@ -145,6 +145,21 @@ function createWindow(): void {
 const CLIPBOARD_POLL_MS = 800
 let clipboardTimer: NodeJS.Timeout | null = null
 
+// ---------- 挂起传输清扫（审查 P3） ----------
+// 对端不上线的 waiting/offered 任务每 24h 过期一次，每小时查一趟即可
+let transferSweepTimer: NodeJS.Timeout | null = null
+
+function startTransferSweep(): void {
+  if (transferSweepTimer) return
+  transferSweepTimer = setInterval(() => host.sweepStaleTransfers(), 60 * 60 * 1000)
+}
+
+function stopTransferSweep(): void {
+  if (!transferSweepTimer) return
+  clearInterval(transferSweepTimer)
+  transferSweepTimer = null
+}
+
 function startClipboardSync(): void {
   if (clipboardTimer) return
   host.enableClipboardSync({
@@ -156,7 +171,15 @@ function startClipboardSync(): void {
         return ''
       }
     },
-    writeText: (t) => clipboard.writeText(t)
+    writeText: (t) => {
+      // 与 readText 对称的兜底（审查 P3）：剪贴板被其他进程独占时
+      // writeText 也会抛，不能让单次同步失败打断轮询
+      try {
+        clipboard.writeText(t)
+      } catch (err) {
+        log.error(`写入剪贴板失败: ${String(err)}`)
+      }
+    }
   })
   // 按上次的选择归位（审查 P2-1）：默认关，用户开过才开。必须在
   // enableClipboardSync 之后调——构造完成才有对象可停
@@ -295,6 +318,7 @@ app.whenReady().then(async () => {
 
   startClipboardSync()
   startInputLoop()
+  startTransferSweep()
 
   // 首次扫描设备
   await devices.refresh().catch((err) => log.error(`首次设备扫描失败: ${String(err)}`))
@@ -318,6 +342,7 @@ app.on('before-quit', (event) => {
   quitting = true
   log.info('应用退出，清理投屏会话')
   stopClipboardSync()
+  stopTransferSweep()
   stopInputLoop()
   // 快捷键挂着全局钩子，退出前必须释放，否则会劫持系统组合键
   globalShortcut.unregisterAll()

@@ -78,6 +78,9 @@ export interface TransferManagerEvents {
   cancelRequested: [{ id: string; peerId: string }]
 }
 
+/** 每对端挂起（waiting）任务上限（审查 P3）：离线对端可无限攒任务，每条都占内存并在补发时集中 IO */
+export const MAX_WAITING_PER_PEER = 4
+
 export class TransferManager extends EventEmitter {
   private tasks = new Map<string, TransferTask>()
   /** 接收方：transferId → 落盘信息 */
@@ -153,6 +156,15 @@ export class TransferManager extends EventEmitter {
     // 否则 `..\..\x` 会把写入点挪到保存目录之外
     const cleanFiles = files.map((f) => ({ ...f, name: sanitizeFileName(f.name) }))
 
+    if (opts?.waiting) {
+      // 每对端挂起上限（审查 P3）
+      const held = [...this.tasks.values()].filter(
+        (t) => t.peerId === peerId && t.state === 'waiting'
+      ).length
+      if (held >= MAX_WAITING_PER_PEER) {
+        throw new Error(`对端 ${peerId} 等待中的任务已达上限 ${MAX_WAITING_PER_PEER}`)
+      }
+    }
     const id = transferId ?? `tr-${++this.seq}-${randomUUID().slice(0, 8)}`
     const task: TransferTask = {
       id,
@@ -202,6 +214,21 @@ export class TransferManager extends EventEmitter {
     log.info(`传输任务 ${id} 对端已离线，回退等待上线`)
     this.emit('changed', task)
     return task
+  }
+
+  /**
+   * 清扫超龄挂起任务（审查 P3）：waiting/offered 超过 maxAge 未推进即取消。
+   * 复用 cancel() 走完整清理（状态、路由、事件），由 Host 周期驱动，
+   * 防「对端永远不上线」的任务无限堆积。
+   */
+  sweepExpired(maxAgeMs: number, now = Date.now()): number {
+    const stale = [...this.tasks.values()].filter(
+      (t) =>
+        (t.state === 'waiting' || t.state === 'offered') &&
+        now - t.createdAt > maxAgeMs
+    )
+    for (const t of stale) void this.cancel(t.id)
+    return stale.length
   }
 
   /** 接收方接受了 offer。token 由接收方生成，回传给发送方作为数据面凭证 */

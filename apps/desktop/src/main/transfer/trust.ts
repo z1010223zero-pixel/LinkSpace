@@ -10,6 +10,7 @@
 //   - 清单不含任何密钥，只含公开信息（ID、指纹、能力范围）
 
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 /** 授权范围。控制类（投屏/键鼠）不默认授予，需二次授权 */
@@ -49,7 +50,9 @@ export class TrustStore {
   private entries: TrustEntry[] = []
 
   constructor(opts: TrustStoreOptions = {}) {
-    const dir = opts.dir ?? join(process.cwd(), '.trust-test')
+    // 默认目录只会在测试直构（不传 dir）时用到：落 tmpdir 而非 cwd。
+    // 曾落 cwd：生产若漏传 dataDir 会在工作目录写出 trust.json（审查 P3）
+    const dir = opts.dir ?? join(tmpdir(), 'linkspace-trust')
     this.filePath = join(dir, 'trust.json')
     this.defaultScope = opts.defaultScope ?? ['file']
     this.load()

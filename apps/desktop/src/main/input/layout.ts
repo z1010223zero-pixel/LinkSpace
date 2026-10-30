@@ -8,6 +8,7 @@
 // 布局写坏不该让应用起不来，丢掉的只是几张卡片摆哪边的偏好。
 
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ALL_EDGES, type EdgeLayout, type EdgeSide } from './edge'
 
@@ -23,7 +24,8 @@ export class InputLayoutStore {
   private edges: Record<string, EdgeSide> = {}
 
   constructor(opts: { dir?: string } = {}) {
-    const dir = opts.dir ?? join(process.cwd(), '.linkspace-test')
+    // 默认目录只会在测试直构（不传 dir）时用到：落 tmpdir 而非 cwd（审查 P3）
+    const dir = opts.dir ?? join(tmpdir(), 'linkspace-input-layout')
     this.filePath = join(dir, 'input-layout.json')
     this.load()
   }

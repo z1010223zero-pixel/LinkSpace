@@ -11,6 +11,7 @@
 // 既稳定又不用处理重排。
 
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 export interface LayoutStoreOptions {
@@ -29,7 +30,8 @@ export class LayoutStore {
   private order: string[] = []
 
   constructor(opts: LayoutStoreOptions = {}) {
-    const dir = opts.dir ?? join(process.cwd(), '.layout-test')
+    // 默认目录只会在测试直构（不传 dir）时用到：落 tmpdir 而非 cwd（审查 P3）
+    const dir = opts.dir ?? join(tmpdir(), 'linkspace-layout')
     this.filePath = join(dir, 'layout.json')
     this.load()
   }

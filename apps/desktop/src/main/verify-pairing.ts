@@ -13,7 +13,8 @@ import { join } from 'node:path'
 import { setIdentityDir, getDeviceCert } from './transfer/identity'
 import { TrustStore } from './transfer/trust'
 import { ControlNode } from './control/node'
-import { PairingCoordinator, type PendingPairing } from './pairing'
+import { PairingCoordinator, filterApprovedScope, type PendingPairing } from './pairing'
+import { sanitizeDisplayName } from './profile'
 
 let failures = 0
 
@@ -255,6 +256,13 @@ async function main(): Promise<void> {
     check('G 信任清单未被污染', G.trust.fingerprintOf(F.id) === F.fingerprint)
     await F.close()
     await G.close()
+
+    // ---------- 8. 载荷收敛（审查 P3） ----------
+    console.log('\n8. 显示名清洗与 approve scope 收敛')
+    check('显示名剔除 RTL 覆盖符', sanitizeDisplayName('ab\u202ecd') === 'abcd')
+    check('显示名剔除 C1 控制符', sanitizeDisplayName('a\u009fb') === 'ab')
+    check('approve 载荷剔除 control', filterApprovedScope(['file', 'control', 'clipboard']).join(',') === 'file,clipboard')
+    check('approve 载荷过滤未知项', filterApprovedScope(['file', 'bogus']).join(',') === 'file')
   } finally {
     await A.close()
     await B.close()

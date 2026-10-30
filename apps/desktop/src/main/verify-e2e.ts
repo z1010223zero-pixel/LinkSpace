@@ -316,6 +316,13 @@ async function main(): Promise<void> {
     const aEntry = A.trustStore.list().find((e) => e.deviceId === B.id)
     check('A 记录的名字为 B 的新名字', aEntry?.displayName === 'E2E-Beta-改', aEntry?.displayName)
 
+    // 限频回归钉（审查 P3）：10s 窗口内对同一设备的第二条 rename 被忽略
+    const renameA2 = A.setDisplayName('E2E-Alpha-再改')
+    check('A 第二次改名请求已发出', renameA2.ok === true)
+    await new Promise((r) => setTimeout(r, 600))
+    const bEntry2 = B.trustStore.list().find((e) => e.deviceId === A.id)
+    check('B 忽略 10s 内的第二条 rename（限频）', bEntry2?.displayName === 'E2E-Alpha-改', bEntry2?.displayName)
+
     // 空名字拒绝：清洗后为空必须报错而不是静默回退
     const emptyName = A.setDisplayName('   ')
     check('空名字被拒绝', emptyName.ok === false)

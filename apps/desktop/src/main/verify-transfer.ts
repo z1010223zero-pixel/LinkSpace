@@ -15,7 +15,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { setIdentityDir } from './transfer/identity'
 import { startTransferServer } from './transfer/server'
-import { TransferManager } from './transfer/manager'
+import { MAX_WAITING_PER_PEER, TransferManager } from './transfer/manager'
 import { hashFile } from './transfer/chunker'
 
 let failures = 0
@@ -385,9 +385,34 @@ async function main(): Promise<void> {
     // 该任务到此目的已完成，取消掉避免悬挂 .part
     await h.receiver.cancel(dgId)
 
-    // ---------- 10. 大文件 ----------
+    // ---------- 10. 挂起任务上限与超龄清扫（审查 P3） ----------
+    console.log('\n10. 挂起任务上限与超龄清扫')
+    {
+      const m = new TransferManager()
+      const wsrc = join(h.workDir, 'wait-src.bin')
+      await writeFile(wsrc, Buffer.alloc(8))
+      const wfile = { name: 'wait-src.bin', path: wsrc, size: 8 }
+      for (let i = 0; i < MAX_WAITING_PER_PEER; i++) {
+        await m.offer('dev-w', [wfile], `wid-${i}`, 'send', { waiting: true })
+      }
+      let overflow = false
+      try {
+        await m.offer('dev-w', [wfile], 'wid-overflow', 'send', { waiting: true })
+      } catch {
+        overflow = true
+      }
+      check(`第 ${MAX_WAITING_PER_PEER + 1} 个挂起任务被拒`, overflow)
+      await m.offer('dev-other', [wfile], 'wid-other', 'send', { waiting: true })
+      check('上限按对端隔离', m.get('wid-other')?.state === 'waiting')
+      const swept = m.sweepExpired(1000, Date.now() + 2000)
+      check('超龄挂起任务被清扫', swept === MAX_WAITING_PER_PEER + 1, `swept=${swept}`)
+      check('清扫后状态为 cancelled', m.get('wid-0')?.state === 'cancelled')
+      check('未超龄的挂起任务不受影响', m.sweepExpired(24 * 3600 * 1000) === 0)
+    }
+
+    // ---------- 11. 大文件 ----------
     if (process.argv.includes('--large')) {
-      console.log('\n10. 1 GB 大文件')
+      console.log('\n11. 1 GB 大文件')
       const largeSrc = join(srcDir, 'large.bin')
       const largeSize = 1024 * 1024 * 1024
       const t0 = Date.now()

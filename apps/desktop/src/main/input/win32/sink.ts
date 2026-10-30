@@ -10,7 +10,8 @@
 // INPUT 布局（C 对齐规则）：
 //   x64/arm64：type@0(4) pad(4) union@8，MOUSEINPUT=28B，INPUT=40B
 //   ia32     ：type@0(4) union@4， MOUSEINPUT=24B，INPUT=28B
-// MOUSEINPUT：dx@+0 dy@+4 mouseData@+8 dwFlags@+12 time@+16 extra@+20
+// MOUSEINPUT：dx@+0 dy@+4 mouseData@+8 dwFlags@+12 time@+16 extra@+20(ia32)/+24(x64)
+//   x64 的 ULONG_PTR 按 8 字节对齐，time 后有 4 字节填充，extra 落在 +24 而非 +20
 // KEYBDINPUT：wVk@+0 wScan@+2 dwFlags@+4 time@+8 extra@+12
 
 import type { InputEvent, MouseButton } from '../protocol'
@@ -82,15 +83,21 @@ function writeMouse(buf: Buffer, off: number, dx: number, dy: number, flags: num
   buf.writeInt32LE(mouseData, off + UNION_OFF + 8)
   buf.writeUInt32LE(flags, off + UNION_OFF + 12)
   buf.writeUInt32LE(0, off + UNION_OFF + 16) // time
-  // dwExtraInfo：指针宽度字段，写 0
+  // dwExtraInfo 是 ULONG_PTR（指针宽度）：ia32 在 +20 占 4 字节；x64 在
+  // +24 占 8 字节（+20 是对齐填充）。显式写满整个字段，不依赖 alloc 清零
   buf.writeUInt32LE(0, off + UNION_OFF + 20)
-  if (PTR_SIZE === 8) buf.writeUInt32LE(0, off + UNION_OFF + 24)
+  if (PTR_SIZE === 8) {
+    buf.writeUInt32LE(0, off + UNION_OFF + 24)
+    buf.writeUInt32LE(0, off + UNION_OFF + 28)
+  }
 }
 
 function writeKey(buf: Buffer, off: number, vk: number, up: boolean, extended: boolean): void {
   buf.writeUInt16LE(vk, off + UNION_OFF)
   buf.writeUInt16LE(0, off + UNION_OFF + 2) // wScan：只按 VK 注入
-  const flags = (up ? KEYEVENTF_KEYUP : 0) | (extended && !up ? KEYEVENTF_EXTENDEDKEY : 0)
+  // 扩展位 down/up 都要带（审查 P3）：up 缺 EXTENDEDKEY 时部分应用会把
+  // 抬起匹配到非扩展键序列（Win32 惯例是两态同带）
+  const flags = (up ? KEYEVENTF_KEYUP : 0) | (extended ? KEYEVENTF_EXTENDEDKEY : 0)
   buf.writeUInt32LE(flags, off + UNION_OFF + 4)
   buf.writeUInt32LE(0, off + UNION_OFF + 8) // time
   buf.writeUInt32LE(0, off + UNION_OFF + 12)

@@ -11,7 +11,7 @@
 //   配对码由接收方生成后**仅显示在接收方界面上**，经用户手工输入后
 //   由 pair.submit 送回。已回写到 docs/protocol.md。
 
-import { createHash, randomFillSync, randomUUID } from 'node:crypto'
+import { randomFillSync, randomUUID } from 'node:crypto'
 import type { Server as HttpsServer } from 'node:https'
 import type { Duplex } from 'node:stream'
 import type { TLSSocket } from 'node:tls'
@@ -402,9 +402,4 @@ export function generatePairingCode(): string {
   randomFillSync(buf)
   const n = buf.readUInt32BE(0) % 1_000_000
   return String(n).padStart(6, '0')
-}
-
-/** 内容摘要：剪贴板防循环用，取 SHA-256 前 16 字节 */
-export function contentDigest(text: string): string {
-  return createHash('sha256').update(text, 'utf8').digest('hex').slice(0, 32)
 }

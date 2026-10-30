@@ -6,6 +6,7 @@
 // 单独一个 profile.json 避免把「本机配置」混进「对端信任」语义里。
 
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 export interface ProfileStoreOptions {
@@ -26,7 +27,9 @@ export class ProfileStore {
   private clipboardOn = false
 
   constructor(opts: ProfileStoreOptions = {}) {
-    const dir = opts.dir ?? join(process.cwd(), '.profile-test')
+    // 默认目录只会在测试直构（不传 dir）时用到：落 tmpdir 而非 cwd，
+    // 避免在生产工作目录留下测试残留（审查 P3）
+    const dir = opts.dir ?? join(tmpdir(), 'linkspace-profile')
     this.filePath = join(dir, 'profile.json')
     this.load()
   }
@@ -86,5 +89,7 @@ export class ProfileStore {
  * 「改名为空」看起来成功，对端却没更新。
  */
 export function sanitizeDisplayName(raw: string): string {
-  return raw.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 60)
+  // C1 控制符（U+0080–U+009F）与双向/隔离覆盖符一并清除（审查 P3）：
+  // U+202E 等可让后续文字逆序渲染，进 UI 与日志即成显示层欺骗
+  return raw.replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, '').trim().slice(0, 60)
 }

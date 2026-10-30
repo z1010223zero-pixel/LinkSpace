@@ -372,6 +372,14 @@ export class InputController {
       this.cbs.log?.('被控端连接断开，已回到本机控制')
       this.cbs.onEnded?.(peerId, 'connection lost')
     }
+    // 挂起请求随断连落定（审查 P3）：不清会占住唯一会话槽直到请求
+    // 超时，期间新请求一律被拒
+    for (const [sessionId, req] of this.pending) {
+      if (req.peerId !== peerId) continue
+      clearTimeout(req.timer)
+      this.pending.delete(sessionId)
+      req.resolve({ ok: false, error: '对端连接已断开' })
+    }
   }
 
   /** 批量外发事件。只在活动会话中发送；断线/退出后调用是安全的空操作 */

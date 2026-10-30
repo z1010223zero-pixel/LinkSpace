@@ -85,6 +85,17 @@ export interface PairingCoordinatorOptions {
 /** 默认授予范围。control 不在其中，键鼠/投屏需用户二次授权 */
 const DEFAULT_GRANT_SCOPE: TrustScope[] = ['file', 'clipboard']
 
+/**
+ * 对端 approve 载荷的 scope 收敛（审查 P3）：白名单过滤之外再强制剔除
+ * control。grantScope() 在接收侧已剔除，发起侧收对端载荷必须对称剔除，
+ * 否则恶意 approve 可把 control 位写进本机 TrustStore。
+ */
+export function filterApprovedScope(raw: unknown): TrustScope[] {
+  return (Array.isArray(raw) ? raw : []).filter(
+    (s): s is TrustScope => (ALL_SCOPES as string[]).includes(s) && s !== 'control'
+  )
+}
+
 const CODE_TTL_MS = 60_000
 const MAX_ATTEMPTS = 5
 /** 同时挂起的配对请求上限。超出即拒绝，防止未认证连接刷 UI */
@@ -541,11 +552,8 @@ export class PairingCoordinator {
     // 入库指纹以 TLS 会话实际证书为准——approve 载荷里的指纹是对方
     // 自报的，若与证书不符，证书说了算（证书拿不到才用自报值）
     const presentedFp = conn.tlsFingerprint ?? normalizeFingerprint(p.fingerprint)
-    // scope 必须按白名单过滤：payload 由对端构造，直接收下会被塞进
-    // 未经授权的 control 等能力位
-    const scope = (Array.isArray(p.scope) ? p.scope : []).filter((s): s is TrustScope =>
-      (ALL_SCOPES as string[]).includes(s)
-    )
+    // scope 由对端构造：白名单过滤并强制剔除 control（审查 P3）
+    const scope = filterApprovedScope(p.scope)
     const entry: Omit<TrustEntry, 'trustedAt'> = {
       deviceId: p.deviceId,
       displayName: p.displayName,
