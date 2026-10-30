@@ -228,7 +228,11 @@ export class ControlNode {
     const rateWindow = new Map<string, number[]>()
     const conn: Connection = {
       peerId: '',
-      remoteAddress: '',
+      // 底层 TCP 对端地址（ws 库挂在 _socket 上）。screen.stream 的
+      // 连出模式要用它做目标 IP——发现列表的 host 可能过期，活动
+      // 连接的真实地址最准
+      remoteAddress:
+        (ws as unknown as { _socket?: { remoteAddress?: string } })._socket?.remoteAddress ?? '',
       tlsFingerprint: tlsFingerprintOf(ws),
       lastSeen: Date.now(),
       send<T>(type: string, payload: T) {

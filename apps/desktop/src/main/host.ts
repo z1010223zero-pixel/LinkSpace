@@ -901,7 +901,7 @@ export class Host {
     })
 
     // ---------- 屏幕投屏（寄生在键鼠会话内，见 screen-stream.ts） ----------
-    control.on('screen.stream.request', (conn, _msg) => {
+    control.on('screen.stream.request', (conn, msg) => {
       const peerId = conn.peerId
       if (!peerId) return
       const active = this.inputCoordinator?.activeSession
@@ -909,18 +909,31 @@ export class Host {
         sendTo(peerId, 'screen.stream.error', { message: '投屏需要先建立键鼠会话' })
         return
       }
-      if (!this.opts.screenFfmpegPath || !this.opts.inputVirtualScreen) {
+      if (!this.opts.screenFfmpegPath) {
         sendTo(peerId, 'screen.stream.error', { message: '本机缺少 ffmpeg，无法投屏' })
         return
       }
-      this.screenStream
-        .start(this.opts.screenFfmpegPath, this.opts.inputVirtualScreen())
-        .then((info) => sendTo(peerId, 'screen.stream.start', { port: info.port, w: info.w, h: info.h }))
-        .catch((err) => {
-          const tail = this.screenStream.lastErrors().join(' | ')
-          log.warn(`[screen-stream] 启动失败: ${String(err)} ${tail}`)
-          sendTo(peerId, 'screen.stream.error', { message: `投屏启动失败：${String(err)}` })
+      // 平板先起 ServerSocket 并把端口放进 request；这里连出（绕开
+      // Windows 防火墙对 ffmpeg 入站的静默拦截），目标 IP 取活动连接
+      // 的真实对端地址
+      const port = (msg.payload as { port?: unknown } | undefined)?.port
+      const ip = conn.remoteAddress?.replace('::ffff:', '') ?? ''
+      if (typeof port !== 'number' || port <= 0 || !ip) {
+        sendTo(peerId, 'screen.stream.error', { message: '投屏请求缺少有效端口' })
+        return
+      }
+      try {
+        this.screenStream.start(this.opts.screenFfmpegPath, { ip, port })
+        sendTo(peerId, 'screen.stream.start', {
+          port,
+          w: this.opts.inputVirtualScreen?.().w ?? 1920,
+          h: this.opts.inputVirtualScreen?.().h ?? 1080
         })
+      } catch (err) {
+        const tail = this.screenStream.lastErrors().join(' | ')
+        log.warn(`[screen-stream] 启动失败: ${String(err)} ${tail}`)
+        sendTo(peerId, 'screen.stream.error', { message: `投屏启动失败：${String(err)}` })
+      }
     })
     control.on('screen.stream.stop', (conn, _msg) => {
       if (!conn.peerId) return

@@ -871,11 +871,10 @@ class LinkSpaceService private constructor(private val appContext: Context) {
                     Protocol.TYPE_SESSION_STOP -> input.onStopped(from, payload)
                     // ---------- 屏幕投屏 ----------
                     Protocol.TYPE_SCREEN_STREAM_START -> {
+                        streamFallbackSize = payload.optInt("w", 1920) to payload.optInt("h", 1080)
                         _screenStream.value = ScreenStreamInfo(
-                            host = outbound?.conn?.host ?: "",
-                            port = payload.optInt("port", 0),
-                            w = payload.optInt("w", 0),
-                            h = payload.optInt("h", 0)
+                            streamFallbackSize.first,
+                            streamFallbackSize.second
                         )
                     }
                     Protocol.TYPE_SCREEN_STREAM_STOP -> _screenStream.value = null
@@ -920,6 +919,8 @@ class LinkSpaceService private constructor(private val appContext: Context) {
         val out = outbound
         outbound = null
         _screenStream.value = null
+        runCatching { streamServer?.close() }
+        streamServer = null
         if (out != null) {
             out.jobs.cancel()
             runCatching { client.close(out.conn) }
@@ -928,33 +929,94 @@ class LinkSpaceService private constructor(private val appContext: Context) {
 
     // ---------- 屏幕投屏（寄生在键鼠会话内，[PROTOCOL] screen.stream.*） ----------
 
-    /** 进行中的投屏流信息。null = 无投屏。host 为桌面地址（出站连接对端） */
-    data class ScreenStreamInfo(val host: String, val port: Int, val w: Int, val h: Int)
+    /**
+     * 投屏连接方向是**桌面连出**（ffmpeg 连到本机的 ServerSocket）：
+     * Windows 防火墙对无放行规则的进程静默丢弃入站 SYN（实测桌面端
+     * listen 10 秒超时），而桌面→平板方向的入站在 Android 侧没有
+     * 默认防火墙。平板先起 ServerSocket(0) 并把端口放进 request。
+     */
+    /** 进行中的投屏流信息。null = 无投屏。w/h 是虚拟屏尺寸（触控映射回退基准） */
+    data class ScreenStreamInfo(val w: Int, val h: Int)
 
     private val _screenStream = MutableStateFlow<ScreenStreamInfo?>(null)
     val screenStream: StateFlow<ScreenStreamInfo?> = _screenStream
 
-    /**
-     * 请求桌面开启投屏。必须已有 active 键鼠会话（投屏的画面可见性
-     * 是会话授权的一部分，桌面端会校验会话归属）；结果经 screenStream
-     * 状态流到达（start）或 inputMessage 提示（error）。
-     */
+    /** 等待桌面 ffmpeg 连入的监听端。会话结束/停止投屏时关闭 */
+    private var streamServer: java.net.ServerSocket? = null
+    /** 桌面回 start 时填的虚拟屏尺寸（触控映射的回退基准） */
+    @Volatile
+    var streamFallbackSize: Pair<Int, Int> = 1920 to 1080
+        private set
+
+    /** 解码输出的实际画面尺寸（SPS 解出后更新）。触控映射的优先基准 */
+    private val _streamVideoSize = MutableStateFlow(1920 to 1080)
+    val streamVideoSize: StateFlow<Pair<Int, Int>> = _streamVideoSize
+
     fun requestScreenStream() {
         val out = outbound ?: run {
             _inputMessage.value = "没有到桌面的控制连接"
             return
         }
-        val text = envelope(Protocol.TYPE_SCREEN_STREAM_REQUEST, out.peerId) {}.toString()
+        // 已在投屏中就不再重复请求
+        if (streamServer != null) return
+        val server = runCatching { java.net.ServerSocket(0, 1) }.getOrElse {
+            _inputMessage.value = "无法建立本地监听：${it.message}"
+            return
+        }
+        streamServer = server
+        streamFallbackSize = 1920 to 1080
+        val text = envelope(Protocol.TYPE_SCREEN_STREAM_REQUEST, out.peerId) {
+            put("port", server.localPort)
+        }.toString()
         outboundWriter.execute { runCatching { client.sendText(out.conn, text) } }
+        Log.i(TAG, "投屏请求已发，本地监听 :${server.localPort}")
     }
 
-    /** 平板侧主动停止投屏。桌面停流后会回 stop 确认 */
+    /**
+     * 投屏界面渲染面就绪后调用：阻塞 accept 桌面的 ffmpeg 连接，
+     * 连到即交给 StreamDecoder 解码渲染。起独立线程，不占调用方。
+     */
+    fun connectStreamSurface(surface: android.view.Surface) {
+        val server = streamServer
+        if (server == null || server.isClosed) {
+            runCatching { surface.release() }
+            return
+        }
+        Thread({
+            try {
+                server.soTimeout = 20_000
+                val socket = server.accept()
+                socket.tcpNoDelay = true
+                Log.i(TAG, "推流连接到达：${socket.inetAddress?.hostAddress}")
+                StreamDecoder(
+                    socket,
+                    surface,
+                    onEnded = { reason ->
+                        _inputMessage.value = reason
+                        _screenStream.value = null
+                    },
+                    onSize = { w, h -> _streamVideoSize.value = w to h }
+                ).start()
+            } catch (e: Exception) {
+                Log.w(TAG, "等待推流连接失败: ${e.message}")
+                runCatching { surface.release() }
+                _screenStream.value = null
+            } finally {
+                runCatching { server.close() }
+                streamServer = null
+            }
+        }, "linkspace-stream-accept").apply { isDaemon = true }.start()
+    }
+
+    /** 平板侧主动停止投屏：关监听 + 发 stop。桌面停流后会回 stop 确认 */
     fun stopScreenStream() {
         val out = outbound
         if (out != null) {
             val text = envelope(Protocol.TYPE_SCREEN_STREAM_STOP, out.peerId) {}.toString()
             outboundWriter.execute { runCatching { client.sendText(out.conn, text) } }
         }
+        runCatching { streamServer?.close() }
+        streamServer = null
         _screenStream.value = null
     }
 

@@ -21,7 +21,9 @@ import java.util.concurrent.atomic.AtomicBoolean
 class StreamDecoder(
     private val socket: Socket,
     private val surface: Surface,
-    private val onEnded: (reason: String) -> Unit
+    private val onEnded: (reason: String) -> Unit,
+    /** 流内 SPS 解出后的实际画面尺寸（触控映射基准），主线程外回调 */
+    private val onSize: (Int, Int) -> Unit = { _, _ -> }
 ) : Thread("linkspace-stream-decode") {
 
     private val stopped = AtomicBoolean(false)
@@ -67,32 +69,30 @@ class StreamDecoder(
             socket.soTimeout = 15_000
             val input = socket.getInputStream()
             val info = android.media.MediaCodec.BufferInfo()
+            val tmp = ByteArray(64 * 1024)
             var eos = false
             var lastInputAt = System.currentTimeMillis()
             while (!stopped.get() && !eos && !socket.isClosed) {
-                // 入：读流填缓冲。dequeueInput 带 10ms 超时轮询，给 stopped 留出口
+                // 入：读流填缓冲。dequeueInput 带 10ms 超时轮询，给 stopped 留出口。
+                // 不能用 ib.array()——MediaCodec 的输入缓冲是 direct buffer，
+                // array() 直接抛 UnsupportedOperationException（消息为 null，
+                // 首次联测秒退的根因）；用临时数组 + put
                 var inIdx = decoder.dequeueInputBuffer(10_000)
                 if (inIdx >= 0) {
                     val ib = decoder.getInputBuffer(inIdx)!!
-                    var n = 0
-                    // 单次最多填满一个输入缓冲；读不满说明对端暂时没产出
-                    while (n < ib.capacity()) {
-                        val k = input.read(ib.array(), ib.position() + n, ib.capacity() - n)
-                        if (k < 0) {
-                            eos = true
-                            break
-                        }
-                        n += k
-                        lastInputAt = System.currentTimeMillis()
-                        if (n >= ib.capacity()) break
-                        // 粒度 64KB：避免一次 read 阻塞太久饿死输出侧
-                        if (n >= 64 * 1024) break
+                    ib.clear()
+                    val n = input.read(tmp)
+                    if (n < 0) {
+                        eos = true
+                        decoder.queueInputBuffer(
+                            inIdx, 0, 0, 0, android.media.MediaCodec.BUFFER_FLAG_END_OF_STREAM
+                        )
+                        break
                     }
+                    ib.put(tmp, 0, n)
                     val pts = System.nanoTime() / 1000
-                    decoder.queueInputBuffer(
-                        inIdx, 0, n, pts,
-                        if (eos) android.media.MediaCodec.BUFFER_FLAG_END_OF_STREAM else 0
-                    )
+                    decoder.queueInputBuffer(inIdx, 0, n, pts, 0)
+                    lastInputAt = System.currentTimeMillis()
                 }
                 // 出：渲染所有就绪帧
                 while (true) {
@@ -106,6 +106,7 @@ class StreamDecoder(
                             outWidth = decoder.outputFormat.getInteger(android.media.MediaFormat.KEY_WIDTH)
                             outHeight = decoder.outputFormat.getInteger(android.media.MediaFormat.KEY_HEIGHT)
                             Log.i(TAG, "解码输出格式: ${outWidth}x${outHeight}")
+                            onSize(outWidth, outHeight)
                         }
                         else -> break
                     }

@@ -7,22 +7,22 @@
 // 为什么推 TCP 而非 RTSP：平板端 MediaCodec 吃裸 Annex-B 字节流即可，
 // 不需要解封装器，少一个 RTSP 栈。
 //
-// 采集范围是**虚拟屏**（多显示器并集，物理像素），与键鼠注入的
-// normalizeAbsolute 同一基准——平板上的触控点按画面比例映射后就是
-// 注入坐标，无需任何换算层。
+// 连接方向是**桌面连出**（ffmpeg 作 TCP 客户端连平板的 ServerSocket），
+// 而不是桌面监听：Windows 防火墙对无放行规则的进程会静默丢弃入站
+// SYN（实测 ffmpeg listen 10 秒超时 Error -138），而出站默认放行；
+// 平板端 Android 没有默认入站防火墙。平板把随机端口放进
+// screen.stream.request，桌面拿 conn 的 remoteAddress 拼 target。
+//
+// 采集范围是整个桌面区域（多显示器并集）。gdigrab 不支持负 offset，
+// 显式传虚拟屏 bounds 会报「extends outside window area」；不传时它
+// 默认抓全桌面。输出分辨率是 gdigrab 进程视角（可能经 DPI 虚拟化），
+// 平板触控映射以解码输出的实际尺寸为准。
 //
 // 安全语义：投屏不做独立授权，它寄生在已建立的键鼠会话之内（能看到
 // 画面是控制的前提）；会话结束/断连/撤销时推流随之终止（host.ts 钩子）。
 
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
-import { createServer } from 'node:net'
 import { log } from './log'
-
-export interface ScreenStreamInfo {
-  port: number
-  w: number
-  h: number
-}
 
 export class ScreenStreamService {
   private proc: ChildProcessWithoutNullStreams | null = null
@@ -33,19 +33,12 @@ export class ScreenStreamService {
   }
 
   /**
-   * 启动推流。ffmpeg 在 tcp listen 模式下等平板来连，连接建立后才开始
-   * 编码——流头（SPS/PPS/首个 IDR）完整，平板中途加入不存在解码黑窗。
-   * 端口用 Node 预占法拿空闲端口（ffmpeg 的 tcp:// 不支持 :0 随机回显）。
-   *
-   * 采集不传 offset/size：gdigrab 的 desktop 模式默认抓取整个桌面区域
-   * （多显示器并集），且它不支持负 offset——显式传虚拟屏 bounds 反而
-   * 报「extends outside window area」。实际输出分辨率是 gdigrab 进程
-   * 视角的虚拟屏（可能经 DPI 虚拟化），平板触控映射以解码输出尺寸为
-   * 准（payload 的 w/h 仅作初始值回退）。
+   * 启动推流：抓全桌面编码后推到平板的 ip:port。平板先起 ServerSocket
+   * 并把端口放进 screen.stream.request，这里直接作为 TCP 客户端连出；
+   * 连接建立后 ffmpeg 才开始编码，流头（SPS/PPS/IDR）完整。
    */
-  async start(ffmpegPath: string, vs: { x: number; y: number; w: number; h: number }): Promise<ScreenStreamInfo> {
+  start(ffmpegPath: string, target: { ip: string; port: number }): void {
     if (this.proc) throw new Error('已有投屏在进行')
-    const port = await reservePort()
     const args = [
       '-hide_banner', '-loglevel', 'error',
       '-f', 'gdigrab',
@@ -57,7 +50,7 @@ export class ScreenStreamService {
       '-g', '30',
       '-pix_fmt', 'yuv420p',
       '-f', 'h264',
-      `tcp://0.0.0.0:${port}?listen=1&listen_timeout=10000`
+      `tcp://${target.ip}:${target.port}`
     ]
     const proc = spawn(ffmpegPath, args, { windowsHide: true })
     this.stderrTail = []
@@ -74,8 +67,7 @@ export class ScreenStreamService {
       this.onEnded?.()
     })
     this.proc = proc
-    log.info(`[screen-stream] 推流已启动，监听 :${port}`)
-    return { port, w: vs.w, h: vs.h }
+    log.info(`[screen-stream] 推流已启动 → ${target.ip}:${target.port}`)
   }
 
   /** 推流意外结束的回调（host 据此通知对端并清 UI） */
@@ -85,8 +77,6 @@ export class ScreenStreamService {
     if (!this.proc) return
     const p = this.proc
     this.proc = null
-    // ffmpeg 对 listen socket 的 SIGTERM 处理干净，q/kill 都行；Windows
-    // 上没有 SIGTERM，taskkill 语义由 Node 的 kill 覆盖（单进程无子树）
     p.kill()
   }
 
@@ -94,17 +84,4 @@ export class ScreenStreamService {
   lastErrors(): string[] {
     return [...this.stderrTail]
   }
-}
-
-/** 预占一个空闲 TCP 端口：listen(0) 拿到端口后立刻释放，交给 ffmpeg */
-async function reservePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const srv = createServer()
-    srv.listen(0, '0.0.0.0', () => {
-      const addr = srv.address()
-      const port = typeof addr === 'object' && addr ? addr.port : 0
-      srv.close(() => (port > 0 ? resolve(port) : reject(new Error('端口分配失败'))))
-    })
-    srv.on('error', reject)
-  })
 }

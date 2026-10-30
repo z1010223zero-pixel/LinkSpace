@@ -42,11 +42,35 @@ class Discovery(private val context: Context) {
         }
 
         override fun onServiceResolved(info: NsdServiceInfo) {
-            val host: InetAddress = info.host ?: return
             val attrs = info.attributes ?: emptyMap()
             val idPrefix = attrs["id"]?.let { String(it) } ?: ""
             // 自己的通告要跳过：ID 前缀相同即本机
             if (idPrefix.isNotEmpty() && idPrefix == LinkSpaceService.deviceIdPrefix) return
+
+            // 桌面多网卡会广播多个 A 记录，而 NSD 对候选地址的挑选不可
+            // 控——实测解析出 169.254 链路本地地址，connect 8 秒超时
+            // （T7 走查）。候选按可路由性过滤：链路本地与 CGNAT 段
+            // （100.64/10，Tailscale 落址区）一律排除，只留局域网常规段。
+            // 以 .1 结尾的地址也排除：那是网关/虚拟网卡（VMware VMnet8
+            // 默认 .1）的惯例地址，桌面实测 VMnet8 的 .1 与家里路由器
+            // 的 .1 撞号，连过去是路由器不是桌面
+            fun routable(a: InetAddress): Boolean {
+                val s = a.hostAddress ?: return false
+                if (s.startsWith("169.254.")) return false
+                if (s.endsWith(".1")) return false
+                if (s.startsWith("100.")) {
+                    val second = s.split('.').getOrNull(1)?.toIntOrNull() ?: 256
+                    if (second in 64..127) return false
+                }
+                return true
+            }
+            val host: InetAddress = (runCatching { info.hostAddresses }.getOrNull() ?: emptyList())
+                .firstOrNull { routable(it) }
+                ?: info.host?.takeIf { routable(it) }
+                ?: run {
+                    Log.w(TAG, "服务 ${info.serviceName} 本轮解析无可路由地址，等待下一轮")
+                    return
+                }
 
             val svc = DiscoveredService(
                 serviceName = info.serviceName,

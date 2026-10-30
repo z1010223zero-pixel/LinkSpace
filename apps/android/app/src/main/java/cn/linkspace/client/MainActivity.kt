@@ -88,20 +88,25 @@ class MainActivity : ComponentActivity() {
     private val debugReceiver = object : android.content.BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: android.content.Intent?) {
             val service = serviceOf() ?: return
-            val peer = service.discovered.value.firstOrNull { it.paired } ?: run {
-                android.util.Log.w("LinkSpace/Debug", "没有已配对的发现条目")
-                return
-            }
-            val m = resources.displayMetrics
-            this@MainActivity.lifecycleScope.launch {
-                service.requestInputControl(
-                    peer = peer,
-                    screen = InputController.Screen(
-                        m.widthPixels.coerceAtLeast(1),
-                        m.heightPixels.coerceAtLeast(1)
-                    ),
-                    displayName = service.selfName.value
-                ).onFailure { android.util.Log.w("LinkSpace/Debug", "发起控制失败: ${it.message}") }
+            when (intent?.action) {
+                "cn.linkspace.DEBUG_REQUEST_CONTROL" -> {
+                    val peer = service.discovered.value.firstOrNull { it.paired } ?: run {
+                        android.util.Log.w("LinkSpace/Debug", "没有已配对的发现条目")
+                        return
+                    }
+                    val m = resources.displayMetrics
+                    this@MainActivity.lifecycleScope.launch {
+                        service.requestInputControl(
+                            peer = peer,
+                            screen = InputController.Screen(
+                                m.widthPixels.coerceAtLeast(1),
+                                m.heightPixels.coerceAtLeast(1)
+                            ),
+                            displayName = service.selfName.value
+                        ).onFailure { android.util.Log.w("LinkSpace/Debug", "发起控制失败: ${it.message}") }
+                    }
+                }
+                "cn.linkspace.DEBUG_SCREEN_STREAM" -> service.requestScreenStream()
             }
         }
     }
@@ -138,13 +143,19 @@ class MainActivity : ComponentActivity() {
 
         // 走查驱动入口（仅 debug build 注册）：ZUI 下 adb 注入的 ACTION_UP
         // 不可靠，Button onClick 不触发，自动化走查点不了「控制电脑」。
-        // 用法：adb shell am broadcast -a cn.linkspace.DEBUG_REQUEST_CONTROL
+        // 用法：
+        //   am broadcast -a cn.linkspace.DEBUG_REQUEST_CONTROL  发起键鼠会话
+        //   am broadcast -a cn.linkspace.DEBUG_SCREEN_STREAM    请求投屏
         // 取 discovered 列表第一张已配对卡片直接发起控制请求
         if (applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0) {
+            val filter = android.content.IntentFilter().apply {
+                addAction("cn.linkspace.DEBUG_REQUEST_CONTROL")
+                addAction("cn.linkspace.DEBUG_SCREEN_STREAM")
+            }
             androidx.core.content.ContextCompat.registerReceiver(
                 this,
                 debugReceiver,
-                android.content.IntentFilter("cn.linkspace.DEBUG_REQUEST_CONTROL"),
+                filter,
                 androidx.core.content.ContextCompat.RECEIVER_EXPORTED
             )
         }
@@ -980,9 +991,9 @@ private const val PROTO_MAX_EVENTS = 64
 @Composable
 fun ScreenMirrorScreen(service: LinkSpaceService, info: LinkSpaceService.ScreenStreamInfo) {
     val controller = service.input
-    var endedNotice by remember { mutableStateOf("") }
-    val decoderRef = remember { java.util.concurrent.atomic.AtomicReference<StreamDecoder?>(null) }
     val scrollAccum = remember { floatArrayOf(0f) }
+    // 会话声明的本机屏幕（触控坐标空间基准，来自 session.accept）
+    val inputState by service.inputState.collectAsStateWithLifecycle()
 
     Box(
         Modifier
@@ -994,24 +1005,15 @@ fun ScreenMirrorScreen(service: LinkSpaceService, info: LinkSpaceService.ScreenS
                 android.view.SurfaceView(ctx).apply {
                     holder.addCallback(object : android.view.SurfaceHolder.Callback {
                         override fun surfaceCreated(holder: android.view.SurfaceHolder) {
-                            if (decoderRef.get() != null) return
-                            try {
-                                val sock = java.net.Socket(info.host, info.port)
-                                sock.tcpNoDelay = true
-                                val d = StreamDecoder(sock, holder.surface) { reason ->
-                                    endedNotice = reason
-                                }
-                                decoderRef.set(d)
-                                d.start()
-                            } catch (e: Exception) {
-                                endedNotice = e.message ?: "无法连接推流端口"
-                            }
+                            // 渲染面就绪：服务层 accept 桌面 ffmpeg 的连接并起解码
+                            service.connectStreamSurface(holder.surface)
                         }
 
                         override fun surfaceChanged(holder: android.view.SurfaceHolder, format: Int, width: Int, height: Int) {}
 
                         override fun surfaceDestroyed(holder: android.view.SurfaceHolder) {
-                            decoderRef.getAndSet(null)?.shutdown()
+                            // 解码器随推流断开自愈退出（桌面杀流 → EOF/异常路径），
+                            // 面已随本 view 销毁被 release
                         }
                     })
                 }
@@ -1027,11 +1029,11 @@ fun ScreenMirrorScreen(service: LinkSpaceService, info: LinkSpaceService.ScreenS
                         var downAt = 0L
                         var moved = false
                         var dragArmed = false
-                        // 触控映射基准 = 解码输出的实际画面尺寸（gdigrab
-                        // 输出与桌面虚拟屏可能差一个 DPI 虚拟化因子），
-                        // 流头未解出前回退到 start 消息携带的 w/h
-                        fun vw() = decoderRef.get()?.outWidth?.takeIf { it > 0 } ?: info.w
-                        fun vh() = decoderRef.get()?.outHeight?.takeIf { it > 0 } ?: info.h
+                        // 触控坐标空间必须与 session.start 声明的本机屏幕一致
+                        // （桌面 mapPoint 以它为 from）——投屏画面（虚拟屏全景，
+                        // 宽高比与平板屏不同）上的触点按比例换算进该空间
+                        val sessionScreen = inputState.remoteScreen
+                            ?: InputController.Screen(1440, 900)
                         while (true) {
                             val event = awaitPointerEvent()
                             val pressed = event.changes.filter { it.pressed }
@@ -1069,8 +1071,10 @@ fun ScreenMirrorScreen(service: LinkSpaceService, info: LinkSpaceService.ScreenS
                                         controller,
                                         listOf(
                                             InputController.move(
-                                                (c.position.x / size.width.toFloat() * vw()).toInt().coerceIn(0, vw() - 1),
-                                                (c.position.y / size.height.toFloat() * vh()).toInt().coerceIn(0, vh() - 1)
+                                                (c.position.x / size.width.toFloat() * sessionScreen.w).toInt()
+                                                    .coerceIn(0, sessionScreen.w - 1),
+                                                (c.position.y / size.height.toFloat() * sessionScreen.h).toInt()
+                                                    .coerceIn(0, sessionScreen.h - 1)
                                             )
                                         )
                                     )
@@ -1105,17 +1109,6 @@ fun ScreenMirrorScreen(service: LinkSpaceService, info: LinkSpaceService.ScreenS
             Text("投屏中 · ${info.w}x${info.h}", color = Color.White, fontSize = 13.sp)
             Spacer(Modifier.weight(1f))
             Button(onClick = { service.stopScreenStream() }) { Text("退出投屏") }
-        }
-        if (endedNotice.isNotEmpty()) {
-            Text(
-                endedNotice,
-                color = Color.White,
-                fontSize = 13.sp,
-                modifier = Modifier
-                    .align(Alignment.Center)
-                    .background(Color.Black.copy(alpha = 0.6f))
-                    .padding(10.dp)
-            )
         }
     }
 }
