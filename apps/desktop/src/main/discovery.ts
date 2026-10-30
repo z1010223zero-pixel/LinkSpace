@@ -22,13 +22,62 @@
 //      永不刷新，12s 软过期误删在线设备；且 Browser 内部仍保留该服务，
 //      此后永远不会再发 up——设备在界面上出现约 12s 后永久消失。
 //      → 直接从原始应答驱动 seen 表，每次应答都刷新 lastSeen。
+//
+// 为什么 socket 要自建并显式指定组播出接口（真机实证 2026-10-30）：
+//   multicast-dns 默认 setMulticastInterface('0.0.0.0')，Windows 把
+//   INADDR_ANY 解析为「隐式默认接口」——这个选择**不跟随路由 metric**
+//   （实测把 Tailscale 接口 metric 调到 5000、WLAN 只有 30，组播仍从
+//   Tailscale 虚拟网卡发出），表现为：通告与应答全部困在虚拟网卡里，
+//   物理局域网上的对端永远发现不了本机；而同机的探针（loopback）却
+//   能收到应答，极具迷惑性。历史脉络：第一版曾给 multicast-dns 传
+//   `interface` 选项修出方向，但那会连带 bind 到具体地址，入方向完全
+//   失聪，被 14dfb12 推翻；本版两全——bind 保持 0.0.0.0（入方向全接口），
+//   出方向在 listening 后用 socket.setMulticastInterface() 显式钉到
+//   物理网卡（见 pickOutInterface 与 onNetworkInterface）。
 
+import dgram from 'node:dgram'
+import os from 'node:os'
 import { Bonjour, type Service } from 'bonjour-service'
 
 export const SERVICE_TYPE = 'linkspace'
 
 /** 本服务的完整 DNS 名，查询与应答匹配都用它 */
 const SERVICE_FQDN = `_${SERVICE_TYPE}._tcp.local`
+
+/** mDNS 标准组播组 */
+const MCAST_GROUP = '224.0.0.251'
+
+/** Windows 上组播出不去局域网的虚拟网卡（接口名匹配，大小写不敏感） */
+const VIRTUAL_IFACE_RE = /vmware|virtualbox|hyper-v|vethernet|tailscale|zerotier|wsl|bluetooth/i
+
+/** CGNAT 段 100.64.0.0/10：Tailscale 等虚拟组网默认落址于此 */
+function isCgnat(addr: string): boolean {
+  const m = /^100\.(\d+)\./.exec(addr)
+  if (!m) return false
+  const second = Number(m[1])
+  return second >= 64 && second <= 127
+}
+
+/**
+ * 选组播出接口（IPv4 地址）。判据按优先级：
+ *   1. 排除 loopback（internal）与 169.254 链路本地——组播出去没人收
+ *   2. 排除 CGNAT 段——Tailscale/ZeroTier 的落址区，包发进去会被虚拟网络吞掉
+ *   3. 接口名命中虚拟网卡黑名单的降级（VMware VMnet 等也是死路）
+ * 全部被过滤时返回 null（调用方保持系统默认，聊胜于无）。
+ */
+export function pickOutInterface(): string | null {
+  const candidates: Array<{ addr: string; score: number }> = []
+  for (const [name, addrs] of Object.entries(os.networkInterfaces())) {
+    for (const addr of addrs ?? []) {
+      if (addr.family !== 'IPv4' || addr.internal) continue
+      if (addr.address.startsWith('169.254.')) continue
+      if (isCgnat(addr.address)) continue
+      candidates.push({ addr: addr.address, score: VIRTUAL_IFACE_RE.test(name) ? 1 : 0 })
+    }
+  }
+  candidates.sort((a, b) => a.score - b.score)
+  return candidates[0]?.addr ?? null
+}
 
 export type DeviceType = 'win' | 'android-phone' | 'android-tablet'
 
@@ -122,6 +171,9 @@ interface RawMdnsServer {
   query(name: string, type: string): void
   on(event: 'response', cb: (packet: RawPacket, rinfo: { address: string; port: number }) => void): void
   removeListener(event: 'response', cb: (packet: RawPacket, rinfo: { address: string; port: number }) => void): void
+  /** multicast-dns 在 membership 变化后发出（listening 首次必发），用于随后覆盖出接口 */
+  on(event: 'networkInterface', cb: () => void): void
+  removeListener(event: 'networkInterface', cb: () => void): void
 }
 
 /** DNS TXT 记录：每条 character-string 形如 `key=value`（DNS-SD 规范） */
@@ -156,6 +208,8 @@ function dnsEqual(a: string, b: string): boolean {
 export class Discovery {
   private bonjour: Bonjour | null = null
   private ad: Service | null = null
+  /** 自建 socket：持有引用才能在 listening 后显式指定组播出接口（见文件头注释） */
+  private mcastSocket: dgram.Socket | null = null
   private readonly seen = new Map<string, DiscoveredService>()
   private readonly staleMs: number
   private sweepTimer: NodeJS.Timeout | null = null
@@ -196,19 +250,29 @@ export class Discovery {
     if (this.started) return
     this.started = true
 
-    // 不绑定具体组播网卡（new Bonjour() 默认全接口）。
-    // 实测（真机走查 2026-10-29）：Windows 上把组播 socket 绑到具体地址
-    // （multicast-dns 的 interface 选项）会导致**完全收不到组播入包**——
-    // 绑 0.0.0.0 全接口接收才正常。之前为修「查询发不到对端网段」传入
-    // interface，矫枉过正；出方向靠系统路由表自选，入方向再叠加下方的
-    // 周期性补查兜底，不需要绑定。
-    this.bonjour = new Bonjour()
+    // 不绑定具体组播网卡（bind 保持 0.0.0.0 全接口）：实测（真机走查
+    // 2026-10-29）Windows 上把组播 socket 绑到具体地址会导致**完全收不到
+    // 组播入包**。出方向的修正走 socket.setMulticastInterface（不影响
+    // bind），见 onNetworkInterface。
+    this.mcastSocket = dgram.createSocket({ type: 'udp4', reuseAddr: true })
+    // bonjour-service 的 ServiceConfig 类型未收录 socket 透传，但运行时
+    // mdns-server.js 把 opts 原样交给 multicast-dns（其 L25 支持注入
+    // socket），断言越过类型缺口即可
+    this.bonjour = new Bonjour({
+      socket: this.mcastSocket
+    } as unknown as ConstructorParameters<typeof Bonjour>[0])
     this.publishSelf()
 
     // 应答驱动发现：不用 Browser 事件，理由见文件头注释。
     const raw = this.rawServer()
     this.onResponse = (packet, rinfo) => this.handleResponse(packet, rinfo)
     raw.on('response', this.onResponse)
+
+    // multicast-dns 在 listening 后的首次 update 会把出接口重置回
+    // '0.0.0.0'（Windows 上隐式落到 Tailscale 等虚拟网卡），此后每次
+    // membership 变化都会再发一次 networkInterface 事件——在事件回调里
+    // 统一覆盖出接口并补漏 membership，保证始终晚于库的默认行为执行。
+    raw.on('networkInterface', this.onNetworkInterface)
 
     // 周期性补发查询，这是发现功能的生命线：Android NSD 注册后只应答
     // 查询、不做周期性通告，桌面端先启动就会错过所有通告。RFC 6762 §5.2
@@ -243,16 +307,53 @@ export class Discovery {
       this.onResponse = null
     }
     try {
+      this.rawServer().removeListener('networkInterface', this.onNetworkInterface)
+    } catch {
+      /* 已销毁时忽略 */
+    }
+    try {
       this.ad?.stop()
     } catch {
       /* 已停止时忽略 */
     }
     this.bonjour?.destroy()
     this.bonjour = null
+    this.mcastSocket = null
     this.seen.clear()
   }
 
   private onResponse: ((packet: RawPacket, rinfo: { address: string; port: number }) => void) | null = null
+
+  /**
+   * 出接口显式化 + membership 补漏（真机实证 2026-10-30，见文件头注释）：
+   *   - 出接口：multicast-dns 每次都设回 '0.0.0.0'，Windows 隐式解析会落
+   *     到 Tailscale 等虚拟网卡且不跟随路由 metric——必须显式钉回物理网卡。
+   *   - membership：库内 allInterfaces 对 127.0.0.1/169.254 的加入会 throw
+   *     被吞掉，真实接口若同样失败同样静默——这里对每个非 internal IPv4
+   *     接口重补一次（重复加入抛错同样吞掉，幂等）。
+   */
+  private readonly onNetworkInterface = (): void => {
+    const sock = this.mcastSocket
+    if (!sock) return
+    const out = pickOutInterface()
+    if (out) {
+      try {
+        sock.setMulticastInterface(out)
+      } catch {
+        /* 网卡瞬态（切换/禁用）时忽略，下次事件再试 */
+      }
+    }
+    for (const [, addrs] of Object.entries(os.networkInterfaces())) {
+      for (const addr of addrs ?? []) {
+        if (addr.family !== 'IPv4' || addr.internal) continue
+        try {
+          sock.addMembership(MCAST_GROUP, addr.address)
+        } catch {
+          /* 已加入或接口不支持组播 */
+        }
+      }
+    }
+  }
 
   private rawServer(): RawMdnsServer {
     // server 在 bonjour-service 类型里是 private，见 RawMdnsServer 上方说明
