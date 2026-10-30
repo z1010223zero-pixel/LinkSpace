@@ -61,6 +61,11 @@ export interface HostOptions {
   inputInject?: (events: InputEvent[], session: ActiveInputSession) => void
   /** 控制会话终止时抬起按住的键（防卡键），测试注入记录 */
   inputReleaseAll?: () => void
+  /**
+   * 心跳周期/超时注入（毫秒）。正常留空走 ControlNode 默认（5s/15s）；
+   * 无头测试注入短周期，把「超时清理」路径钉进秒级回归（审查 P2-4）
+   */
+  heartbeat?: { intervalMs?: number; timeoutMs?: number }
 }
 
 export interface HostEvents {
@@ -255,18 +260,43 @@ export class Host {
 
     // 控制通道与文件传输共用同一个端口与证书（ADR-003）
     this.control.attach(this.fileServer!.server as Server)
-    this.control.startHeartbeat((conn) => {
-      log.warn(`对端 ${conn.peerId || '(未知)'} 心跳超时，判定离线`)
-      this.peers.delete(conn.peerId)
-    })
-    this.control.onClosed((conn) => {
-      if (conn.peerId) this.peers.delete(conn.peerId)
-      this.endpoints.delete(conn.peerId)
-      this.pendingEndpoints.delete(conn)
-      for (const [name, c] of this.serviceConns) {
-        if (c === conn) this.serviceConns.delete(name)
-      }
-    })
+    this.control.startHeartbeat(
+      (conn) => {
+        log.warn(`对端 ${conn.peerId || '(未知)'} 心跳超时，判定离线`)
+        this.handleConnClosed(conn)
+      },
+      this.opts.heartbeat
+    )
+    this.control.onClosed((conn) => this.handleConnClosed(conn))
+  }
+
+  /**
+   * 连接断开（onClosed）与心跳超时（onTimeout）共用的清理。
+   *
+   * 超时路径必须与 close 路径做同样的事（审查 P2-4）：ws.close 是优雅
+   * 关闭，对端断网时 close 握手完不成，真正的 close 事件要等 closeTimeout
+   * （默认 30s）——若只删 peers 干等，被控期间的卡键要 15s 心跳 + 30s
+   * close ≈ 45s 才解除，威胁模型 T4 要求立即恢复本机输入。输入会话的
+   * 清理由 wireInputBridge 的 onClosed 也会推一次，onPeerDisconnected
+   * 幂等，重复调用无害。
+   *
+   * 发送方向 offered→waiting 回退（审查 P2-2）：对端 accept 前掉线的
+   * 任务必须回 waiting，否则 flushWaitingOffers（只认 waiting）永不补发。
+   */
+  private handleConnClosed(conn: Connection): void {
+    if (conn.peerId) this.peers.delete(conn.peerId)
+    this.endpoints.delete(conn.peerId)
+    this.pendingEndpoints.delete(conn)
+    for (const [name, c] of this.serviceConns) {
+      if (c === conn) this.serviceConns.delete(name)
+    }
+    this.inputCoordinator?.onPeerDisconnected(conn.peerId)
+    this.inputController?.onPeerDisconnected(conn.peerId)
+    for (const task of this.transfers.list()) {
+      if (task.peerId !== conn.peerId) continue
+      if (task.direction !== 'send' || task.state !== 'offered') continue
+      this.transfers.markWaiting(task.id)
+    }
   }
 
   private startPairing(cert: DeviceCert): void {
@@ -677,6 +707,9 @@ export class Host {
   setClipboardEnabled(enabled: boolean): void {
     if (enabled === this.clipboardEnabled) return
     this.clipboardEnabled = enabled
+    // 开关落盘（审查 P2-1）：用户的选择要跨重启保持，不能每次启动
+    // 强制回开——静默双向同步是需要用户明示授权的行为
+    this.profile.setClipboardEnabled(enabled)
     if (enabled) this.clipboardSync?.start()
     else this.clipboardSync?.stop()
     log.info(`剪贴板同步已${enabled ? '开启' : '关闭'}`)
@@ -684,6 +717,18 @@ export class Host {
 
   isClipboardEnabled(): boolean {
     return this.clipboardEnabled
+  }
+
+  /**
+   * 启动时按持久化值归位剪贴板开关（审查 P2-1）。
+   * enableClipboardSync「构造即开」是无头测试的便利语义；产品路径必须
+   * 在构造后调这个归位——用户上次关掉的，重启后不能悄悄打开。
+   * 未设置过 = 默认关。
+   */
+  restoreClipboardSwitch(): boolean {
+    const saved = this.profile.getClipboardEnabled()
+    if (!saved) this.setClipboardEnabled(false)
+    return saved
   }
 
   /** 本机剪贴板可能变了，由上层定时调用 */

@@ -16,11 +16,14 @@ export interface ProfileStoreOptions {
 interface ProfileFile {
   version: 1
   displayName: string
+  /** 剪贴板同步开关（审查 P2-1）。缺省视为关：静默双向同步需要用户明示授权 */
+  clipboardEnabled?: boolean
 }
 
 export class ProfileStore {
   private readonly filePath: string
   private displayName = ''
+  private clipboardOn = false
 
   constructor(opts: ProfileStoreOptions = {}) {
     const dir = opts.dir ?? join(process.cwd(), '.profile-test')
@@ -34,6 +37,7 @@ export class ProfileStore {
       const parsed = JSON.parse(readFileSync(this.filePath, 'utf8')) as Partial<ProfileFile>
       if (parsed.version !== 1 || typeof parsed.displayName !== 'string') return
       this.displayName = parsed.displayName
+      if (typeof parsed.clipboardEnabled === 'boolean') this.clipboardOn = parsed.clipboardEnabled
     } catch {
       // 配置损坏只是名字退回默认值，不能因此起不来
       this.displayName = ''
@@ -43,7 +47,11 @@ export class ProfileStore {
   private persist(): void {
     const dir = join(this.filePath, '..')
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
-    const data: ProfileFile = { version: 1, displayName: this.displayName }
+    const data: ProfileFile = {
+      version: 1,
+      displayName: this.displayName,
+      clipboardEnabled: this.clipboardOn
+    }
     const tmp = `${this.filePath}.tmp`
     writeFileSync(tmp, `${JSON.stringify(data, null, 2)}\n`, 'utf8')
     renameSync(tmp, this.filePath)
@@ -56,6 +64,16 @@ export class ProfileStore {
 
   set(name: string): void {
     this.displayName = name
+    this.persist()
+  }
+
+  /** 剪贴板同步开关的持久化值（审查 P2-1）。未设置过 = false（默认关） */
+  getClipboardEnabled(): boolean {
+    return this.clipboardOn
+  }
+
+  setClipboardEnabled(enabled: boolean): void {
+    this.clipboardOn = enabled
     this.persist()
   }
 }

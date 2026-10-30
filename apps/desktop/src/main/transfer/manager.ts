@@ -189,6 +189,21 @@ export class TransferManager extends EventEmitter {
     return task
   }
 
+  /**
+   * 发送方向：对端在 accept 前掉线，任务从 offered 回退 waiting（审查 P2-2）。
+   * 只吃 offered——已 accepted 的回退会让断点续传状态错乱（committedOffset
+   * 与 offered 前置条件不符）。回退后由对端重连的 flushWaitingOffers 补发，
+   * 4.9「上线自动补发」在这个半路断连场景才闭环，任务不再永久卡死。
+   */
+  markWaiting(id: string): TransferTask | undefined {
+    const task = this.tasks.get(id)
+    if (!task || task.state !== 'offered') return task
+    task.state = 'waiting'
+    log.info(`传输任务 ${id} 对端已离线，回退等待上线`)
+    this.emit('changed', task)
+    return task
+  }
+
   /** 接收方接受了 offer。token 由接收方生成，回传给发送方作为数据面凭证 */
   async accept(
     id: string,

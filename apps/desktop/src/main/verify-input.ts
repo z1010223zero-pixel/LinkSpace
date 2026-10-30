@@ -553,6 +553,23 @@ function testWin32(): void {
     cap.tick()
     check('模式切换后重建基线', evts.length === before)
 
+    // 受控挂起（审查 P2-3）：被控期间本机采集必须停摆——此时光标移动
+    // 是对端注入的，喂边缘或转发都等于让对端借本机无授权驱动第三方
+    const suspEvts = evts.length
+    const suspEdge = edge.length
+    cap.setMode('suspended')
+    cap.tick() // 建挂起基线
+    f.setPos({ x: 1500, y: 700 })
+    f.press(0x45)
+    cap.tick()
+    f.release(0x45)
+    cap.tick()
+    check('挂起期间不产输入事件', evts.length === suspEvts)
+    check('挂起期间不喂边缘检测', edge.length === suspEdge)
+    cap.setMode('control')
+    cap.tick()
+    check('退出挂起首 tick 无事件（基线重建）', evts.length === suspEvts)
+
     // 单 tick 大量按键 → 按协议上限分批
     for (let vk = 0x08; vk < 0x08 + 70; vk++) f.press(vk)
     cap.tick()
@@ -755,10 +772,133 @@ async function testE2e(): Promise<void> {
     await waitFor(() => (A.controllingPeer() === null ? true : undefined))
     check('撤销后控制端也回本机', A.controllingPeer() === null, `A.controlling=${A.controllingPeer()}`)
     check('撤销是双向的', !A.trustStore.isKnown(B.id))
+
+    // ---------- 8. 剪贴板开关持久化（P2-1） ----------
+    console.log('\n8. 剪贴板开关持久化')
+    // 用户上次关掉的，重启后不能悄悄打开：开关必须落在 profile.json。
+    // 同一 dataDir 重建 Host 等价于进程重启（profile 是构造时读盘的）
+    const dirP = join(workDir, 'P')
+    await mkdir(dirP, { recursive: true })
+    const mkPersistHost = async (gen: number) =>
+      new Host({
+        displayName: 'Input-Persist-' + gen,
+        deviceType: 'win',
+        dataDir: dirP,
+        cert: await makeCert(),
+        bind: '127.0.0.1'
+      })
+    // 三代实例串行起停（而非并存）：贴近「重启」语义，也避免同进程
+    // 多实例并发通告同名 mDNS 服务刷冲突告警
+    const P1 = await mkPersistHost(1)
+    await P1.start()
+    P1.enableClipboardSync({ readText: () => '', writeText: () => {} })
+    check('未设置过时默认关', P1.restoreClipboardSwitch() === false)
+    P1.setClipboardEnabled(true)
+    await P1.stop()
+    const P2 = await mkPersistHost(2)
+    await P2.start()
+    P2.enableClipboardSync({ readText: () => '', writeText: () => {} })
+    check('重启后恢复为开', P2.restoreClipboardSwitch() === true)
+    P2.setClipboardEnabled(false)
+    await P2.stop()
+    const P3 = await mkPersistHost(3)
+    await P3.start()
+    P3.enableClipboardSync({ readText: () => '', writeText: () => {} })
+    check('重启后恢复为关', P3.restoreClipboardSwitch() === false)
+    await P3.stop()
   } finally {
     await A.stop()
     await B.stop()
     await C.stop()
+    await rm(workDir, { recursive: true, force: true })
+  }
+}
+
+/**
+ * 心跳超时的会话清理（审查 P2-4）。
+ *
+ * 被控期间对端断网的典型表现是静默丢包：TCP 没有断开信号，ws.close
+ * 的优雅握手完不成，真正的 close 事件要等 closeTimeout（30s）。修复前
+ * onTimeout 只删连接表条目，Host 级清理（终止会话 + 抬键）要等
+ * 15s 心跳 + 30s close ≈ 45s；修复后超时回调与 onClosed 共用
+ * handleConnClosed，超时即刻恢复本机输入。
+ */
+async function testHeartbeatTimeout(): Promise<void> {
+  console.log('\n=== 心跳超时终止会话（静默丢包路径）===\n')
+
+  const workDir = await mkdtemp(join(tmpdir(), 'linkspace-hbinput-'))
+  const injected: InputEvent[][] = []
+  let released = 0
+  const requests: string[] = []
+  const pairRequests: PendingPairing[] = []
+
+  // D（控制端）注入超长心跳周期：测试期间一条心跳都不发，模拟静默丢包；
+  // E（被控端）短周期判定：1s 无消息即视为对端离线
+  const D = new Host({
+    displayName: 'HB-Alpha',
+    deviceType: 'win',
+    dataDir: join(workDir, 'D'),
+    cert: await makeCert(),
+    bind: '127.0.0.1',
+    heartbeat: { intervalMs: 60_000, timeoutMs: 60_000 },
+    inputLocalScreen: () => ({ w: 2000, h: 1000 })
+  })
+  const E = new Host({
+    displayName: 'HB-Beta',
+    deviceType: 'win',
+    dataDir: join(workDir, 'E'),
+    cert: await makeCert(),
+    bind: '127.0.0.1',
+    heartbeat: { intervalMs: 200, timeoutMs: 1000 },
+    inputLocalScreen: () => ({ w: 1000, h: 500 }),
+    inputInject: (events) => injected.push(events),
+    inputReleaseAll: () => {
+      released++
+    }
+  })
+  await mkdir(join(workDir, 'D'), { recursive: true })
+  await mkdir(join(workDir, 'E'), { recursive: true })
+  E.on('inputRequested', (r) => requests.push(r.sessionId))
+  E.on('pairRequested', (p) => pairRequests.push(p))
+
+  try {
+    await D.start()
+    await E.start()
+
+    const svcE: DiscoveredService = {
+      serviceName: 'HB-Beta',
+      idPrefix: E.id.slice(0, 12),
+      displayName: 'HB-Beta',
+      deviceType: 'win',
+      caps: ['file'],
+      host: '127.0.0.1',
+      port: E.port,
+      paired: true,
+      lastSeen: Date.now()
+    }
+    const conn = await D.connect(svcE)
+    await waitFor(() => (conn.peerId === E.id ? conn : undefined))
+    const pairingPromise = D.requestPairing(conn)
+    const pending = await waitFor(() => pairRequests[0])
+    D.submitCode(conn, pending.code)
+    check('配对建立', (await pairingPromise).deviceId === E.id)
+
+    const reqPromise = D.requestInputControl(E.id)
+    const req = await waitFor(() => requests[0])
+    E.approveInputControl(req)
+    check('会话已建立', (await reqPromise).ok && E.controlledByPeer() === D.id)
+
+    // 此后 D 完全静默（含心跳）：E 的超时判定触发，会话必须立即终止
+    await waitFor(() => (E.controlledByPeer() === null ? true : undefined))
+    check('超时后被控会话立即终止', E.controlledByPeer() === null)
+    check('超时清理抬起按住状态（防卡键）', released === 1)
+    check('超时期间无事件注入', injected.length === 0)
+    // close 帧经 TCP 仍可达：控制端走 onClosed 既有路径回本机
+    await waitFor(() => (D.controllingPeer() === null ? true : undefined))
+    check('控制端随之回本机', D.controllingPeer() === null)
+  } finally {
+    await D.stop()
+    await E.stop()
     await rm(workDir, { recursive: true, force: true })
   }
 }
@@ -780,6 +920,7 @@ async function main(): Promise<void> {
   }
 
   await testE2e()
+  await testHeartbeatTimeout()
 
   console.log(`\n=== 结果：${failures === 0 ? '全部通过' : `${failures} 项失败`} ===\n`)
   process.exit(failures === 0 ? 0 : 1)

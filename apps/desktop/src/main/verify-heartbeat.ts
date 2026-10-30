@@ -8,6 +8,7 @@
 
 import { setIdentityDir, getDeviceCert } from './transfer/identity'
 import { ControlNode, type Connection } from './control/node'
+import { WebSocket } from 'ws'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -109,6 +110,57 @@ async function main(): Promise<void> {
 
     await B2.close()
     A.control.stop()
+
+    // ---------- 3. 消息洪泛防护（P2-5） ----------
+    console.log('\n3. 消息洪泛防护（限频与单消息上限）')
+    const B3 = await makeNode('dev_B3_444444444444')
+    // 裸 ws 客户端直接灌消息：不经过 ControlNode 的发送侧，测的就是
+    // 服务端对「合法格式 + 非法频率/尺寸」的防御
+    const envelopeOf = (type: string, payload: Record<string, unknown> = {}) =>
+      JSON.stringify({
+        v: 1,
+        type,
+        id: 't-' + Math.random().toString(36).slice(2),
+        from: 'dev_attacker',
+        to: B3.id,
+        ts: Date.now(),
+        payload
+      })
+
+    // input.event 限频 200 条/s：阈值内保持，第 201 条断开
+    {
+      const ws = new WebSocket('wss://127.0.0.1:' + B3.port + '/linkspace/v1/control', {
+        rejectUnauthorized: false
+      })
+      await new Promise<void>((r) => ws.once('open', r))
+      let closedCode = 0
+      ws.on('close', (code) => {
+        closedCode = code
+      })
+      for (let i = 0; i < 200; i++) ws.send(envelopeOf('input.event'))
+      await sleep(300)
+      check('限频阈值内（200 条/s）连接保持', ws.readyState === WebSocket.OPEN)
+      ws.send(envelopeOf('input.event'))
+      await waitFor(() => (closedCode !== 0 ? true : undefined))
+      check('超频的 input.event 被按 4008 断开', closedCode === 4008, String(closedCode))
+    }
+
+    // 单消息上限 1MiB：超过按 ws 标准 1009 断开，不进 JSON.parse
+    {
+      const ws = new WebSocket('wss://127.0.0.1:' + B3.port + '/linkspace/v1/control', {
+        rejectUnauthorized: false
+      })
+      await new Promise<void>((r) => ws.once('open', r))
+      let closedCode = 0
+      ws.on('close', (code) => {
+        closedCode = code
+      })
+      ws.send(envelopeOf('clipboard.share', { kind: 'text', text: 'x'.repeat(2 * 1024 * 1024) }))
+      await waitFor(() => (closedCode !== 0 ? true : undefined))
+      check('超过 1MiB 的消息被按 1009 断开', closedCode === 1009, String(closedCode))
+    }
+
+    await B3.close()
   } finally {
     await A.close().catch(() => {})
   }

@@ -6,9 +6,12 @@
 // 本类保持同步纯逻辑，无头测试可以精确驱动。
 //
 // 模式：
-//   idle    —— 只喂边缘检测（7.1）：位置变化时回调 onEdgeMove
-//   control —— 采集输入并回调 onEvents；边缘检测停止，否则切过去的
-//              第一次移动就会在源屏幕边缘再次触发切换
+//   idle      —— 只喂边缘检测（7.1）：位置变化时回调 onEdgeMove
+//   control   —— 采集输入并回调 onEvents；边缘检测停止，否则切过去的
+//                第一次移动就会在源屏幕边缘再次触发切换
+//   suspended —— 受控挂起（审查 P2-3）：本机输入正被对端注入驱动，
+//                此时的光标移动不是本机用户意图，喂边缘检测或转发都
+//                等于让对端借本机无授权驱动第三方设备。只保基线
 //
 // 已知限制（MVP 接受）：
 //   - 滚轮是事件不是状态，轮询无法捕获 → 不转发滚轮
@@ -45,7 +48,7 @@ const BUTTON_VKS: ReadonlyArray<readonly [number, MouseButton]> = [
 export const KEY_POLL_MIN = 0x08
 export const KEY_POLL_MAX = 0xfe
 
-export type CaptureMode = 'idle' | 'control'
+export type CaptureMode = 'idle' | 'control' | 'suspended'
 
 export class Win32InputCapture {
   private mode: CaptureMode = 'idle'
@@ -86,6 +89,13 @@ export class Win32InputCapture {
     // 被对端解码器拒收的负坐标
     const x = Math.max(0, Math.min(w - 1, raw.x))
     const y = Math.max(0, Math.min(h - 1, raw.y))
+
+    if (this.mode === 'suspended') {
+      // 受控挂起（审查 P2-3）：不喂边缘、不产事件，只维护基线，
+      // 退出挂起时第一 tick 不会把挂起期间的光标跳变当事件
+      this.lastPos = { x, y }
+      return
+    }
 
     if (this.mode === 'idle') {
       // 位置无变化不喂：EdgeSwitcher 只关心移动轨迹

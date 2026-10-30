@@ -389,6 +389,43 @@ async function main(): Promise<void> {
     const saved2 = await stat(join(saveDir, 'offline.txt'))
     check('补发落盘大小一致', saved2.size === payload.length, `${saved2.size}`)
 
+    // ---------- 8b. offered 在对端 accept 前掉线 → 回退 waiting ----------
+    console.log('\n8b. offered 在对端 accept 前掉线回退 waiting')
+    // 第 8 节测的是「发起时就离线」；这里补另一半（审查 P2-2）：发起时
+    // 在线、对端 accept 前掉线。不回退的话任务永远卡在 offered，
+    // flushWaitingOffers 只认 waiting，对端上线后永不补发
+    const dropTask = await A.offerFiles(B.id, [
+      { name: 'drop.txt', path: srcPath, size: payload.length }
+    ])
+    check('任务先进入 offered', dropTask.state === 'offered', dropTask.state)
+    // 等 B 侧确实收到第一份 offer 再断连：重连后的第二份才是「补发」
+    const countDropOffers = () => offered.filter((t) => t.id === dropTask.id).length
+    await waitFor(() => (countDropOffers() === 1 ? true : undefined))
+    connB2.close()
+    const dropped = await waitFor(() =>
+      A.transferTasks().find((t) => t.id === dropTask.id && t.state === 'waiting')
+    )
+    check('accept 前掉线回退 waiting', dropped.state === 'waiting', dropped.state)
+    await waitFor(() => (!A.isConnected(B.id) ? true : undefined))
+    check('断连后连接已清理', !A.isConnected(B.id))
+
+    // 重连即补发：与第 8 节同一条 flushWaitingOffers 路径
+    const connB3 = await A.connect(svcB2)
+    await waitFor(() => (connB3.peerId === B.id ? connB3 : undefined))
+    await waitFor(() =>
+      A.transferTasks().find((t) => t.id === dropTask.id && t.state === 'offered')
+        ? true
+        : undefined
+    )
+    check('重连后任务回到 offered', true)
+    await waitFor(() => (countDropOffers() === 2 ? true : undefined))
+    check('B 收到补发的 offer（第二份）', countDropOffers() === 2)
+    await B.acceptTransfer(dropTask.id, saveDir)
+    await waitFor(() =>
+      changed.find((t) => t.id === dropTask.id && t.state === 'completed')
+    )
+    check('补发传输完成', true)
+
     // ---------- 9. 撤销信任后门禁重新生效 ----------
     console.log('\n9. 撤销信任后门禁重新生效')
     B.revokeTrust(A.id)

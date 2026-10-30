@@ -158,6 +158,9 @@ function startClipboardSync(): void {
     },
     writeText: (t) => clipboard.writeText(t)
   })
+  // 按上次的选择归位（审查 P2-1）：默认关，用户开过才开。必须在
+  // enableClipboardSync 之后调——构造完成才有对象可停
+  host.restoreClipboardSwitch()
   clipboardTimer = setInterval(() => host.pollClipboard(), CLIPBOARD_POLL_MS)
 }
 
@@ -277,8 +280,12 @@ app.whenReady().then(async () => {
         broadcast('input:changed')
       })
       .on('inputChanged', () => {
-        // 会话建立/结束时同步采集模式；布局也可能在会话间隙被 UI 改过
-        inputCapture?.setMode(host.controllingPeer() ? 'control' : 'idle')
+        // 会话建立/结束时同步采集模式；布局也可能在会话间隙被 UI 改过。
+        // 被控期间强制挂起采集并锁定边缘（审查 P2-3）：本机输入正由
+        // 对端注入驱动，采集若继续跑，注入产生的移动会被当成本机输入
+        // 再次转发/触发边缘穿越——对端无需授权即可借本机驱动第三方
+        inputCapture?.setMode(host.controlledByPeer() ? 'suspended' : host.controllingPeer() ? 'control' : 'idle')
+        if (host.controlledByPeer()) edgeSwitcher.lock()
         refreshEdgeLayout()
         broadcast('input:changed')
       })

@@ -42,6 +42,23 @@ export const HEARTBEAT_INTERVAL_MS = 5000
 export const HEARTBEAT_TIMEOUT_MS = 15_000
 export const MAX_CLOCK_SKEW_MS = 60_000
 
+/**
+ * 控制通道单消息上限（审查 P2-5）：ws 默认 100MiB，一条 clipboard.share
+ * 就能把主进程按在 JSON.parse 上数秒。剪贴板内容上限 512KiB
+ * （clipboard.ts），1MiB 已覆盖全部合法消息，超出由 ws 以 1009 断开。
+ */
+export const CONTROL_MAX_PAYLOAD = 1024 * 1024
+
+/**
+ * 高成本消息的频率上限（条/秒，1s 滑窗，超限按 4008 断开）。
+ * input.event：采集 tick 12ms ≈ 83 条/s，200 留 2.4 倍余量；
+ * clipboard.share：人类复制节奏，5 条/s 已远超正常使用。
+ */
+export const RATE_LIMITS: Readonly<Record<string, number>> = {
+  'input.event': 200,
+  'clipboard.share': 5
+}
+
 /** 指纹统一成 64 位小写十六进制再比较，兼容冒号分隔与纯 hex 两种写法 */
 export function normalizeFingerprint(fp: string): string {
   return fp.replace(/:/g, '').toLowerCase()
@@ -134,7 +151,7 @@ export class ControlNode {
 
   /** 在已有 HTTPS 服务上挂 WebSocket 升级（与文件传输共用端口） */
   attach(httpServer: HttpsServer): void {
-    this.wss = new WebSocketServer({ noServer: true })
+    this.wss = new WebSocketServer({ noServer: true, maxPayload: CONTROL_MAX_PAYLOAD })
     httpServer.on('upgrade', (req, socket, head) => {
       if (!guardInbound(socket)) return
       if (!req.url?.startsWith('/linkspace/v1/control')) {
@@ -154,7 +171,7 @@ export class ControlNode {
       requestCert: true,
       rejectUnauthorized: false
     })
-    this.wss = new WebSocketServer({ noServer: true })
+    this.wss = new WebSocketServer({ noServer: true, maxPayload: CONTROL_MAX_PAYLOAD })
     server.on('upgrade', (req, socket, head) => {
       if (!guardInbound(socket)) return
       if (!req.url?.startsWith('/linkspace/v1/control')) {
@@ -176,6 +193,7 @@ export class ControlNode {
     return new Promise((resolve, reject) => {
       const ws = new WebSocket(`wss://${host}:${port}/linkspace/v1/control`, {
         rejectUnauthorized: false,
+        maxPayload: CONTROL_MAX_PAYLOAD,
         // 主动出示本机证书：对端服务端开了 requestCert，据此锚定我们的身份
         cert: this.opts.tls.cert,
         key: this.opts.tls.key
@@ -206,6 +224,8 @@ export class ControlNode {
   }
 
   private wrap(ws: WebSocket): Connection {
+    // 限频滑窗（审查 P2-5）：per-connection 闭包，连接关闭随 conn 回收
+    const rateWindow = new Map<string, number[]>()
     const conn: Connection = {
       peerId: '',
       remoteAddress: '',
@@ -248,6 +268,23 @@ export class ControlNode {
       // to 必须是本机，或为空（device.announce 之前双方还不知道彼此 ID）
       if (msg.to !== '' && msg.to !== node.deviceId) return
       if (Math.abs(Date.now() - msg.ts) > MAX_CLOCK_SKEW_MS) return
+
+      // 高成本消息限频（审查 P2-5，威胁模型 T4）：input.event 的合法速率
+      // 受采集 tick（12ms ≈ 83 条/s）约束，clipboard.share 是人类操作节奏。
+      // 这两类消息处理成本最高（整批注入 / 写系统剪贴板），「合法格式 +
+      // 非法频率」的洪泛按 4008 断开，不给留通道。
+      const limit = RATE_LIMITS[msg.type]
+      if (limit !== undefined) {
+        const now = Date.now()
+        const stamps = (rateWindow.get(msg.type) ?? []).filter((t) => t > now - 1000)
+        stamps.push(now)
+        rateWindow.set(msg.type, stamps)
+        if (stamps.length > limit) {
+          log.warn(`对端 ${conn.peerId || '(未知)'} 的 ${msg.type} 超过限频 ${limit} 条/s，断开连接`)
+          conn.close(4008, 'rate limit exceeded')
+          return
+        }
+      }
 
       void node.dispatch(conn, msg)
     })
