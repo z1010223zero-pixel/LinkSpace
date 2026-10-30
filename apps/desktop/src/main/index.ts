@@ -46,13 +46,36 @@ if (!win32) log.warn('Win32 输入层不可用，键鼠共享功能将不可用'
 
 const adapter = new ScrcpyAdapter()
 const devices = new DeviceManager(adapter)
+// 映射与注入必须同一坐标基准：SendInput 的归一化基准是虚拟屏**物理**像素
+// （GetSystemMetrics 系），而 Electron screen.getPrimaryDisplay().size 是
+// DIP 逻辑分辨率——此前用后者做 mapPoint 目标，DPI 缩放 + 只映射主屏
+// 让指针只能走到虚拟屏的一小块（用户实测「只在其中一屏的一半区域」）。
+// 改为虚拟屏物理 bounds 作为映射目标，注入时补回负 origin 偏移，
+// 指针即可覆盖全部显示器。
+const inputLocalScreen = win32
+  ? () => {
+      const vs = win32.virtualScreen()
+      return { w: vs.w, h: vs.h }
+    }
+  : undefined
 const host = new Host({
   displayName: 'LinkSpace Desktop',
   deviceType: 'win',
   // input 能力位让对端在发现列表里知道本机支持键鼠共享；
   // scrcpy 投屏走 adb 不走局域网控制通道，但保持声明一致
   caps: ['file', 'clipboard', 'scrcpy', 'input'],
-  inputInject: inputSink ? (events) => inputSink.inject(events) : undefined,
+  inputLocalScreen,
+  inputInject: inputSink
+    ? (events) => {
+        // mapPoint 产出的是「虚拟屏相对坐标」（0..w-1）；注入归一化
+        // 需要虚拟屏绝对坐标（可为负），这里补回 origin 偏移
+        const vs = win32!.virtualScreen()
+        const absolute = events.map((ev) =>
+          ev.t === 'move' ? { ...ev, x: ev.x + vs.x, y: ev.y + vs.y } : ev
+        )
+        inputSink.inject(absolute)
+      }
+    : undefined,
   inputReleaseAll: inputSink ? () => inputSink.releaseAll() : undefined
 })
 

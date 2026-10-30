@@ -789,10 +789,24 @@ fun TouchpadScreen(service: LinkSpaceService) {
                         var downAt = 0L
                         var moved = false
                         var twoFinger = false
+                        // move 攒批：每帧一条消息的话 TLS+TCP 开销会让指针
+                        // 视觉卡顿（用户实测）。攒满 16 条或 30ms 合并发送，
+                        // 一条消息多个事件由桌面一次 SendInput 注入。
+                        // up/轻点/滚轮不攒——flush 保证 move 先于 click 落地
+                        val moveBatch = mutableListOf<org.json.JSONObject>()
+                        var lastFlushAt = 0L
+                        fun flushMoves() {
+                            if (moveBatch.isNotEmpty()) {
+                                send(moveBatch)
+                                moveBatch.clear()
+                            }
+                            lastFlushAt = System.currentTimeMillis()
+                        }
                         while (true) {
                             val event = awaitPointerEvent()
                             val pressed = event.changes.filter { it.pressed }
                             if (pressed.size >= 2) {
+                                flushMoves()
                                 // 双指滚动：纵向位移累计成一档档的滚轮刻度。
                                 // 上滑 = 内容向上 = 滚轮向上（Windows 正值 = 向上滚）
                                 twoFinger = true
@@ -825,20 +839,17 @@ fun TouchpadScreen(service: LinkSpaceService) {
                                             .coerceIn(0f, (screenW - 1).toFloat())
                                         curY = (curY + delta.y * sensitivity)
                                             .coerceIn(0f, (screenH - 1).toFloat())
-                                        send(
-                                            listOf(
-                                                InputController.move(
-                                                    curX.toInt(), curY.toInt()
-                                                )
-                                            )
-                                        )
+                                        moveBatch.add(InputController.move(curX.toInt(), curY.toInt()))
+                                        val now = System.currentTimeMillis()
+                                        if (moveBatch.size >= 16 || now - lastFlushAt >= 30) flushMoves()
                                         c.consume()
                                     }
                                 }
                             } else {
-                                // 全部抬起：先判轻点再复位——抬起帧 pressed=0，
-                                // 轻点判定放在 pressed.size==1 分支里永远不可达
-                                // （移交清单 Bug1 死代码）
+                                // 全部抬起：先发掉攒着的 move 再判轻点（保序）——
+                                // 抬起帧 pressed=0，轻点判定放在 pressed.size==1
+                                // 分支里永远不可达（移交清单 Bug1 死代码）
+                                flushMoves()
                                 val up = event.changes.firstOrNull { it.changedToUp() }
                                 if (up != null && !twoFinger &&
                                     System.currentTimeMillis() - downAt < 250 && !moved

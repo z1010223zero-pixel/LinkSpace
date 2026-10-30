@@ -54,6 +54,9 @@ class LinkSpaceClient(private val identity: Identity) {
         val raw = Socket()
         raw.connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
         raw.soTimeout = READ_TIMEOUT_MS
+        // 键鼠事件是高频小帧：Nagle 会把小包攒到 ACK 或满段才发，
+        // 视觉上就是「指针卡一下动一下」。禁用之（T7 用户实测卡顿）
+        raw.tcpNoDelay = true
         val ssl = ctx.socketFactory.createSocket(raw, host, port, true) as SSLSocket
         ssl.startHandshake()
 
