@@ -103,6 +103,10 @@ export interface Connection {
    * TLSSocket，之后不再变化。null 表示对端未出示证书。
    */
   readonly tlsFingerprint: string | null
+  /** JSON 控制消息（信封）发送 */
+  send<T>(type: string, payload: T): void
+  /** 二进制帧发送（屏幕投屏的视频块），与控制消息共用同一条连接 */
+  sendBinary(data: Buffer): void
   /** 最后一次收到消息的时间，用于心跳超时判定 */
   lastSeen: number
   send<T>(type: string, payload: T): void
@@ -249,6 +253,16 @@ export class ControlNode {
           payload
         }
         ws.send(JSON.stringify(msg))
+      },
+      /**
+       * 二进制帧发送（屏幕投屏的视频块）。与 JSON 控制消息共用同一条
+       * 连接：TCP 全双工，平板主动连出的链路上桌面照样能发——这绕开了
+       * 「桌面→平板方向的新建 TCP 被环境策略拦截」的问题（实测平板
+       * ServerSocket 对任何入站端口都不通，唯有平板自己连出的链路可用）
+       */
+      sendBinary(data: Buffer) {
+        if (ws.readyState !== WebSocket.OPEN) return
+        ws.send(data, { binary: true })
       },
       close(code = 1000, reason = '') {
         try {

@@ -195,6 +195,8 @@ class LinkSpaceClient(private val identity: Identity) {
     /** 阻塞读一帧文本。返回 null 表示连接关闭 */
     fun readText(conn: ClientConnection): String? = conn.readText()
 
+    fun readFrame(conn: ClientConnection): Pair<Int, ByteArray>? = conn.readFrame()
+
     fun close(conn: ClientConnection) {
         runCatching { conn.close() }
     }
@@ -234,6 +236,16 @@ class LinkSpaceClient(private val identity: Identity) {
         }
 
         fun readText(): String? {
+            val frame = readFrame() ?: return null
+            return if (frame.first == 0x1) String(frame.second, Charsets.UTF_8) else ""
+        }
+
+        /**
+         * 读一帧（阻塞）。first=opcode（0x1 文本 / 0x2 二进制 / 0x8 关闭），
+         * second=负载。屏幕投屏的视频块走二进制帧，与 JSON 控制消息
+         * 共用同一条连接，调用方按 opcode 分流。
+         */
+        fun readFrame(): Pair<Int, ByteArray>? {
             val input = socket.getInputStream()
             fun readExact(n: Int): ByteArray? {
                 val b = ByteArray(n)
@@ -258,11 +270,11 @@ class LinkSpaceClient(private val identity: Identity) {
                 len = 0
                 for (i in 0..7) len = (len shl 8) or (e[i].toLong() and 0xff)
             }
+            if (len > 32L * 1024 * 1024) throw IllegalStateException("WS 帧过大: $len")
             // 服务端发的帧不带掩码，直接读负载即可
             if (opcode == 0x8) return null
-            if (opcode != 0x1) return ""
             val payload = readExact(len.toInt()) ?: return null
-            return String(payload, Charsets.UTF_8)
+            return opcode to payload
         }
 
         fun close() {
