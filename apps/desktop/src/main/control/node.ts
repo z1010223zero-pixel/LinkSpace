@@ -107,6 +107,8 @@ export interface Connection {
   send<T>(type: string, payload: T): void
   /** 二进制帧发送（屏幕投屏的视频块），与控制消息共用同一条连接 */
   sendBinary(data: Buffer): void
+  /** 发送积压字节数（ws.bufferedAmount），码率自适应的拥塞信号 */
+  backlog(): number
   /** 最后一次收到消息的时间，用于心跳超时判定 */
   lastSeen: number
   send<T>(type: string, payload: T): void
@@ -263,6 +265,9 @@ export class ControlNode {
       sendBinary(data: Buffer) {
         if (ws.readyState !== WebSocket.OPEN) return
         ws.send(data, { binary: true })
+      },
+      backlog() {
+        return ws.readyState === WebSocket.OPEN ? ws.bufferedAmount : 0
       },
       close(code = 1000, reason = '') {
         try {

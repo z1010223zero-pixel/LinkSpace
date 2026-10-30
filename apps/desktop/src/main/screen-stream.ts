@@ -20,13 +20,29 @@
 //
 // 安全语义：投屏不做独立授权，它寄生在已建立的键鼠会话之内（能看到
 // 画面是控制的前提）；会话结束/断连/撤销时推流随之终止（host.ts 钩子）。
+//
+// 码率自适应（B-3）：档位阶梯见 TIERS。宿主周期采样发送积压
+// （Connection.backlog()），持续拥塞调 setTier(n) 降档、长期空闲升档；
+// 换档重启 ffmpeg 进程，流内新 SPS/PPS/IDR 由解码器带内消化
+// （MediaCodec 对同分辨率重配置原生支持，真机 B-1 已验证带内
+// FORMAT_CHANGED 路径）。只有降档在拥塞时发生，升档需长稳窗口，
+// 防振荡。
 
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { log } from './log'
 
+/** 码率档位（B-3）：tier 0 不限速（超快零延迟优先），往下逐级封顶 */
+export const TIERS: Array<{ label: string; bps: number | null }> = [
+  { label: 't0-uncapped', bps: null },
+  { label: 't1-6M', bps: 6_000_000 },
+  { label: 't2-3M', bps: 3_000_000 },
+  { label: 't3-1.5M', bps: 1_500_000 }
+]
+
 export class ScreenStreamService {
   private proc: ChildProcessWithoutNullStreams | null = null
   private stderrTail: string[] = []
+  private tier = 0
 
   get running(): boolean {
     return this.proc != null
@@ -62,7 +78,17 @@ export class ScreenStreamService {
       '-f', 'h264',
       'pipe:1'
     ]
-    const proc = spawn(ffmpegPath, args, { windowsHide: true })
+    // 码率档位：tier 0 不限（原始行为），其余加 maxrate/bufsize 硬顶。
+    // libx264 的 ultrafast 本身不产恒定码率，封顶防止 Wi-Fi 拥塞堆积
+    const tierArgs: string[] = []
+    const bps = TIERS[this.tier]?.bps ?? null
+    if (bps) {
+      tierArgs.push('-b:v', String(bps), '-maxrate', String(bps), '-bufsize', String(bps * 2))
+    }
+    this.ffmpegPath = ffmpegPath
+    this.onChunkRef = onChunk
+    const proc = spawn(ffmpegPath, [...args, ...tierArgs], { windowsHide: true })
+    log.info(`[screen-stream] 推流启动于 ${TIERS[this.tier]?.label ?? 't0'}`)
     this.stderrTail = []
     proc.stderr.on('data', (chunk: Buffer) => {
       const line = chunk.toString().trim()
@@ -89,6 +115,26 @@ export class ScreenStreamService {
 
   /** 推流意外结束的回调（host 据此通知对端并清 UI） */
   onEnded: (() => void) | null = null
+
+  /** 拥塞回调查询：宿主采样 backlog 后调用；换档通过重启 ffmpeg 实现 */
+  setTier(tier: number): void {
+    const clamped = Math.max(0, Math.min(tier, TIERS.length - 1))
+    if (clamped === this.tier) return
+    const wasRunning = this.proc != null
+    const path = this.ffmpegPath
+    const onChunk = this.onChunkRef
+    if (!wasRunning || !path || !onChunk) {
+      this.tier = clamped
+      return
+    }
+    log.info(`[screen-stream] 码率档位 ${TIERS[this.tier]?.label} → ${TIERS[clamped]?.label}（重启推流，解码器带内消化）`)
+    this.tier = clamped
+    this.stop()
+    this.start(path, onChunk)
+  }
+
+  private ffmpegPath: string | null = null
+  private onChunkRef: ((data: Buffer) => void) | null = null
 
   stop(): void {
     if (!this.proc) return

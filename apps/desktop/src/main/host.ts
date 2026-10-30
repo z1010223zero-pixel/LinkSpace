@@ -9,7 +9,7 @@
 
 import { randomUUID } from 'node:crypto'
 import type { Server } from 'node:https'
-import { app } from 'electron'
+import { app, clipboard } from 'electron'
 import { getDeviceCert, setIdentityDir, deviceIdOfCert, type DeviceCert } from './transfer/identity'
 import { TrustStore, type TrustEntry, type TrustScope } from './transfer/trust'
 import { TransferManager, type TransferFile, type TransferTask } from './transfer/manager'
@@ -134,8 +134,11 @@ export class Host {
   /** 键鼠共享：被控端状态机 + 控制端状态机（阶段 3） */
   private inputCoordinator: InputSessionCoordinator | null = null
   private inputController: InputController | null = null
-  /** 屏幕投屏推流（寄生在键鼠会话内，见 screen-stream.ts） */
   private readonly screenStream = new ScreenStreamService()
+  /** 码率自适应状态（B-3）：拥塞计分与当前档位。正数=连续拥塞采样，
+   *  负数=连续空闲采样（恢复升档）；探测清零换挡 */
+  private streamCongestionScore = 0
+  private screenStreamCurrentTier = 0
   private readonly inputLayout: InputLayoutStore
   private listeners: { [K in keyof HostEvents]?: Listener<K>[] } = {}
   /** 已连接的对端：deviceId → Connection */
@@ -929,6 +932,36 @@ export class Host {
       }
       try {
         this.screenStream.start(this.opts.screenFfmpegPath, (chunk) => conn.sendBinary(chunk))
+        // 码率自适应（B-3）：周期采样发送积压，持续拥塞降档、长稳升档。
+        // 换档在 screen-stream 内部同步重启 ffmpeg（stop+start 同 tick，
+        // 本探针不会插进间隙）；推流停止（会话结束/对端断开/手动）后
+        // running=false，探针自停车并复位档位
+        const backlogProbe = setInterval(() => {
+          if (!this.screenStream.running) {
+            clearInterval(backlogProbe)
+            this.screenStreamCurrentTier = 0
+            this.streamCongestionScore = 0
+            return
+          }
+          const backlog = conn.backlog()
+          if (backlog > 1_000_000) {
+            this.streamCongestionScore = Math.min(3, this.streamCongestionScore + 1)
+          } else if (backlog < 100_000) {
+            this.streamCongestionScore = Math.max(-8, this.streamCongestionScore - 1)
+          } else {
+            this.streamCongestionScore = 0
+          }
+          // 3 个连续拥塞采样 → 降档；恢复分累积到 -8（约 30s 稳定）→ 升档
+          if (this.streamCongestionScore >= 3) {
+            this.streamCongestionScore = 0
+            this.screenStreamCurrentTier = Math.min(this.screenStreamCurrentTier + 1, 3)
+            this.screenStream.setTier(this.screenStreamCurrentTier)
+          } else if (this.streamCongestionScore <= -8 && this.screenStreamCurrentTier > 0) {
+            this.streamCongestionScore = 0
+            this.screenStreamCurrentTier -= 1
+            this.screenStream.setTier(this.screenStreamCurrentTier)
+          }
+        }, 2000)
         sendTo(peerId, 'screen.stream.start', {
           w: this.opts.inputVirtualScreen?.().w ?? 1920,
           h: this.opts.inputVirtualScreen?.().h ?? 1080
@@ -950,6 +983,38 @@ export class Host {
       const peer = this.inputCoordinator?.activeSession?.peerId
       if (peer) sendTo(peer, 'screen.stream.stop', {})
     }
+
+    // ---------- 投屏粘贴（协议 4.8，B-7）----------
+    // 键盘通道按 vk 注入，IME 组合输入（中文）无法表达；粘贴通道把文本
+    // 写进本机剪贴板再注入 Ctrl+V。寄生 input 会话：无会话/来源不符
+    // 一律忽略（剪贴板写入是会话授权的一部分）
+    control.on('screen.paste', (conn, msg) => {
+      const peerId = conn.peerId
+      if (!peerId) return
+      const active = this.inputCoordinator?.activeSession
+      if (!active || active.peerId !== peerId) {
+        log.warn(`忽略 ${peerId} 的 screen.paste（无活动键鼠会话）`)
+        return
+      }
+      const text = String((msg.payload as { text?: unknown } | null)?.text ?? '')
+      if (!text) return
+      if (Buffer.byteLength(text, 'utf8') > 512 * 1024) {
+        log.warn(`screen.paste 超限（${Buffer.byteLength(text, 'utf8')} 字节），丢弃`)
+        return
+      }
+      clipboard.writeText(text)
+      log.info(`[screen.paste] 已写入剪贴板（${text.length} 字符）并注入 Ctrl+V`)
+      // Ctrl+V 走与对端事件完全相同的注入路径（已过会话校验与解码）
+      this.inputCoordinator.onEvent(peerId, {
+        sessionId: active.sessionId,
+        events: [
+          { t: 'key', vk: 0x11, down: true },
+          { t: 'key', vk: 0x56, down: true },
+          { t: 'key', vk: 0x56, down: false },
+          { t: 'key', vk: 0x11, down: false }
+        ]
+      })
+    })
 
     // 断连清理收口在 handleConnClosed（startControl 注册，带幸存者
     // 检查）。这里曾再注册一份 onClosed 推 onPeerDisconnected——双连接
