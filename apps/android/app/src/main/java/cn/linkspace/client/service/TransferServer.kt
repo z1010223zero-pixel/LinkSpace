@@ -641,21 +641,6 @@ class TransferServer(
 
     // ---------- 工具 ----------
 
-    /**
-     * 清洗来自对端的文件名：剥掉全部路径成分，只留基础名。
-     * 名字不清洗的话 `join(saveDir, name)` 会被 `../` 序列拼出保存目录
-     * 之外的写入路径；清洗后为空 / `.` / `..` 的名字直接拒绝。
-     * 手工按两种分隔符切分，不依赖本机 File 的平台语义。
-     */
-    fun sanitizeFileName(name: String): String {
-        val base = name.replace('\\', '/').substringAfterLast('/')
-        val cleaned = base.trim()
-        if (cleaned.isEmpty() || cleaned == "." || cleaned == "..") {
-            throw IOException("非法文件名: ${name.take(80)}")
-        }
-        return cleaned.take(255)
-    }
-
     private fun uniqueFile(dir: File, name: String): File {
         val direct = File(dir, name)
         if (!direct.exists()) return direct
@@ -734,6 +719,22 @@ class TransferServer(
 
     companion object {
         private const val TAG = "LinkSpace/Transfer"
+
+        /**
+         * 清洗来自对端的文件名：剥掉全部路径成分，只留基础名。
+         * 名字不清洗的话 `join(saveDir, name)` 会被 `../` 序列拼出保存目录
+         * 之外的写入路径；清洗后为空 / `.` / `..` 的名字直接拒绝。
+         * 手工按两种分隔符切分，不依赖本机 File 的平台语义。
+         * 放在 companion：纯函数，JVM 单测可直接覆盖。
+         */
+        fun sanitizeFileName(name: String): String {
+            val base = name.replace('\\', '/').substringAfterLast('/')
+            val cleaned = base.trim()
+            if (cleaned.isEmpty() || cleaned == "." || cleaned == "..") {
+                throw IOException("非法文件名: ${name.take(80)}")
+            }
+            return cleaned.take(255)
+        }
 
         fun sha256Hex(data: ByteArray): String =
             MessageDigest.getInstance("SHA-256").digest(data)

@@ -61,8 +61,35 @@ object DebugDriver {
             }
             ACTION_SEND_FILE -> sendFile(service, intent)
             ACTION_AUTO_ACCEPT -> setAutoAccept(service, intent.getBooleanExtra("on", true))
-            ACTION_CLIPBOARD -> setClipboard(context, service, intent.getBooleanExtra("on", true))
+            ACTION_CLIPBOARD -> handleClipboard(context, service, intent)
         }
+    }
+
+    /**
+     * 剪贴板走查驱动。语义按 extras 组合：
+     *   --ez on true/false   开关同步（开关持久化）
+     *   --es text "..."      把该文本写入系统剪贴板并立刻 poll——
+     *                        poll 读到与基线不同的新内容就会经同步通道
+     *                        发给持有 clipboard 授权的对端（发送向验证）。
+     *                        直接写系统剪贴板而不走 ClipboardSync.receive，
+     *                        避免更新基线把发送抑制掉。
+     */
+    private fun handleClipboard(context: Context, service: LinkSpaceService, intent: Intent) {
+        val text = intent.getStringExtra("text")
+        if (text != null) {
+            // 只写不读：Android 10+ 只有获焦窗口能读剪贴板，NoDisplay 的
+            // 本 Activity 读不到（实测读到空）。写完后由 MainActivity 的
+            // OnPrimaryClipChangedListener 自然触发 poll——它在焦点上，
+            // 且其同步实例的基线还是旧内容，新内容会被当成变更正常发送
+            runCatching {
+                val cm = context.getSystemService(Context.CLIPBOARD_SERVICE)
+                    as? android.content.ClipboardManager
+                cm?.setPrimaryClip(android.content.ClipData.newPlainText("LinkSpace", text))
+                log("已写入系统剪贴板（${text.length} 字符），等待界面监听器触发发送")
+            }
+            return
+        }
+        setClipboard(context, service, intent.getBooleanExtra("on", true))
     }
 
     /**

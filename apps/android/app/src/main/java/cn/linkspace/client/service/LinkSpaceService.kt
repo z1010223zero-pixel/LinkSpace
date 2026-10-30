@@ -373,7 +373,7 @@ class LinkSpaceService private constructor(private val appContext: Context) {
                     val o = filesArr.getJSONObject(it)
                     // 名字经网络而来，先收敛为基础名再做任何路径拼接
                     TransferFile(
-                        name = server?.sanitizeFileName(o.optString("name")) ?: "",
+                        name = TransferServer.sanitizeFileName(o.optString("name")),
                         size = o.optLong("size", -1L)
                     )
                 }

@@ -111,10 +111,18 @@ class InputController(
         listener?.onSessionEnded("被控端结束了控制")
     }
 
-    /** 对端断连：立即回到本机控制 */
+    /** 对端断连：等待中的请求与活动会话都立即终止并通知界面 */
     @Synchronized
     fun onPeerDisconnected(peerId: String) {
-        pending?.let { if (it.peerId == peerId) pending = null }
+        val p = pending
+        if (p != null && p.peerId == peerId) {
+            // 等待中的请求没有对端超时兜底（拒绝来自被控端），连接一断
+            // 就永远不会有人回复——必须通知 UI 收掉等待态，否则对话框
+            // 会一直挂着
+            pending = null
+            listener?.onSessionEnded("被控端连接已断开，请求已失效")
+            return
+        }
         val a = active
         if (a != null && a.peerId == peerId) {
             active = null

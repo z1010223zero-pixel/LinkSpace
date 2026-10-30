@@ -37,6 +37,12 @@ android {
         compose = true
     }
 
+    testOptions {
+        // 单测跑在 JVM 上，android.util.Log 等框架方法没有真实实现；
+        // 让它们返回默认值而不是抛「not mocked」，纯逻辑测试才能落地
+        unitTests.isReturnDefaultValues = true
+    }
+
     packaging {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
         // BouncyCastle 是 multi-release jar，三个包都带 META-INF/versions/9/... 元数据，
@@ -64,6 +70,8 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
 
     testImplementation("junit:junit:4.13.2")
+    // InputController 等纯逻辑用 org.json 承载消息，JVM 单测需要同名实现
+    testImplementation("org.json:json:20240303")
     androidTestImplementation(composeBom)
     androidTestImplementation("androidx.compose.ui:ui-test-junit4")
     debugImplementation("androidx.compose.ui:ui-tooling")
