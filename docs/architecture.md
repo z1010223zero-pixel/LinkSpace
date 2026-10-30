@@ -1,6 +1,6 @@
 # LinkSpace 架构设计
 
-> 状态：草案 v0.1（2026-10-28）
+> 状态：主体已实现（2026-10-30 修订：进程模型 koffi 化、ADR-008、输入共享状态）
 > 本文件是《LinkSpace 完整技术方案》的技术展开，定义了分层、进程边界、端口规划和适配层接口。
 > 方案本身不在此重复，两份文档冲突时以本文件的细化结论为准，并在方案中回写。
 
@@ -58,8 +58,9 @@ electron main process
  ├── IPC 网关（给 renderer 的唯一入口）
  └── 子进程池
       ├── scrcpy.exe（每个投屏会话一个，独立生命周期）
-      ├── adb.exe（按需调用，短生命周期）
-      └── windows-helper.exe（.NET 辅助进程，按需拉起）
+      └── adb.exe（按需调用，短生命周期）
+
+（Win32 原生能力经 koffi FFI 进程内承载，无辅助子进程，见 ADR-008）
 
 electron renderer process（可多个窗口）
  └── Vue 应用，只做展示 + 通过 IPC 发指令
@@ -69,7 +70,7 @@ electron renderer process（可多个窗口）
 
 1. **渲染进程不得创建子进程。** 所有 spawn 走主进程，违反 C3 会让窗口崩溃时遗留孤儿进程。
 2. **每个 scrcpy 会话一个进程，会话 ID 与进程 PID 绑定。** 主进程维护 `Map<sessionId, ChildProcess>`，退出时统一 kill，避免断线后残留。
-3. **windows-helper 按需拉起、空闲超时退出。** 它承载需要 Win32 / .NET 的能力（输入注入、显示器枚举），不常驻以减少资源占用和攻击面。
+3. **Win32 原生能力进程内承载（ADR-008）。** 输入注入与光标采集经 koffi FFI 直接调用 user32（`input/win32/native.ts`），没有独立辅助进程。原生模块加载失败一律返回 null 降级（键鼠入口隐藏），绝不抛异常打断主进程启动。
 4. **进程退出必须清理。** main process 的 `before-quit` 钩子负责：停会话 → 关监听 → 注销 mDNS。
 
 ---
@@ -87,7 +88,7 @@ electron renderer process（可多个窗口）
 
 **为什么不固定端口**：固定端口在多实例、端口被占用、企业网络策略下都会出问题。mDNS 通告真实端口是标准做法，代价是需要防火墙放行应用本身而非某个端口。
 
-**防火墙**：首次启动时通过 windows-helper 请求入站规则，或提供明确的手动放行指引。禁止静默添加防火墙规则而不告知用户。
+**防火墙**：安装版首次启动走 Windows 系统标准授权弹窗（应用首次监听时触发），不预置提权规则、不静默修改。调试场景提供手动放行指引。
 
 ---
 
@@ -184,8 +185,9 @@ export interface AdapterError {
 
 | 子实现 | 场景 | 状态 |
 |---|---|---|
-| `win2win` | Windows ↔ Windows 边缘穿越 | 待验证 Input Leap 后决定复用程度 |
-| `win2android` | Windows → Android | 第一阶段复用 scrcpy 窗口内输入；无窗口穿越属第二阶段 |
+| `win2win` | Windows ↔ Windows 边缘穿越 | **已自研实现**（阶段 3）：koffi SendInput 注入 + 轮询采集 + 边缘穿越。Input Leap 已归档不复用（license-inventory 1.1） |
+| `android2win` | Android → Windows | **已实现**（协议 4.6）：Android 端作触控板控制端，桌面被控端会话状态机 |
+| `win2android` | Windows → Android | 未启动；第一阶段复用 scrcpy 窗口内输入 |
 
 两者不共用坐标系逻辑，避免把桌面边缘穿越的假设错误套到 Android 上。
 
@@ -224,6 +226,7 @@ export interface AdapterError {
 | ADR-005 | 虚拟显示器独立于主产品验证 | 驱动层风险高，失败不应拖垮主进度 | 9.4 五个问题验证通过后方可并入主仓库 |
 | ADR-006 | 第一版持久化用本地 JSON 文件 | 数据量小、依赖少、便于排查 | 数据量上升或需要复杂查询时迁 SQLite |
 | ADR-007 | 第一版不引入任何云端服务与账号 | 符合 C1，降低隐私与合规负担 | 需要跨网段设备目录时复审 |
+| ADR-008 | 输入注入用 koffi 进程内 FFI，放弃 .NET 辅助进程（windows-helper） | 单 exe 部署、无 IPC 与进程生命周期开销；原生调用收敛在 `input/win32/native.ts` 单模块，加载失败整体降级不阻断启动 | 注入层缺陷拖垮主进程（崩溃隔离需求）时复审子进程方案 |
 
 ---
 
@@ -231,9 +234,9 @@ export interface AdapterError {
 
 在动手写代码前需要回答，答案回写到本文件：
 
-1. **发行许可证**：开源优先还是保留闭源商业选项？直接决定 3.2  TwinDesk、3.3 Input Leap 的代码能否复用。见 `docs/license-inventory.md`。→ **仍未定，阻塞 `modules/input-sharing`。**
+1. ~~**发行许可证**~~ → **已定：GPL-2.0/3.0**（决策记录见 `docs/license-inventory.md`）。键鼠共享已自研实现，不复用 TwinDesk / Input Leap 代码；LICENSE 文件待落地。
 2. ~~**Electron 是否最终采用**~~ → **已定：采用 Electron 37.10.3**。原型实测内存 340 MB、空闲 CPU 极低，且已验证能管理 scrcpy 子进程生命周期。踩坑与规避见 `apps/desktop/README.md`。
 3. **媒体通道选型**：扩展屏幕若走 WebRTC，与 scrcpy 自有传输如何共存？还是统一走自研低延迟传输？
-4. **Android 端是否需要常驻前台服务**：影响后台保活与系统兼容性工作量。
-5. **mDNS 实现**：Node 侧库（如 bonjour-service）还是由 windows-helper 实现？影响跨平台移植成本。
+4. ~~**Android 端是否需要常驻前台服务**~~ → **已定：需要**。`LinkSpaceForegroundService`（dataSync 型）已实现保活 +「用户退出 = 彻底下线」语义。
+5. ~~**mDNS 实现**~~ → **已定：Node 侧**。先 bonjour-service，后因 Browser 去重与一次性查询缺陷重写为原始 mDNS 应答监听 + 周期补查（`discovery.ts`）；windows-helper 方案随 ADR-008 取消。
 6. **GPU 崩溃根因**：本机 Electron 的 GPU 子进程必然崩溃，已用 `--in-process-gpu` 规避。怀疑与 ToDesk 虚拟显示驱动有关，需在干净机器上验证后才能移除该开关。

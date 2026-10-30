@@ -2,16 +2,20 @@
 
 | 文档 | 用途 | 状态 |
 |---|---|---|
-| `architecture.md` | 分层、进程模型、端口规划、状态机、适配层接口、ADR | 草案 v0.1 |
-| `protocol.md` | 消息定义、文件传输子协议、错误码、版本兼容 | 草案 v0 |
+| `architecture.md` | 分层、进程模型、端口规划、状态机、适配层接口、ADR | 主体已实现（2026-10-30 修订） |
+| `protocol.md` | 消息定义、文件传输子协议、错误码、版本兼容 | 已实现主体（含实现期修正与字段补全） |
 | `mvp-acceptance.md` | 可执行验收清单、发布门限 | 可用 |
 | `threat-model.md` | 资产、信任边界、威胁与缓解 | 初版 |
 | `license-inventory.md` | 依赖许可证核实与合规检查 | 已核实主要项 |
 | `roadmap.md` | 阶段划分、门限、转向判据 | 可用 |
-| `technical-validation.md` | 第 1 周验证清单与记录模板 | 待执行 |
+| `technical-validation.md` | 第 1 周验证清单与记录模板 | scrcpy 已验证；IddCx PoC 进行中 |
 | `scrcpy-manual-checklist.md` | scrcpy 投屏 28 条人工验证项 | 2 条已验证，26 条待人工 |
-| `design/input-sharing.md` | 跨设备键鼠共享自研方案 | 设计完成，未实现 |
-| `HANDOVER.md` | **交接报告**：环境坑、验证方法、下一步 | 2026-10-29 |
+| `design/input-sharing.md` | 跨设备键鼠共享自研方案 | 已实现（阶段 3），保留为设计依据 |
+| `HANDOVER.md` | **交接报告**：环境坑、验证方法、下一步 | 2026-10-29 快照（部分过期，见文首标注） |
+| `desktop-review-2026-10-29.md` | 桌面端代码审查与修复报告 | 已修复 |
+| `project-review-2026-10-29.md` | 第二次全项目审查（含 Android 首审、文档一致性） | P0/P1 已修复，P3 处理中 |
+| `manual-walkthrough-stage3.md` | 阶段 3 真机人工走查清单 | 大部分已执行 |
+| `agent-division.md` | 双 Agent 分工、协议契约与移交清单 | 生效中 |
 
 ## 阅读顺序
 

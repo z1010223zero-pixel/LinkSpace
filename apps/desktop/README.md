@@ -1,6 +1,6 @@
 # apps/desktop — LinkSpace Windows 桌面端
 
-Electron + Vue 3 + TypeScript。当前是**可运行的原型**：能扫描局域网 Android 设备、启动/停止投屏会话，并内置了局域网文件传输服务（发现与配对尚未实现）。
+Electron + Vue 3 + TypeScript。当前是**可运行的原型**：mDNS 发现、配对与信任管理、双向文件传输、剪贴板同步、跨设备键鼠共享（Win↔Win 边缘穿越，亦被安卓端远控）、投屏会话管理。
 
 ---
 
@@ -31,12 +31,14 @@ npm run verify:pairing     # 无头验证：配对与信任清单（13 项）
 npm run verify:e2e         # 无头验证：发现→配对→传输→取消 端到端
 npm run verify:layout      # 无头验证：设备卡片顺序持久化
 npm run verify:net         # 无头验证：局域网范围判定表
+npm run verify:heartbeat   # 无头验证：心跳超时与控制通道洪泛防护
 npm run verify:clipboard   # 无头验证：剪贴板回环抑制
+npm run verify:input       # 无头验证：键鼠共享全链路（编解码/会话/持久化/心跳超时）
 npm run verify:mdns        # mDNS 互通验证（需 Android 真机在线）
 npm run clean              # 删除 out/
 ```
 
-**前七个 `verify` 都不需要 GUI**，可重复运行并给出断言结果，是回归测试的主要手段。
+**前九个 `verify` 都不需要 GUI**，可重复运行并给出断言结果，是回归测试的主要手段。
 `verify:mdns` 例外：它必须有 Android 设备在同一局域网，否则必然 FAIL，
 单独跑而不进全套回归。
 
@@ -108,13 +110,31 @@ src/
 │   ├── device-manager.ts  设备与会话聚合（L2）
 │   ├── ipc.ts             IPC 网关（channel 白名单）
 │   ├── log.ts             脱敏日志
-│   ├── verify-entry.ts    无头验证入口（投屏）
-│   ├── verify-transfer.ts 无头验证入口（文件传输环路）
-│   └── transfer/          文件传输
-│       ├── identity.ts    设备身份证书与指纹（自签，持久化到 userData）
-│       ├── chunker.ts     分块读写、摘要、.part 路径、不覆盖命名
-│       ├── server.ts      HTTPS 数据面服务与客户端（含连接复用）
-│       └── manager.ts     传输任务状态机与编排
+│   ├── host.ts            控制节点组装：连接/信任/传输/剪贴板/输入（对应 Android LinkSpaceService）
+│   ├── pairing.ts         配对码流程与信任门禁（announce 指纹锚定）
+│   ├── discovery.ts       mDNS 发现（原始应答监听 + 周期补查）
+│   ├── profile.ts         设备名与剪贴板开关等本地档案
+│   ├── clipboard.ts       剪贴板同步与回环抑制（纯逻辑，可无头测试）
+│   ├── net-scope.ts       局域网范围判定（来源地址门禁）
+│   ├── layout.ts          设备卡片顺序持久化
+│   ├── control/
+│   │   └── node.ts        WebSocket over TLS 控制通道（心跳、maxPayload、限频）
+│   ├── input/
+│   │   ├── session.ts     键鼠共享会话状态机（确认弹窗驱动、TTL）
+│   │   ├── protocol.ts    事件编解码（整批拒绝、坐标钳制）
+│   │   ├── edge.ts        边缘穿越触发
+│   │   ├── layout.ts      屏幕布局
+│   │   └── win32/
+│   │       ├── native.ts  koffi FFI：SendInput/GetCursorPos（ADR-008）
+│   │       ├── capture.ts 轮询采集（含挂起模式）
+│   │       └── sink.ts    事件注入
+│   ├── transfer/          文件传输
+│   │   ├── identity.ts    设备身份证书与指纹（自签，持久化到 userData）
+│   │   ├── trust.ts       信任清单与 scope 门禁
+│   │   ├── chunker.ts     分块读写、摘要、.part 路径、不覆盖命名
+│   │   ├── server.ts      HTTPS 数据面服务与客户端（含连接复用）
+│   │   └── manager.ts     传输任务状态机与编排（含离线 waiting 补发）
+│   └── verify-*.ts        十套无头验证入口
 ├── preload/index.ts       渲染进程桥，只暴露白名单 API
 ├── renderer/              Vue 3 界面
 │   ├── App.vue
@@ -123,8 +143,9 @@ src/
 └── shared/types.ts        主进程与渲染进程的类型契约
 scripts/
 ├── dev.mjs                启动包装（见踩坑 1）
-├── build-verify.mjs       打包并运行投屏无头验证
-└── build-verify-transfer.mjs  打包并运行传输无头验证
+├── build-verify*.mjs      各无头套件的打包入口
+├── stage-scrcpy.mjs       随安装包分发 scrcpy（vendor/scrcpy）
+└── generate-sbom.mjs      SBOM 生成
 ```
 
 ---
@@ -208,29 +229,27 @@ ELECTRON_MIRROR="https://npmmirror.com/mirrors/electron/" node node_modules/elec
 - 文件传输环路 21 项断言：内容一致性、0 字节文件、中文/空格/`#` 文件名、
   同名重命名、多块、断点续传、传输中取消并清理 `.part`、
   未授权设备 403、并发、1 GB 大文件
+- 配对与信任清单 13 项（`verify:pairing`）：配对码流程、指纹锚定、撤销、重命名
+- 端到端（`verify:e2e`）：发现 → 配对 → 传输 → 取消 → 剪贴板；
+  对端掉线任务回 waiting、重连自动补发、多连接幸存者
+- 剪贴板回环抑制全套（`verify:clipboard`）
+- 键鼠共享（`verify:input`）：事件编解码、坐标钳制、会话确认、
+  采集挂起、断连 releaseAll、剪贴板开关持久化、心跳超时即终止会话
+- 心跳超时与控制通道洪泛防护（`verify:heartbeat`）：超频断开、超大载荷断开
 
-**未验证（需人工操作手机）**：
-- 鼠标键盘控制、中文输入法、剪贴板同步
-- 断网恢复
-- UI 上的按钮点击（界面已能显示，但交互未人工走查）
+**未验证（需真机人工走查）**：
+- 阶段 3 真机清单见 `docs/manual-walkthrough-stage3.md`（大部分已由双 Agent 执行）
+- scrcpy 窗口内鼠标键盘 / 中文输入法 / 断网恢复（`docs/scrcpy-manual-checklist.md`）
 - 启动投屏后直接退出应用（会话清理的 GUI 路径）
 
 ---
 
 ## 已知限制
 
-- **设备发现与配对未实现**：传输服务已监听，但 `isKnownDevice` 恒为 false，
-  即当前不接受任何对端。这是刻意留的，不是 bug——配对建立后才有可信设备清单。
-- **传输服务绑定 `0.0.0.0`**：应改为仅绑定局域网网卡，否则会暴露到非目标网络
-  （方案 14.4「仅监听必要的接口和端口」）。配对实现时一并处理。
-- **`transfer.cancel` 未接入控制通道**：发送方取消时通过 `cancelRequested`
-  事件抛给上层，接收方清理依赖这条消息送达。真实链路上需经控制通道传输。
-- **块级摘要只在发送侧计算**：接收侧未校验，目前靠整体 SHA-256 兜底
-  （验收项 4.6 未完成）。
-- **只能 Windows ↔ Windows**：Android 客户端（Kotlin）尚未开始
-- 设备布局拖拽、剪贴板同步未实现（属后续阶段）
-- 传输服务绑定 `0.0.0.0`，应改为仅局域网网卡
+- 多显示器副屏贴边可能误触发边缘穿越（边缘判定以主屏为基准，见审查报告 P3）
+- 控制端 pending 请求不随对端断连即时清理（有 30s 超时兜底，见审查报告 P3）
 - 界面里的「发送文件」用系统文件选择框，尚无拖拽发送
-- `platform.ts` 中保留了「已知 winget 安装路径」作为开发期兜底，**正式分发时必须移除**，改为随安装包提供 scrcpy
-- 无设置界面，所有参数硬编码
+- `platform.ts` 中保留了「已知 winget 安装路径」作为开发期兜底，**正式分发时必须移除**，改为随安装包提供 scrcpy（`scripts/stage-scrcpy.mjs` 已具备该能力）
+- 设置项有限：剪贴板开关已持久化（`profile.json`），其余参数仍硬编码
 - 日志只输出到控制台，未落盘（脱敏规则已写在 `log.ts` 注释中）
+- 无线 ADB 引导方式待定（当前需手动开启）
