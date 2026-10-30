@@ -34,6 +34,8 @@ object DebugDriver {
     const val ACTION_SEND_FILE = "cn.linkspace.client.DEBUG_SEND_FILE"
     const val ACTION_AUTO_ACCEPT = "cn.linkspace.client.DEBUG_AUTO_ACCEPT"
     const val ACTION_CLIPBOARD = "cn.linkspace.client.DEBUG_CLIPBOARD"
+    const val ACTION_REQUEST_CONTROL = "cn.linkspace.client.DEBUG_REQUEST_CONTROL"
+    const val ACTION_SCREEN_STREAM = "cn.linkspace.client.DEBUG_SCREEN_STREAM"
 
     /** null = 未启动。注意 Job() 工厂创建的是「活跃」Job，不能拿它当「未启动」哨兵 */
     private var autoAcceptJob: Job? = null
@@ -62,6 +64,39 @@ object DebugDriver {
             ACTION_SEND_FILE -> sendFile(service, intent)
             ACTION_AUTO_ACCEPT -> setAutoAccept(service, intent.getBooleanExtra("on", true))
             ACTION_CLIPBOARD -> handleClipboard(context, service, intent)
+            ACTION_REQUEST_CONTROL -> requestControl(context, service)
+            ACTION_SCREEN_STREAM -> service.requestScreenStream()
+        }
+    }
+
+    /**
+     * 发起键鼠控制（与 MainActivity 的 debug 接收器同一逻辑，走 am start
+     * 确定性通道）。依赖发现列表里有 paired 条目——桌面端必须在线通告。
+     */
+    private fun requestControl(context: Context, service: LinkSpaceService) {
+        // 发现列表受 NSD 再上报节奏影响会闪空（见 Discovery.STALE_MS 注释），
+        // 轮询等它出现而不是一枪毙命
+        var peer: DiscoveredService? = null
+        for (i in 0 until 25) {
+            peer = service.discovered.value.firstOrNull { it.paired }
+            if (peer != null) break
+            Thread.sleep(3000)
+        }
+        peer ?: run {
+            log("75s 内未发现已配对条目")
+            return
+        }
+        val metrics = context.resources.displayMetrics
+        CoroutineScope(Dispatchers.IO).launch {
+            service.requestInputControl(
+                peer = peer,
+                screen = InputController.Screen(
+                    metrics.widthPixels.coerceAtLeast(1),
+                    metrics.heightPixels.coerceAtLeast(1)
+                ),
+                displayName = service.selfName.value
+            ).onSuccess { log("控制会话已建立") }
+                .onFailure { log("发起控制失败: ${it.message}") }
         }
     }
 

@@ -859,9 +859,17 @@ class LinkSpaceService private constructor(private val appContext: Context) {
             while (true) {
                 val frame = runCatching { client.readFrame(conn) }.getOrNull() ?: break
                 if (frame.first == 0x2) {
-                    // 视频块：喂解码器；渲染面未就绪时缓冲（含流头 SPS/PPS，
-                    // 丢了就只能等下一个 IDR——缓冲正是为此存在）
-                    synchronized(pendingVideo) { pendingVideo.add(frame.second) }
+                    // 视频块：解码器已挂就直接喂（持续路径）；渲染面未就绪时
+                    // 缓冲（含流头 SPS/PPS，丢了就只能等下一个 IDR），等
+                    // connectStreamSurface 一次性冲入。只缓冲不持续喂的话，
+                    // 解码器创建后的所有帧都会滞留在这里饿死解码线程
+                    // （B-1 真机验证抓过：黑屏 15s 后解码线程饿死退出）
+                    val decoder = streamDecoder
+                    if (decoder != null) {
+                        decoder.feed(frame.second)
+                    } else {
+                        synchronized(pendingVideo) { pendingVideo.add(frame.second) }
+                    }
                     continue
                 }
                 if (frame.first != 0x1) continue

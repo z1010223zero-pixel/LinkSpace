@@ -241,7 +241,18 @@ class Discovery(private val context: Context) {
     companion object {
         private const val TAG = "LinkSpace/Discovery"
 
-        /** 软过期阈值，与桌面端 discovery.ts 的 staleMs 一致（12s） */
-        const val STALE_MS = 12_000L
+        /**
+         * 软过期阈值。桌面端 12s：桌面 bonjour 自带连续查询，每次应答都
+         * 刷新 lastSeen，条目持续保鲜。Android 端不能照抄——NSD 的
+         * mdnsd 主动查询窗口过后，重新上报同一服务的间隔实测 30～60s+
+         * （12s 阈值会把条目在两次上报之间清掉，发现列表永远空窗，
+         * 真机踩过），这里放宽到 90s：仍能兜住「设备断电消失」，
+         * 又不会误删在网设备。
+         * 阈值取 300s 而不是照抄桌面 12s 的另一半原因：mdnsd 的重查询
+         * 间隔随 browse 存活时长衰减（实测 40s → 90s+），固定小阈值
+         * 迟早落在两次上报之间。真正可靠的「立刻消失」信号仍靠
+         * goodbye（onServiceLost），本扫描只是无 goodbye 场景的兜底。
+         */
+        const val STALE_MS = 300_000L
     }
 }
