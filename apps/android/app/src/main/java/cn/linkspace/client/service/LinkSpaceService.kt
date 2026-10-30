@@ -729,10 +729,13 @@ class LinkSpaceService private constructor(private val appContext: Context) {
                 if (out != null && out.peerId == peerId) {
                     val text = envelope(type, peerId, payloadFn).toString()
                     val conn = out.conn
+                    Log.d(TAG, "out-> $type ${text.length}B")
                     outboundWriter.execute {
                         runCatching { client.sendText(conn, text) }
+                            .onFailure { Log.w(TAG, "out-send 失败: ${it.javaClass.simpleName}: ${it.message}") }
                     }
                 } else {
+                    Log.w(TAG, "send 走入站路由（out=${out?.peerId}, peer=$peerId）")
                     server?.sendControlTo(peerId, envelope(type, peerId, payloadFn))
                 }
             },

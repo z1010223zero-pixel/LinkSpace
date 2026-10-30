@@ -50,6 +50,14 @@ class InputController(
      */
     @Synchronized
     fun request(peerId: String, screen: Screen, displayName: String) {
+        // 过期挂起先清再放行（T7 走查 Bug2）：expiresAt 从未被检查的话，
+        // 一次未达的请求把 pending 永久占死，后续 request 全被静默拒绝，
+        // 桌面端 TTL 超时回的 reject 是唯一出口——错过它就只能杀进程
+        val held = pending
+        if (held != null && System.currentTimeMillis() > held.expiresAt) {
+            pending = null
+            Log.i(TAG, "挂起的控制请求已过期，自动清理")
+        }
         if (active != null || pending != null) {
             listener?.onSessionEnded("已有键鼠共享会话进行中")
             return

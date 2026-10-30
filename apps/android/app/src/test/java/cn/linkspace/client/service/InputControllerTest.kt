@@ -273,6 +273,30 @@ class InputControllerTest {
     }
 
     @Test
+    fun `过期挂起不阻塞新请求`() {
+        val h = Harness()
+        val c = h.make()
+        c.request("dev_peer_0001", InputController.Screen(100, 100), "A")
+
+        // 把挂起请求的 expiresAt 拨到过去（模拟桌面端 30s TTL 超时的 reject
+        // 迟到或丢失的场景，T7 走查 Bug2：pending 无过期清理把后续请求
+        // 永久占死）
+        val pendingField = InputController::class.java.getDeclaredField("pending")
+        pendingField.isAccessible = true
+        val pending = pendingField.get(c)!!
+        val expiresField = pending.javaClass.getDeclaredField("expiresAt")
+        expiresField.isAccessible = true
+        expiresField.setLong(pending, System.currentTimeMillis() - 1)
+
+        c.request("dev_peer_0001", InputController.Screen(100, 100), "A")
+        assertEquals(
+            "过期挂起应被清理并放行新请求（两条 session.start）",
+            2,
+            h.sent.count { it.second == "session.start" }
+        )
+    }
+
+    @Test
     fun `sendEvents 批量超过上限时截断到 64 条`() {
         val h = Harness()
         val c = h.make()

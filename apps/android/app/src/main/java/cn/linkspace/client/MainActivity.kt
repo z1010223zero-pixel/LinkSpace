@@ -31,6 +31,7 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.lifecycleScope
 import cn.linkspace.client.service.ClipboardSync
 import cn.linkspace.client.service.DiscoveredService
 import cn.linkspace.client.service.InputController
@@ -80,6 +81,28 @@ class MainActivity : ComponentActivity() {
 
     private fun serviceOf(): LinkSpaceService? = LinkSpaceService.get(this)
 
+    /** 走查驱动（见 onCreate 的注册说明），仅 debug build 生效 */
+    private val debugReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: android.content.Intent?) {
+            val service = serviceOf() ?: return
+            val peer = service.discovered.value.firstOrNull { it.paired } ?: run {
+                android.util.Log.w("LinkSpace/Debug", "没有已配对的发现条目")
+                return
+            }
+            val m = resources.displayMetrics
+            this@MainActivity.lifecycleScope.launch {
+                service.requestInputControl(
+                    peer = peer,
+                    screen = InputController.Screen(
+                        m.widthPixels.coerceAtLeast(1),
+                        m.heightPixels.coerceAtLeast(1)
+                    ),
+                    displayName = service.selfName.value
+                ).onFailure { android.util.Log.w("LinkSpace/Debug", "发起控制失败: ${it.message}") }
+            }
+        }
+    }
+
     override fun onResume() {
         super.onResume()
         val service = serviceOf() ?: return
@@ -109,6 +132,19 @@ class MainActivity : ComponentActivity() {
         val service = LinkSpaceService.get(this)
         // 前台服务随应用启动：保活连接，杀后台不再「随时消失」（任务 B-③）
         cn.linkspace.client.service.LinkSpaceForegroundService.start(this)
+
+        // 走查驱动入口（仅 debug build 注册）：ZUI 下 adb 注入的 ACTION_UP
+        // 不可靠，Button onClick 不触发，自动化走查点不了「控制电脑」。
+        // 用法：adb shell am broadcast -a cn.linkspace.DEBUG_REQUEST_CONTROL
+        // 取 discovered 列表第一张已配对卡片直接发起控制请求
+        if (applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0) {
+            androidx.core.content.ContextCompat.registerReceiver(
+                this,
+                debugReceiver,
+                android.content.IntentFilter("cn.linkspace.DEBUG_REQUEST_CONTROL"),
+                androidx.core.content.ContextCompat.RECEIVER_EXPORTED
+            )
+        }
 
         setContent {
             MaterialTheme {
@@ -595,8 +631,9 @@ private fun Context.outgoingFiles(uris: List<Uri>): List<OutgoingFile> =
 /**
  * 触控板模式：Android 作为键鼠控制端（协议 4.6）。
  *
- * 交互约定（MVP）：
- *   - 单指拖动 = 移动光标（绝对坐标，按本机屏幕空间上报，桌面端做映射）
+ * 交互约定：
+ *   - 单指拖动 = 相对移动光标（本地虚拟光标按灵敏度累积，跨手势保持——
+ *     抬起再按不跳点；协议仍发绝对坐标，桌面端零改动）
  *   - 轻点 = 左键单击；「按住拖拽」开关 = 左键保持按下
  *   - 双指拖动 = 滚轮（一档约 48px）
  *   - 文本框 = 键盘输入（美式布局字符映射，IME 中文跳过）；
@@ -617,6 +654,16 @@ fun TouchpadScreen(service: LinkSpaceService) {
     var altSticky by remember { mutableStateOf(false) }
     var text by remember { mutableStateOf("") }
     var scrollAccum by remember { mutableStateOf(0f) }
+
+    // 相对移动的虚拟光标：初始在屏幕中央，跨手势保持（T7 走查：绝对映射
+    // 导致「抬起再按从手指新位置开始」的滑移感 + 灵敏度被屏幕比例钉死）
+    var curX by remember { mutableStateOf(screenW / 2f) }
+    var curY by remember { mutableStateOf(screenH / 2f) }
+    // 灵敏度可调并持久化（T7 走查：绝对映射下移动很慢且无法调节）
+    val prefs = remember { context.getSharedPreferences("linkspace", Context.MODE_PRIVATE) }
+    var sensitivity by remember {
+        mutableStateOf(prefs.getFloat("touchpadSensitivity", 2.0f))
+    }
 
     fun send(events: List<org.json.JSONObject>) {
         // 每条消息上限 64 条（协议 4.6），分段发送
@@ -706,13 +753,28 @@ fun TouchpadScreen(service: LinkSpaceService) {
                 Surface(shape = MaterialTheme.shapes.small, color = MaterialTheme.colorScheme.surfaceVariant) {
                     Box(Modifier.padding(horizontal = 10.dp, vertical = 10.dp)) {
                         if (text.isEmpty()) {
-                            Text("在此输入文字，将键入到电脑", fontSize = 13.sp, color = Color.Gray)
+                            Text("在此输入文字（英文），将键入到电脑", fontSize = 13.sp, color = Color.Gray)
                         }
                         inner()
                     }
                 }
             }
         )
+
+        // ---------- 灵敏度调节（相对移动倍率，持久化） ----------
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("灵敏度", fontSize = 12.sp)
+            Slider(
+                value = sensitivity,
+                onValueChange = {
+                    sensitivity = it
+                    prefs.edit().putFloat("touchpadSensitivity", it).apply()
+                },
+                valueRange = 0.5f..5f,
+                modifier = Modifier.weight(1f).padding(horizontal = 10.dp)
+            )
+            Text("%.1fx".format(sensitivity), fontSize = 12.sp, modifier = Modifier.width(44.dp))
+        }
 
         // ---------- 触控板 ----------
         Surface(
@@ -749,33 +811,40 @@ fun TouchpadScreen(service: LinkSpaceService) {
                                 val c = pressed.first()
                                 if (c.changedToDown()) twoFinger = false
                                 if (!twoFinger) {
-                                    val pos = c.position
                                     if (c.changedToDown()) {
                                         downAt = System.currentTimeMillis()
                                         moved = false
                                     }
-                                    if (c.positionChange() != androidx.compose.ui.geometry.Offset.Zero) {
-                                        moved = moved || kotlin.math.abs(c.positionChange().x) > 2f ||
-                                            kotlin.math.abs(c.positionChange().y) > 2f
-                                    }
-                                    // 按触控板占比映射到本机全屏坐标
-                                    val x = (pos.x / size.width.toFloat() * screenW).toInt()
-                                    val y = (pos.y / size.height.toFloat() * screenH).toInt()
-                                    send(
-                                        listOf(
-                                            InputController.move(
-                                                x.coerceIn(0, screenW - 1),
-                                                y.coerceIn(0, screenH - 1)
+                                    val delta = c.positionChange()
+                                    if (delta != androidx.compose.ui.geometry.Offset.Zero) {
+                                        moved = moved || kotlin.math.abs(delta.x) > 2f ||
+                                            kotlin.math.abs(delta.y) > 2f
+                                        // 相对移动：位移 × 灵敏度累积进虚拟光标，
+                                        // 手指抬起再按不重置（滑移修复）
+                                        curX = (curX + delta.x * sensitivity)
+                                            .coerceIn(0f, (screenW - 1).toFloat())
+                                        curY = (curY + delta.y * sensitivity)
+                                            .coerceIn(0f, (screenH - 1).toFloat())
+                                        send(
+                                            listOf(
+                                                InputController.move(
+                                                    curX.toInt(), curY.toInt()
+                                                )
                                             )
                                         )
-                                    )
-                                    if (c.changedToUp() && !moved && System.currentTimeMillis() - downAt < 250) {
-                                        send(listOf(InputController.down("left"), InputController.up("left")))
+                                        c.consume()
                                     }
-                                    if (c.positionChange() != androidx.compose.ui.geometry.Offset.Zero) c.consume()
                                 }
                             } else {
-                                // 全部抬起：滚动状态复位
+                                // 全部抬起：先判轻点再复位——抬起帧 pressed=0，
+                                // 轻点判定放在 pressed.size==1 分支里永远不可达
+                                // （移交清单 Bug1 死代码）
+                                val up = event.changes.firstOrNull { it.changedToUp() }
+                                if (up != null && !twoFinger &&
+                                    System.currentTimeMillis() - downAt < 250 && !moved
+                                ) {
+                                    send(listOf(InputController.down("left"), InputController.up("left")))
+                                }
                                 twoFinger = false
                                 scrollAccum = 0f
                             }
