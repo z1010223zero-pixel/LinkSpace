@@ -426,6 +426,41 @@ async function main(): Promise<void> {
     )
     check('补发传输完成', true)
 
+    // ---------- 8c. 双连接并存：旧连接迟到的 close 不误删新连接 ----------
+    console.log('\n8c. 双连接并存时旧连接断开（移交清单 2026-10-30）')
+    // 同一对端「主动连出 + 对端连入」并存是真实场景（平板 sendFiles 前
+    // 会主动连桌面）。旧连接的 close 常常迟到（TCP 半开等超时，实测
+    // 60s+）；close 处理若按 deviceId 无脑删，幸存连接的登记与端点会被
+    // 一起删掉，迟到的 transfer.accept 报「不知道对端的监听端点」
+    const svcA: DiscoveredService = {
+      serviceName: 'E2E-Alpha-改',
+      idPrefix: A.id.slice(0, 12),
+      displayName: 'E2E-Alpha-改',
+      deviceType: 'win',
+      caps: ['file'],
+      host: '127.0.0.1',
+      port: A.port,
+      lastSeen: Date.now(),
+      paired: true
+    }
+    const connBA = await B.connect(svcA)
+    await waitFor(() => (connBA.peerId === A.id ? connBA : undefined))
+    await sleep(200)
+
+    const dualTask = await A.offerFiles(B.id, [
+      { name: 'dual.txt', path: srcPath, size: payload.length }
+    ])
+    check('双连接下任务正常 offered', dualTask.state === 'offered', dualTask.state)
+    // 旧连接此刻断开（模拟迟到 close）：幸存连接 connBA 必须接管一切
+    connB3.close()
+    await sleep(300)
+    check('旧连接断开后对端仍在线（幸存连接接管）', A.isConnected(B.id))
+    await B.acceptTransfer(dualTask.id, saveDir)
+    const dualDone = await waitFor(() =>
+      changed.find((t) => t.id === dualTask.id && t.state === 'completed')
+    )
+    check('迟到路径的 accept 仍能完成推送', dualDone.state === 'completed', dualDone.state)
+
     // ---------- 9. 撤销信任后门禁重新生效 ----------
     console.log('\n9. 撤销信任后门禁重新生效')
     B.revokeTrust(A.id)

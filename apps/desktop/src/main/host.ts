@@ -284,18 +284,34 @@ export class Host {
    * 任务必须回 waiting，否则 flushWaitingOffers（只认 waiting）永不补发。
    */
   private handleConnClosed(conn: Connection): void {
-    if (conn.peerId) this.peers.delete(conn.peerId)
-    this.endpoints.delete(conn.peerId)
+    const pid = conn.peerId
+    // 同一对端可能同时存在「主动连出 + 对端连入」两条连接（移交清单
+    // 2026-10-30）：旧连接的 close 常常迟到——TCP 半开要等超时，实测
+    // 60s+。若按 deviceId 无脑删，会把幸存连接的 peers 登记与 endpoints
+    // 端点一起删掉，迟到的 transfer.accept 便报「不知道对端的监听端点，
+    // 无法推送」。有幸存连接时只摘自己这条，其余清理一律不动。
+    const survivor = pid
+      ? this.control?.connections().find((c) => c !== conn && c.peerId === pid)
+      : undefined
+    if (pid && !survivor) {
+      this.peers.delete(pid)
+      this.endpoints.delete(pid)
+    } else if (survivor && this.peers.get(pid) === conn) {
+      // 刚断的恰是 peers 表里那条，但同身份的活连接还在：登记移交过去
+      this.peers.set(pid, survivor)
+    }
     this.pendingEndpoints.delete(conn)
     for (const [name, c] of this.serviceConns) {
       if (c === conn) this.serviceConns.delete(name)
     }
-    this.inputCoordinator?.onPeerDisconnected(conn.peerId)
-    this.inputController?.onPeerDisconnected(conn.peerId)
-    for (const task of this.transfers.list()) {
-      if (task.peerId !== conn.peerId) continue
-      if (task.direction !== 'send' || task.state !== 'offered') continue
-      this.transfers.markWaiting(task.id)
+    if (!survivor) {
+      this.inputCoordinator?.onPeerDisconnected(pid)
+      this.inputController?.onPeerDisconnected(pid)
+      for (const task of this.transfers.list()) {
+        if (task.peerId !== pid) continue
+        if (task.direction !== 'send' || task.state !== 'offered') continue
+        this.transfers.markWaiting(task.id)
+      }
     }
   }
 
@@ -844,12 +860,10 @@ export class Host {
       this.inputCoordinator!.onEvent(conn.peerId, msg.payload)
     })
 
-    // 断连清理：双方角色都要清。connection 的 peerId 可能还是空
-    // （身份声明前就断了），两个状态机各自按空串匹配自然 no-op
-    control.onClosed((conn) => {
-      this.inputCoordinator?.onPeerDisconnected(conn.peerId)
-      this.inputController?.onPeerDisconnected(conn.peerId)
-    })
+    // 断连清理收口在 handleConnClosed（startControl 注册，带幸存者
+    // 检查）。这里曾再注册一份 onClosed 推 onPeerDisconnected——双连接
+    // 并存时旧连接迟到的 close 会经这份冗余注册误杀幸存连接上的会话
+    // （移交清单 2026-10-30），已并入统一清理
 
     // 信任撤销优先于一切：立即掐断请求与会话（9.1 的安全兜底）
     this.on('revoked', (deviceId) => {
