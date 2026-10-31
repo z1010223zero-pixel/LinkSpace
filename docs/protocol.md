@@ -174,6 +174,7 @@
 |---|---|---|---|
 | `screen.stream.request` | 控制端 → 被控端 | `{ display?: number }` | 请求开始投屏。前置：活动键鼠会话存在且 peerId 匹配、被控端 ffmpeg 可用，否则回 `error`。**`display` 省略时**：被控端单显示器直接按 0 号屏开流（免选择器）；多显示器回 `screen.stream.displays` 清单，由用户挑选后再带 `display` 重发本消息（自动重连带记住的索引时同样直连） |
 | `screen.stream.displays` | 被控端 → 控制端 | `{ displays: [{ x, y, w, h }] }` | 多显示器清单（虚拟屏坐标），控制端弹选择器。**[PROTOCOL] 2026-10-31 登记**（ToDesk 式多屏选择，用户提出） |
+| `screen.cursor` | 被控端 → 控制端 | `{ x, y, w, h }` | 物理光标坐标广播（region-local 像素 + 区域尺寸，33ms 限流），控制端本地绘制光标覆盖层（采集 draw_mouse=0 不含光标）。**[PROTOCOL] 2026-10-31 登记**（开源方案同款：光标本地画，与采集解耦） |
 | `screen.stream.start` | 被控端 → 控制端 | `{ w, h }` | 推流开始。`w/h` 是被控端虚拟屏全景尺寸（触控换算基准之一；实际流分辨率以流内 SPS 为准，平板按其 letterbox 等比渲染） |
 | `screen.stream.stop` | 双向 | `{}` | 停止投屏（控制端取消 / 被控端 ffmpeg 意外退出时通知对端清 UI）。会话结束（session.stop/断连）隐式终止投流，不发本消息 |
 | `screen.stream.error` | 被控端 → 控制端 | `{ message }` | 投屏失败回告（无会话 / 缺 ffmpeg / 启动失败） |
