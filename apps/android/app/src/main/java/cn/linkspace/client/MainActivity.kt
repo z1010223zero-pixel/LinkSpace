@@ -731,6 +731,32 @@ fun TouchpadScreen(service: LinkSpaceService) {
                 }
                 controller.stop()
             }) { Text("结束控制") }
+
+            // 多显示器选择器（B-2）：被控端回报清单即弹，选中后按
+            // 该屏区域推流
+            val displayChoices by service.streamDisplays.collectAsStateWithLifecycle()
+            if (displayChoices.isNotEmpty()) {
+                AlertDialog(
+                    onDismissRequest = { service.clearStreamDisplays() },
+                    title = { Text("选择要投屏的显示器") },
+                    text = {
+                        Column {
+                            displayChoices.forEachIndexed { index, d ->
+                                TextButton(
+                                    onClick = {
+                                        service.clearStreamDisplays()
+                                        service.requestScreenStream(index)
+                                    }
+                                ) { Text("显示器 ${index + 1}（${d.w}x${d.h}）") }
+                            }
+                        }
+                    },
+                    confirmButton = {},
+                    dismissButton = {
+                        OutlinedButton(onClick = { service.clearStreamDisplays() }) { Text("取消") }
+                    }
+                )
+            }
             // 屏幕投屏：桌面画面流到本机全屏显示，触点按画面比例直接
             // 映射成绝对坐标事件（寄生在当前键鼠会话内）
             OutlinedButton(onClick = { service.requestScreenStream() }) { Text("投屏") }
@@ -1033,24 +1059,14 @@ fun ScreenMirrorScreen(service: LinkSpaceService, info: LinkSpaceService.ScreenS
             .onSizeChanged { containerPx = it }
     ) {
         if (videoRect.width > 0 && videoRect.height > 0) {
+            // 自绘 StreamView：解码器（ByteBuffer 模式）产出 Bitmap 直投，
+            // 无 surface 生命周期——本 ROM surface 模式解码活锁，见
+            // StreamDecoder 类注释（2026-10-31 绿块排障定论）
             AndroidView(
                 factory = { ctx ->
-                    android.view.SurfaceView(ctx).apply {
-                        holder.addCallback(object : android.view.SurfaceHolder.Callback {
-                            override fun surfaceCreated(holder: android.view.SurfaceHolder) {
-                                // 渲染面就绪：服务层 accept 桌面 ffmpeg 的连接并起解码
-                                service.connectStreamSurface(holder.surface)
-                            }
-
-                            override fun surfaceChanged(holder: android.view.SurfaceHolder, format: Int, width: Int, height: Int) {}
-
-                            override fun surfaceDestroyed(holder: android.view.SurfaceHolder) {
-                                // 解码器随推流断开自愈退出（桌面杀流 → EOF/异常路径），
-                                // 面已随本 view 销毁被 release
-                            }
-                        })
-                    }
+                    cn.linkspace.client.StreamView(ctx).also { service.attachStreamView(it) }
                 },
+                onRelease = { service.attachStreamView(null) },
                 modifier = Modifier
                     .align(Alignment.Center)
                     .size(

@@ -37,6 +37,7 @@ object DebugDriver {
     const val ACTION_REQUEST_CONTROL = "cn.linkspace.client.DEBUG_REQUEST_CONTROL"
     const val ACTION_SCREEN_STREAM = "cn.linkspace.client.DEBUG_SCREEN_STREAM"
     const val ACTION_SCREEN_PASTE = "cn.linkspace.client.DEBUG_SCREEN_PASTE"
+    const val ACTION_DECODE_FILE = "cn.linkspace.client.DEBUG_DECODE_FILE"
 
     /** null = 未启动。注意 Job() 工厂创建的是「活跃」Job，不能拿它当「未启动」哨兵 */
     private var autoAcceptJob: Job? = null
@@ -66,7 +67,12 @@ object DebugDriver {
             ACTION_AUTO_ACCEPT -> setAutoAccept(service, intent.getBooleanExtra("on", true))
             ACTION_CLIPBOARD -> handleClipboard(context, service, intent)
             ACTION_REQUEST_CONTROL -> requestControl(context, service)
-            ACTION_SCREEN_STREAM -> service.requestScreenStream()
+            ACTION_SCREEN_STREAM -> {
+                val display = intent.getIntExtra("display", -1)
+                service.requestScreenStream(display)
+                log("已发起投屏请求（display=$display）")
+            }
+            ACTION_DECODE_FILE -> decodeFile(context, intent.getStringExtra("path") ?: "/sdcard/linkspace-test.h264")
             ACTION_SCREEN_PASTE -> {
                 val text = intent.getStringExtra("text") ?: return
                 service.sendScreenPaste(text)
@@ -244,5 +250,87 @@ object DebugDriver {
 
     private fun log(msg: String) {
         android.util.Log.i("LinkSpace/Debug", msg)
+    }
+
+    /**
+     * 绿块定性实验（2026-10-31）：无 Surface（ByteBuffer 输出）解码指定
+     * h264 文件，把第 N 帧落成 PNG。若字节流模式解码出干净帧 → 损坏在
+     * 渲染/合成路径；若同样花 → 输入组装问题。与在线链路完全无关。
+     */
+    private fun decodeFile(context: Context, path: String) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val file = File(path)
+                if (!file.exists()) {
+                    log("decodeFile: 文件不存在 $path")
+                    return@launch
+                }
+                val bytes = file.readBytes()
+                log("decodeFile: ${bytes.size} 字节")
+                val format = android.media.MediaFormat.createVideoFormat(
+                    android.media.MediaFormat.MIMETYPE_VIDEO_AVC, 1920, 1080
+                )
+                val codec = android.media.MediaCodec.createByCodecName("c2.android.avc.decoder")
+                codec.configure(format, null, null, 0)
+                codec.start()
+                var queued = 0
+                var decoded = 0
+                val info = android.media.MediaCodec.BufferInfo()
+                var off = 0
+                var eos = false
+                while (!eos && decoded < 30) {
+                    val inIdx = codec.dequeueInputBuffer(10_000)
+                    if (inIdx >= 0 && off < bytes.size) {
+                        val ib = codec.getInputBuffer(inIdx)!!
+                        ib.clear()
+                        val n = minOf(64 * 1024, bytes.size - off)
+                        ib.put(bytes, off, n)
+                        codec.queueInputBuffer(inIdx, 0, n, off.toLong(), 0)
+                        off += n
+                        queued++
+                    } else if (inIdx >= 0 && off >= bytes.size && !eos) {
+                        codec.queueInputBuffer(inIdx, 0, 0, 0L, android.media.MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                        eos = true
+                    }
+                    var outIdx = codec.dequeueOutputBuffer(info, 10_000)
+                    while (outIdx >= 0) {
+                        decoded++
+                        val img = codec.getOutputImage(outIdx)!!
+                        if (decoded == 5) {
+                            saveYuvAsPng(context, img, info)
+                        }
+                        codec.releaseOutputBuffer(outIdx, false)
+                        img.close()
+                        outIdx = codec.dequeueOutputBuffer(info, 0)
+                    }
+                }
+                log("decodeFile 完成: 入队 $queued 块, 解出 $decoded 帧")
+                codec.stop()
+                codec.release()
+            } catch (t: Throwable) {
+                log("decodeFile 失败: ${t.javaClass.simpleName}: ${t.message}")
+            }
+        }
+    }
+
+    /** YUV_420_888 → PNG（仅取 Y 平面当灰度，够定性花屏位置） */
+    private fun saveYuvAsPng(context: Context, img: android.media.Image, info: android.media.MediaCodec.BufferInfo) {
+        val w = img.width
+        val h = img.height
+        val yPlane = img.planes[0]
+        val buf = yPlane.buffer
+        val rowStride = yPlane.rowStride
+        val pixels = IntArray(w * h)
+        for (y in 0 until h) {
+            for (x in 0 until w) {
+                val v = buf.get(y * rowStride + x).toInt() and 0xff
+                pixels[y * w + x] = 0xff000000.toInt() or (v shl 16) or (v shl 8) or v
+            }
+        }
+        val bmp = android.graphics.Bitmap.createBitmap(pixels, w, h, android.graphics.Bitmap.Config.ARGB_8888)
+        val out = File(context.getExternalFilesDir(null), "decode-frame.png")
+        out.outputStream().use { bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
+        bmp.recycle()
+        log("decodeFile: 帧${info.offset} 已存 ${out.absolutePath} (${w}x${h} stride=$rowStride)")
     }
 }

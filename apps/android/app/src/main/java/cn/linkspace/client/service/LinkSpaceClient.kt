@@ -33,7 +33,14 @@ class LinkSpaceClient(private val identity: Identity) {
     companion object {
         private const val TAG = "LinkSpace/Client"
         private const val CONNECT_TIMEOUT_MS = 8000
-        private const val READ_TIMEOUT_MS = 15000
+        /**
+         * 读超时只防「对端死了读挂起」，不是活动性探测：键鼠会话的空闲期
+         * （心跳只出不进，桌面端不回 heartbeat）入向可以几分钟没有字节，
+         * 15s 会把还活着的读循环杀死——之后发送向仍在（TCP 未感知），
+         * 表现为「请求发得出去、回告收不到」（真机踩过：投屏 start 石沉大海）。
+         * 60s 足够兜住死链，又不会误伤空闲会话。
+         */
+        private const val READ_TIMEOUT_MS = 60000
         /** 与桌面端 CHUNK_SIZE 一致 */
         private const val CHUNK_SIZE = 4 * 1024 * 1024
     }
@@ -260,17 +267,24 @@ class LinkSpaceClient(private val identity: Identity) {
             val b0 = readExact(1) ?: return null
             val b1 = readExact(1) ?: return null
             val opcode = b0[0].toInt() and 0x0f
+            // 长度编码由原始 7-bit 值决定，与解码出的长度值无关——此前用
+            // 解码值判断，16-bit 扩展长度恰好为 127 的帧（node-ws 对
+            // ≥126 字节一律用 16-bit 编码，127 字节的视频小帧真会出现）
+            // 会被二次当成 64-bit 标记再吞 8 字节，H.264 起始码 00 00 00 01
+            // 被当成长度 5.4GB → 读循环暴毙（真机 e8hex 取证实锤）
             var len = b1[0].toLong() and 0x7f
-            if (len == 126L) {
-                val e = readExact(2)!!
-                len = ((e[0].toLong() and 0xff) shl 8) or (e[1].toLong() and 0xff)
-            }
             var e8hex = ""
-            if (len == 127L) {
-                val e = readExact(8)!!
-                len = 0
-                for (i in 0..7) len = (len shl 8) or (e[i].toLong() and 0xff)
-                e8hex = e.joinToString("") { "%02x".format(it) }
+            when (len) {
+                126L -> {
+                    val e = readExact(2)!!
+                    len = ((e[0].toLong() and 0xff) shl 8) or (e[1].toLong() and 0xff)
+                }
+                127L -> {
+                    val e = readExact(8)!!
+                    len = 0
+                    for (i in 0..7) len = (len shl 8) or (e[i].toLong() and 0xff)
+                    e8hex = e.joinToString("") { "%02x".format(it) }
+                }
             }
             if (len > 32L * 1024 * 1024) {
                 // 失同步诊断：正常流里不可能出现（桌面 ws 库对单 Buffer

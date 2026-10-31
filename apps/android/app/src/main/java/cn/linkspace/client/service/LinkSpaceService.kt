@@ -855,6 +855,8 @@ class LinkSpaceService private constructor(private val appContext: Context) {
             }
             // 读循环：桌面端的 session.accept/reject/stop 与投屏视频块
             // 都从这条连接回来（文本帧 = JSON 控制消息，二进制帧 = 视频块）
+            var recvFrames = 0
+            var recvBytes = 0
             val myPrefix = identity.get().fingerprint.replace(":", "").take(12)
             while (true) {
                 val frame = try {
@@ -873,21 +875,34 @@ class LinkSpaceService private constructor(private val appContext: Context) {
                     // connectStreamSurface 一次性冲入。只缓冲不持续喂的话，
                     // 解码器创建后的所有帧都会滞留在这里饿死解码线程
                     // （B-1 真机验证抓过：黑屏 15s 后解码线程饿死退出）
+                    recvBytes += frame.second.size
+                    if (++recvFrames % 200 == 0) {
+                        Log.i(TAG, "已收视频块 $recvFrames 个 / ${recvBytes / 1e6}MB")
+                    }
                     val decoder = streamDecoder
                     if (decoder != null) {
                         decoder.feed(frame.second)
                     } else {
                         synchronized(pendingVideo) { pendingVideo.add(frame.second) }
                     }
-                    continue
+                    // announce/heartbeat 等其余类型与本连接无关，静默忽略
                 }
                 if (frame.first != 0x1) continue
                 val msg = runCatching { JSONObject(String(frame.second, Charsets.UTF_8)) }.getOrNull() ?: continue
                 // 信封按协议 §3 过滤（同 sendFiles）：v/to/ts 不合的直接跳过
                 val to = msg.optString("to")
-                if (msg.optInt("v", -1) != Protocol.VERSION) continue
-                if (to.isNotEmpty() && to != myPrefix) continue
-                if (kotlin.math.abs(System.currentTimeMillis() - msg.optLong("ts", 0L)) > 60_000) continue
+                if (msg.optInt("v", -1) != Protocol.VERSION) {
+                    Log.w(TAG, "丢弃 v 不合的消息 type=${msg.optString("type")} v=${msg.optInt("v", -1)}")
+                    continue
+                }
+                if (to.isNotEmpty() && to != myPrefix) {
+                    Log.w(TAG, "丢弃 to 不合的消息 type=${msg.optString("type")} to=$to 本机=$myPrefix")
+                    continue
+                }
+                if (kotlin.math.abs(System.currentTimeMillis() - msg.optLong("ts", 0L)) > 60_000) {
+                    Log.w(TAG, "丢弃 ts 超偏的消息 type=${msg.optString("type")} 偏差=${System.currentTimeMillis() - msg.optLong("ts", 0L)}ms")
+                    continue
+                }
                 val from = msg.optString("from")
                 val payload = msg.optJSONObject("payload") ?: JSONObject()
                 when (msg.optString("type")) {
@@ -896,11 +911,19 @@ class LinkSpaceService private constructor(private val appContext: Context) {
                     Protocol.TYPE_SESSION_STOP -> input.onStopped(from, payload)
                     // ---------- 屏幕投屏 ----------
                     Protocol.TYPE_SCREEN_STREAM_START -> {
+                        Log.i(TAG, "收到投屏启动 w=${payload.optInt("w")} h=${payload.optInt("h")}")
                         streamFallbackSize = payload.optInt("w", 1920) to payload.optInt("h", 1080)
                         _screenStream.value = ScreenStreamInfo(
                             streamFallbackSize.first,
                             streamFallbackSize.second
                         )
+                        // 重投屏场景：残留解码器（断流路径被 stopped 吞掉回调
+                        // 的旧实例）会把新流挡死，先清再建。渲染与解码解耦
+                        // （ByteBuffer 模式），无需渲染面到位即可起解
+                        streamDecoder?.shutdown()
+                        streamDecoder = null
+                        synchronized(pendingVideo) { pendingVideo.clear() }
+                        startStreamDecoder()
                     }
                     Protocol.TYPE_SCREEN_STREAM_STOP -> {
                         streamDecoder?.shutdown()
@@ -913,6 +936,21 @@ class LinkSpaceService private constructor(private val appContext: Context) {
                         _screenStream.value = null
                         _inputMessage.value = payload.optString("message", "投屏失败")
                     }
+                    Protocol.TYPE_SCREEN_STREAM_DISPLAYS -> {
+                        val arr = payload.optJSONArray("displays")
+                            ?: org.json.JSONArray()
+                        val list = (0 until arr.length()).map {
+                            val o = arr.getJSONObject(it)
+                            DisplayRect(
+                                x = o.optInt("x"),
+                                y = o.optInt("y"),
+                                w = o.optInt("w"),
+                                h = o.optInt("h")
+                            )
+                        }
+                        Log.i(TAG, "收到显示器清单：$list")
+                        _streamDisplays.value = list
+                    }
                     // announce/heartbeat 等其余类型与本连接无关，静默忽略
                 }
             }
@@ -920,7 +958,11 @@ class LinkSpaceService private constructor(private val appContext: Context) {
             // 主动关闭（stopAll/换目标）时 outbound 已被置空，不再误报
             if (outbound?.conn === conn) {
                 outbound = null
+                val wasStreaming = _screenStream.value != null || streamDecoder != null
                 input.onPeerDisconnected(fullId)
+                // 投屏中连接断开：自动重连一次（读循环死亡 = WS 帧解析失
+                // 同步等瞬态故障，重建链路常可自愈；连续失败由用户重试）
+                if (wasStreaming) scheduleStreamReconnect(fullId)
             }
         }
         // 提交登记：已有同目标的活连接（并发窗口内别人建成）就丢弃本条
@@ -943,6 +985,63 @@ class LinkSpaceService private constructor(private val appContext: Context) {
     private fun outboundReusable(fullId: String): Boolean = synchronized(this) {
         val cur = outbound
         cur != null && cur.peerId == fullId && !cur.conn.socket.isClosed
+    }
+
+    /** 上次投屏选中的显示器索引（自动重连时沿用） */
+    private var lastStreamDisplayIndex = -1
+
+    /**
+     * 观看页的渲染视图（弱引用防泄漏）。解码器每帧回调后主线程
+     * submit；观看页销毁时置空，解码出的帧自然丢弃。
+     */
+    @Volatile
+    private var streamRenderView: java.lang.ref.WeakReference<cn.linkspace.client.StreamView>? = null
+
+    private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+
+    /** 观看页挂载/更新时回调；传 null = 页面销毁 */
+    fun attachStreamView(view: cn.linkspace.client.StreamView?) {
+        streamRenderView = view?.let { java.lang.ref.WeakReference(it) }
+    }
+
+    /**
+     * 投屏中断线自动重连：重建控制链路（自动批准生效）→ 恢复会话 →
+     * 按上次的显示器选择重新发起投屏。退避重试 4 次（5/10/20/30s）——
+     * 单次重试撞上桌面端还在重启窗口就直接放弃了（真机踩过），连
+     * 发现列表刷新这种 30s 级的延迟也兜不住；仍不无限循环，对端真
+     * 下线时 65s 后停手交给用户。
+     */
+    private fun scheduleStreamReconnect(peerFullId: String) {
+        Log.i(TAG, "投屏连接断开，5s 后开始自动重连（最多 4 次）")
+        CoroutineScope(Dispatchers.IO).launch {
+            val backoffs = longArrayOf(5000, 10000, 20000, 30000)
+            for ((idx, backoff) in backoffs.withIndex()) {
+                val round = idx + 1
+                delay(backoff)
+                val peer = discovered.value.firstOrNull {
+                    trust.fullDeviceIdOf(it.idPrefix) == peerFullId
+                }
+                if (peer == null) {
+                    Log.w(TAG, "自动重连第 $round 次：发现列表暂无该设备，稍后再试")
+                    continue
+                }
+                val m = appContext.resources.displayMetrics
+                val r = runCatching {
+                    requestInputControl(
+                        peer,
+                        InputController.Screen(m.widthPixels.coerceAtLeast(1), m.heightPixels.coerceAtLeast(1)),
+                        displayName
+                    ).getOrThrow()
+                    requestScreenStream(lastStreamDisplayIndex)
+                }
+                if (r.isSuccess) {
+                    Log.i(TAG, "自动重连成功（第 $round 次）")
+                    return@launch
+                }
+                Log.w(TAG, "自动重连第 $round 次失败: ${r.exceptionOrNull()?.message}")
+            }
+            Log.w(TAG, "自动重连放弃（4 次未成功），等待用户手动重试")
+        }
     }
 
     /** 关闭出站控制连接（用户退出/服务停止时调用） */
@@ -971,6 +1070,18 @@ class LinkSpaceService private constructor(private val appContext: Context) {
     /** 进行中的投屏流信息。null = 无投屏。w/h 是虚拟屏尺寸（触控映射回退基准） */
     data class ScreenStreamInfo(val w: Int, val h: Int)
 
+    /** 被控端的一块显示器（虚拟屏坐标 + 尺寸），多显示器选择用 */
+    data class DisplayRect(val x: Int, val y: Int, val w: Int, val h: Int)
+
+    private val _streamDisplays = MutableStateFlow<List<DisplayRect>>(emptyList())
+
+    /** 被控端回报的显示器清单；非空时界面弹选择器（B-2 多显示器选择） */
+    val streamDisplays: StateFlow<List<DisplayRect>> = _streamDisplays
+
+    fun clearStreamDisplays() {
+        _streamDisplays.value = emptyList()
+    }
+
     private val _screenStream = MutableStateFlow<ScreenStreamInfo?>(null)
     val screenStream: StateFlow<ScreenStreamInfo?> = _screenStream
 
@@ -984,17 +1095,21 @@ class LinkSpaceService private constructor(private val appContext: Context) {
     /** 视频块缓冲：WS 二进制帧到达早于渲染面就绪时暂存（含流头 SPS/PPS） */
     private val pendingVideo = java.util.ArrayDeque<ByteArray>()
 
-    fun requestScreenStream() {
+    fun requestScreenStream(displayIndex: Int = -1) {
         val out = outbound ?: run {
             _inputMessage.value = "没有到桌面的控制连接"
             return
         }
         // 已在投屏中就不再重复请求
         if (streamDecoder != null) return
+        lastStreamDisplayIndex = displayIndex
         pendingVideo.clear()
-        val text = envelope(Protocol.TYPE_SCREEN_STREAM_REQUEST, out.peerId) {}.toString()
+        val text = envelope(Protocol.TYPE_SCREEN_STREAM_REQUEST, out.peerId) {
+            // 带 display 的请求直接选屏；不带则被控端回显示器清单
+            if (displayIndex >= 0) put("display", displayIndex)
+        }.toString()
         outboundWriter.execute { runCatching { client.sendText(out.conn, text) } }
-        Log.i(TAG, "投屏请求已发")
+        Log.i(TAG, "投屏请求已发（display=$displayIndex）")
     }
 
     /**
@@ -1028,23 +1143,22 @@ class LinkSpaceService private constructor(private val appContext: Context) {
     }
 
     /**
-     * 投屏界面渲染面就绪后调用：建解码器并冲入此前缓冲的视频块。
-     * 渲染面就绪晚于视频流到达是常态（UI 切换需要一两帧）。
+     * 建解码器并冲入此前缓冲的视频块。ByteBuffer 模式解码 + 回调渲染，
+     * 与观看页挂载状态解耦——先到帧后挂页、先挂页后到帧都成立。
      */
-    fun connectStreamSurface(surface: android.view.Surface) {
-        if (streamDecoder != null) {
-            runCatching { surface.release() }
-            return
-        }
+    private fun startStreamDecoder() {
+        if (streamDecoder != null) return
         val decoder = StreamDecoder(
-            surface,
+            onFrame = { bmp ->
+                mainHandler.post {
+                    streamRenderView?.get()?.submit(bmp)
+                }
+            },
             onEnded = { reason ->
                 _inputMessage.value = reason
                 _screenStream.value = null
-                // 解码线程的任何死亡（断流/渲染面失效）都必须同时清掉引用：
-                // 残留的非空 streamDecoder 会让下次投屏请求被
-                // 「if (streamDecoder != null) return」挡死，且读循环会往
-                // 已死实例的缓冲里无界堆帧（真机踩过：死后再点投屏无响应）
+                // 解码线程的任何死亡（断流/内部错误）都必须同时清掉引用：
+                // 残留的非空 streamDecoder 会让下次投屏请求被挡死（真机踩过）
                 streamDecoder?.shutdown()
                 streamDecoder = null
             },
