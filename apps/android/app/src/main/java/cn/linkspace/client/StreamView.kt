@@ -17,24 +17,31 @@ import android.view.View
  */
 class StreamView(context: Context) : View(context) {
 
-    private var bitmap: Bitmap? = null
     private val paint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG)
     private val dst = Rect()
 
-    /** 解码线程回调转发（须已在主线程） */
+    /** invalidate 已排队未消费（合流：解码再快主线程也只按 vsync 重绘一次，
+     *  否则解码线程的逐帧 post 会洪泛主线程把输入事件饿出 ANR） */
+    @Volatile
+    private var invalidateQueued = false
+
+    @Volatile
+    private var bitmap: Bitmap? = null
+
+    /** 解码线程任意线程调用；位图实例由解码器复用，onDraw 时可能正被
+     *  下一帧覆盖（视觉撕裂可容忍，绝不阻塞解码） */
     fun submit(bmp: Bitmap) {
         bitmap = bmp
-        invalidate()
+        if (!invalidateQueued) {
+            invalidateQueued = true
+            postInvalidateOnAnimation()
+        }
     }
 
     override fun onDraw(canvas: Canvas) {
+        invalidateQueued = false
         val bmp = bitmap ?: return
         dst.set(0, 0, width, height)
         canvas.drawBitmap(bmp, null, dst, paint)
-    }
-
-    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-        // AndroidView 的 size() 修饰符给 EXACTLY；兜底 default 逻辑
-        super.onMeasure(widthMeasureSpec, heightMeasureSpec)
     }
 }

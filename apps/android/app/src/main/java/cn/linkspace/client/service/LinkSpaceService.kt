@@ -1150,9 +1150,10 @@ class LinkSpaceService private constructor(private val appContext: Context) {
         if (streamDecoder != null) return
         val decoder = StreamDecoder(
             onFrame = { bmp ->
-                mainHandler.post {
-                    streamRenderView?.get()?.submit(bmp)
-                }
+                // 直投视图（submit 内部按 vsync 合流重绘），不经主线程
+                // Handler——解码快于绘制时逐帧 post 会洪泛主线程把触摸
+                // 事件饿出 ANR（真机踩过）
+                streamRenderView?.get()?.submit(bmp)
             },
             onEnded = { reason ->
                 _inputMessage.value = reason

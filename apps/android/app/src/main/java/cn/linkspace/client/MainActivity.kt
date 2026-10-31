@@ -1044,6 +1044,13 @@ fun ScreenMirrorScreen(service: LinkSpaceService, info: LinkSpaceService.ScreenS
     // 投屏观看期间保持亮屏：熄屏会销毁渲染面（SurfaceView 随窗口失效）
     // 并让解码线程断流退出——看一半黑掉是最差的失败形态
     val activity = LocalContext.current as? android.app.Activity
+    // 触控映射基准 = 本机在 session.start 里声明的屏幕（同一次请求用的
+    // displayMetrics，两个值必须一致）
+    val mirrorCtx = LocalContext.current
+    val ownScreen = remember(mirrorCtx) {
+        val m = mirrorCtx.resources.displayMetrics
+        InputController.Screen(m.widthPixels.coerceAtLeast(1), m.heightPixels.coerceAtLeast(1))
+    }
     DisposableEffect(activity) {
         val window = activity?.window
         window?.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -1085,15 +1092,27 @@ fun ScreenMirrorScreen(service: LinkSpaceService, info: LinkSpaceService.ScreenS
                         var downAt = 0L
                         var moved = false
                         var dragArmed = false
-                        // 触控坐标空间必须与 session.start 声明的本机屏幕一致
-                        // （桌面 mapPoint 以它为 from）——投屏画面（虚拟屏全景，
-                        // 宽高比与平板屏不同）上的触点按比例换算进该空间
-                        val sessionScreen = inputState.remoteScreen
-                            ?: InputController.Screen(1440, 900)
+                        // 触控坐标空间 = **本机在 session.start 里声明的屏幕**
+                        // （桌面 mapPoint 以它为 from 换算到目标屏）——与触控板
+                        // 同一空间，不是对端的屏幕/解码尺寸（此前误用
+                        // remoteScreen，落点按倍数缩放全偏，用户实测）
+                        val sessionScreen = ownScreen
+                        // move 攒批（触控板同款：16 条或 30ms 合并），点按/
+                        // 拖拽/滚轮前 flush 保序
+                        val moveBatch = mutableListOf<org.json.JSONObject>()
+                        var lastFlushAt = 0L
+                        fun flushMoves() {
+                            if (moveBatch.isNotEmpty()) {
+                                sendRemote(controller, moveBatch)
+                                moveBatch.clear()
+                            }
+                            lastFlushAt = System.currentTimeMillis()
+                        }
                         while (true) {
                             val event = awaitPointerEvent()
                             val pressed = event.changes.filter { it.pressed }
                             if (pressed.size >= 2) {
+                                flushMoves()
                                 var dy = 0f
                                 pressed.forEach { dy += it.positionChange().y }
                                 scrollAccum[0] += dy / pressed.size
@@ -1111,6 +1130,7 @@ fun ScreenMirrorScreen(service: LinkSpaceService, info: LinkSpaceService.ScreenS
                             } else if (pressed.size == 1) {
                                 val c = pressed.first()
                                 if (c.changedToDown()) {
+                                    flushMoves()
                                     downAt = System.currentTimeMillis()
                                     moved = false
                                     dragArmed = false
@@ -1120,26 +1140,27 @@ fun ScreenMirrorScreen(service: LinkSpaceService, info: LinkSpaceService.ScreenS
                                     moved = moved || kotlin.math.abs(delta.x) > 2f || kotlin.math.abs(delta.y) > 2f
                                     // 静置长按后进入拖拽：一次 down(left)，此后 move 都带按键
                                     if (!dragArmed && !moved && System.currentTimeMillis() - downAt > 300) {
+                                        flushMoves()
                                         dragArmed = true
                                         sendRemote(controller, listOf(InputController.down("left")))
                                     }
                                     // 黑边 clamp：触点收敛进视频矩形后按比例换算
                                     val vx = (c.position.x - videoRect.left).coerceIn(0f, videoRect.width)
                                     val vy = (c.position.y - videoRect.top).coerceIn(0f, videoRect.height)
-                                    sendRemote(
-                                        controller,
-                                        listOf(
-                                            InputController.move(
-                                                (vx / videoRect.width * sessionScreen.w).toInt()
-                                                    .coerceIn(0, sessionScreen.w - 1),
-                                                (vy / videoRect.height * sessionScreen.h).toInt()
-                                                    .coerceIn(0, sessionScreen.h - 1)
-                                            )
+                                    moveBatch.add(
+                                        InputController.move(
+                                            (vx / videoRect.width * sessionScreen.w).toInt()
+                                                .coerceIn(0, sessionScreen.w - 1),
+                                            (vy / videoRect.height * sessionScreen.h).toInt()
+                                                .coerceIn(0, sessionScreen.h - 1)
                                         )
                                     )
+                                    val now = System.currentTimeMillis()
+                                    if (moveBatch.size >= 16 || now - lastFlushAt >= 30) flushMoves()
                                     c.consume()
                                 }
                             } else {
+                                flushMoves()
                                 val up = event.changes.firstOrNull { it.changedToUp() }
                                 if (up != null) {
                                     if (dragArmed) {

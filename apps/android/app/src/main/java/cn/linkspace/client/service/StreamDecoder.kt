@@ -42,7 +42,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 class StreamDecoder(
     private val onEnded: (reason: String) -> Unit,
-    /** 每个解码完成的帧（复用 Bitmap 实例，调用方须同步消费/绘制） */
+    /** 每个解码完成的帧（复用 Bitmap 实例，提交合流由 StreamView 负责） */
     private val onFrame: (Bitmap) -> Unit,
     /** 流内 SPS 解出后的实际画面尺寸（触控映射基准），解码线程外回调 */
     private val onSize: (Int, Int) -> Unit = { _, _ -> }
