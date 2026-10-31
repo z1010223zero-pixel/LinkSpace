@@ -58,6 +58,7 @@ object Protocol {
 
     /** 多显示器清单回告（B-2 多显示器选择）：被控端枚举结果 */
     const val TYPE_SCREEN_STREAM_DISPLAYS = "screen.stream.displays"
+    const val TYPE_SCREEN_CURSOR = "screen.cursor"
 
     /** 投屏粘贴（协议 4.8）：写被控端剪贴板并注入 Ctrl+V，寄生 input 会话 */
     const val TYPE_SCREEN_PASTE = "screen.paste"

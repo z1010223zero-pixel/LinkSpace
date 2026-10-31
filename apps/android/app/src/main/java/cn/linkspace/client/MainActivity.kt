@@ -1074,10 +1074,12 @@ fun ScreenMirrorScreen(service: LinkSpaceService, info: LinkSpaceService.ScreenS
             // 自绘 StreamView：解码器（ByteBuffer 模式）产出 Bitmap 直投，
             // 无 surface 生命周期——本 ROM surface 模式解码活锁，见
             // StreamDecoder 类注释（2026-10-31 绿块排障定论）
+            val cursorFraction by service.cursorFraction.collectAsStateWithLifecycle()
             AndroidView(
                 factory = { ctx ->
                     cn.linkspace.client.StreamView(ctx).also { service.attachStreamView(it) }
                 },
+                update = { it.setCursor(cursorFraction?.first ?: -1f, cursorFraction?.second ?: -1f) },
                 onRelease = { service.attachStreamView(null) },
                 modifier = Modifier
                     .align(Alignment.Center)

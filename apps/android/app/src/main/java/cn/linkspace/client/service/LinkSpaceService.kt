@@ -937,6 +937,16 @@ class LinkSpaceService private constructor(private val appContext: Context) {
                         _screenStream.value = null
                         _inputMessage.value = payload.optString("message", "投屏失败")
                     }
+                    Protocol.TYPE_SCREEN_CURSOR -> {
+                        // 桌面 33ms 限流广播的物理光标（region-local 坐标），
+                        // 换算成比例交给观看页画覆盖层
+                        val w = payload.optInt("w", 0).coerceAtLeast(1)
+                        val h = payload.optInt("h", 0).coerceAtLeast(1)
+                        _cursorFraction.value = Pair(
+                            (payload.optDouble("x", 0.0) / w).toFloat(),
+                            (payload.optDouble("y", 0.0) / h).toFloat()
+                        )
+                    }
                     Protocol.TYPE_SCREEN_STREAM_DISPLAYS -> {
                         val arr = payload.optJSONArray("displays")
                             ?: org.json.JSONArray()
@@ -987,6 +997,12 @@ class LinkSpaceService private constructor(private val appContext: Context) {
         val cur = outbound
         cur != null && cur.peerId == fullId && !cur.conn.socket.isClosed
     }
+
+    /** 远端光标位置（视频宽高的比例 0..1），投屏光标覆盖层用 */
+    private val _cursorFraction =
+        kotlinx.coroutines.flow.MutableStateFlow<Pair<Float, Float>?>(null)
+    val cursorFraction: kotlinx.coroutines.flow.StateFlow<Pair<Float, Float>?> =
+        _cursorFraction
 
     /** 上次投屏选中的显示器索引（自动重连时沿用） */
     private var lastStreamDisplayIndex = -1

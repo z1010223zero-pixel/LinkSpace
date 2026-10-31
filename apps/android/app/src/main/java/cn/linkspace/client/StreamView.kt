@@ -19,6 +19,9 @@ class StreamView(context: Context) : View(context) {
 
     private val paint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG)
     private val dst = Rect()
+    private val cursorPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = android.graphics.Paint.Style.FILL
+    }
 
     /** invalidate 已排队未消费（合流：解码再快主线程也只按 vsync 重绘一次，
      *  否则解码线程的逐帧 post 会洪泛主线程把输入事件饿出 ANR） */
@@ -27,6 +30,10 @@ class StreamView(context: Context) : View(context) {
 
     @Volatile
     private var bitmap: Bitmap? = null
+
+    /** 远端光标（视频宽高比例 0..1）；null = 未收到过坐标 */
+    @Volatile
+    private var cursorFraction: Pair<Float, Float>? = null
 
     /** 解码线程任意线程调用；位图实例由解码器复用，onDraw 时可能正被
      *  下一帧覆盖（视觉撕裂可容忍，绝不阻塞解码） */
@@ -38,10 +45,33 @@ class StreamView(context: Context) : View(context) {
         }
     }
 
+    /** 解码线程/控制流更新光标比例，按 vsync 合流重绘 */
+    fun setCursor(fx: Float, fy: Float) {
+        cursorFraction = fx to fy
+        if (!invalidateQueued) {
+            invalidateQueued = true
+            postInvalidateOnAnimation()
+        }
+    }
+
     override fun onDraw(canvas: Canvas) {
         invalidateQueued = false
         val bmp = bitmap ?: return
         dst.set(0, 0, width, height)
         canvas.drawBitmap(bmp, null, dst, paint)
+        // 光标覆盖层：白底黑圈圆点（采集已 draw_mouse=0，光标只能本地画）
+        cursorFraction?.let { (fx, fy) ->
+            if (fx in 0f..1f && fy in 0f..1f) {
+                val cx = fx * width
+                val cy = fy * height
+                cursorPaint.color = android.graphics.Color.WHITE
+                canvas.drawCircle(cx, cy, 14f, cursorPaint)
+                cursorPaint.color = android.graphics.Color.BLACK
+                cursorPaint.strokeWidth = 4f
+                cursorPaint.style = android.graphics.Paint.Style.STROKE
+                canvas.drawCircle(cx, cy, 14f, cursorPaint)
+                cursorPaint.style = android.graphics.Paint.Style.FILL
+            }
+        }
     }
 }
