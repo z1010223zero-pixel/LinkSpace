@@ -1046,9 +1046,10 @@ fun ScreenMirrorScreen(service: LinkSpaceService, info: LinkSpaceService.ScreenS
     val activity = LocalContext.current as? android.app.Activity
     // 触控映射基准 = 本机在 session.start 里声明的屏幕（同一次请求用的
     // displayMetrics，两个值必须一致）
-    val mirrorCtx = LocalContext.current
-    val ownScreen = remember(mirrorCtx) {
-        val m = mirrorCtx.resources.displayMetrics
+    // 触控映射基准 = 本端在 session.start 里申报的屏幕（与桌面 mapPoint
+    // 的 from 严格一致）；会话未建时退回当前 metrics
+    val ownScreen = inputState.ownScreen ?: run {
+        val m = LocalContext.current.resources.displayMetrics
         InputController.Screen(m.widthPixels.coerceAtLeast(1), m.heightPixels.coerceAtLeast(1))
     }
     DisposableEffect(activity) {

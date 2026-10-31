@@ -694,7 +694,8 @@ class LinkSpaceService private constructor(private val appContext: Context) {
     data class InputState(
         val phase: String = "idle",
         val peerId: String? = null,
-        val remoteScreen: InputController.Screen? = null
+        val remoteScreen: InputController.Screen? = null,
+        val ownScreen: InputController.Screen? = null // 本端申报的触控坐标空间
     )
 
     private val _inputState = MutableStateFlow(InputState())
@@ -741,7 +742,7 @@ class LinkSpaceService private constructor(private val appContext: Context) {
             },
             listener = object : InputController.Listener {
                 override fun onSessionActive(peerId: String, sessionId: String, remoteScreen: InputController.Screen) {
-                    _inputState.value = InputState("active", peerId, remoteScreen)
+                    _inputState.value = InputState("active", peerId, remoteScreen, input.declaredScreen)
                 }
 
                 override fun onSessionEnded(reason: String) {
@@ -1146,8 +1147,41 @@ class LinkSpaceService private constructor(private val appContext: Context) {
      * 建解码器并冲入此前缓冲的视频块。ByteBuffer 模式解码 + 回调渲染，
      * 与观看页挂载状态解耦——先到帧后挂页、先挂页后到帧都成立。
      */
+    /** 主线程响应看门狗：投屏期间 3s 无响应即全线程栈落日志（ANR 取证） */
+    @Volatile
+    private var anrWatchdog: Thread? = null
+    @Volatile
+    private var anrLogged = false
+
+    private fun startAnrWatchdog() {
+        if (anrWatchdog?.isAlive == true) return
+        anrWatchdog = Thread({
+            while (streamDecoder != null || streamRenderView?.get() != null) {
+                val done = java.util.concurrent.atomic.AtomicBoolean(false)
+                mainHandler.post { done.set(true) }
+                Thread.sleep(3000)
+                if (!done.get()) {
+                    if (!anrLogged) {
+                        anrLogged = true
+                        val sb = StringBuilder("主线程 3s 未响应（ANR 取证）\n")
+                        Thread.getAllStackTraces().forEach { (t, st) ->
+                            if (t.name == "main" || st.isNotEmpty()) {
+                                sb.append("【").append(t.name).append("】\n")
+                                st.take(25).forEach { sb.append("  at ").append(it).append("\n") }
+                            }
+                        }
+                        Log.e(TAG, sb.toString())
+                    }
+                } else {
+                    anrLogged = false
+                }
+            }
+        }, "linkspace-anr-watchdog").apply { isDaemon = true; start() }
+    }
+
     private fun startStreamDecoder() {
         if (streamDecoder != null) return
+        startAnrWatchdog()
         val decoder = StreamDecoder(
             onFrame = { bmp ->
                 // 直投视图（submit 内部按 vsync 合流重绘），不经主线程

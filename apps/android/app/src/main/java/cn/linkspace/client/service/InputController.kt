@@ -38,6 +38,11 @@ class InputController(
 
     private class Active(val peerId: String, val sessionId: String, val remoteScreen: Screen)
 
+    /** 本端在 session.start 里申报的屏幕（触控坐标空间基准），请求时记录 */
+    @Volatile
+    var declaredScreen: Screen? = null
+        private set
+
     /** 当前是否在控制中 */
     val controlling: Boolean get() = active != null
 
@@ -63,6 +68,7 @@ class InputController(
             return
         }
         val sessionId = java.util.UUID.randomUUID().toString()
+        declaredScreen = screen // 触控映射基准：本端申报的空间（桌面 mapPoint 的 from）
         pending = PendingRequest(peerId, System.currentTimeMillis() + 32_000)
         listener?.onWaiting(peerId)
         send(peerId, Protocol.TYPE_SESSION_START) {
