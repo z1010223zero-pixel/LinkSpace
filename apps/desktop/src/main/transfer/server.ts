@@ -57,6 +57,13 @@ export interface TransferServerOptions {
    * 并在日志里提示，安全上由 TLS + 信任清单兜底。
    */
   bind?: string | { addr: string; note: string }
+  /**
+   * 优先尝试的端口（上次成功端口，见 ProfileStore.lastPort）。被占用
+   * （常见：快速重启时旧进程句柄未释放）则自动退回系统分配——
+   * 端口稳定让对端的发现缓存跨重启有效，偶发的 EADDRINUSE 不该
+   * 把端口打漂到随机的五位数。
+   */
+  preferredPort?: number
 }
 
 /**
@@ -162,13 +169,23 @@ export async function startTransferServer(
   })
 
   return new Promise((resolve, reject) => {
-    server.once('error', reject)
-    // 端口 0 = 让系统分配，真实端口经 mDNS 通告（见 architecture.md 第 4 节）
-    server.listen(0, bind.addr, () => {
+    const onListening = () => {
       const addr = server.address() as AddressInfo
       log.info(`文件传输服务已监听 ${bind.addr}:${addr.port}（${bind.note}）`)
       resolve({ server, port: addr.port })
+    }
+    server.once('error', (err) => {
+      // 优先端口被占（快速重启时旧句柄未释放最常见）：退回系统分配，
+      // 业务可用性优先于端口稳定
+      if (opts.preferredPort && (err as NodeJS.ErrnoException).code === 'EADDRINUSE') {
+        log.warn(`优先端口 ${opts.preferredPort} 被占用，改由系统分配`)
+        server.listen(0, bind.addr, onListening)
+        return
+      }
+      reject(err)
     })
+    // 端口 0 = 让系统分配，真实端口经 mDNS 通告（见 architecture.md 第 4 节）
+    server.listen(opts.preferredPort ?? 0, bind.addr, onListening)
   })
 }
 

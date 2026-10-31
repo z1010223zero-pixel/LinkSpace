@@ -19,12 +19,17 @@ interface ProfileFile {
   displayName: string
   /** 剪贴板同步开关（审查 P2-1）。缺省视为关：静默双向同步需要用户明示授权 */
   clipboardEnabled?: boolean
+  /** 上次成功监听的服务端口。重启后优先复用——对端的 mDNS 缓存对
+   * 「同名服务换端口」的再通告可能迟迟不重解析（NsdManager 只对
+   * 新发现的服务触发 resolve），端口一变对端就要瘫 5 分钟 */
+  lastPort?: number
 }
 
 export class ProfileStore {
   private readonly filePath: string
   private displayName = ''
   private clipboardOn = false
+  private lastPort = 0
 
   constructor(opts: ProfileStoreOptions = {}) {
     // 默认目录只会在测试直构（不传 dir）时用到：落 tmpdir 而非 cwd，
@@ -41,6 +46,7 @@ export class ProfileStore {
       if (parsed.version !== 1 || typeof parsed.displayName !== 'string') return
       this.displayName = parsed.displayName
       if (typeof parsed.clipboardEnabled === 'boolean') this.clipboardOn = parsed.clipboardEnabled
+      if (typeof parsed.lastPort === 'number' && parsed.lastPort > 0) this.lastPort = parsed.lastPort
     } catch {
       // 配置损坏只是名字退回默认值，不能因此起不来
       this.displayName = ''
@@ -53,7 +59,8 @@ export class ProfileStore {
     const data: ProfileFile = {
       version: 1,
       displayName: this.displayName,
-      clipboardEnabled: this.clipboardOn
+      clipboardEnabled: this.clipboardOn,
+      lastPort: this.lastPort || undefined
     }
     const tmp = `${this.filePath}.tmp`
     writeFileSync(tmp, `${JSON.stringify(data, null, 2)}\n`, 'utf8')
@@ -77,6 +84,17 @@ export class ProfileStore {
 
   setClipboardEnabled(enabled: boolean): void {
     this.clipboardOn = enabled
+    this.persist()
+  }
+
+  /** 上次成功监听的端口；0 = 从未记录。仅供启动时优先尝试绑定 */
+  getLastPort(): number {
+    return this.lastPort
+  }
+
+  setLastPort(port: number): void {
+    if (port === this.lastPort) return
+    this.lastPort = port
     this.persist()
   }
 }

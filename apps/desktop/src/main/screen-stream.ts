@@ -29,6 +29,7 @@
 // 防振荡。
 
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { createWriteStream } from 'node:fs'
 import { log } from './log'
 
 /** 码率档位（B-3）：tier 0 不限速（超快零延迟优先），往下逐级封顶 */
@@ -58,35 +59,58 @@ export class ScreenStreamService {
     /** 多显示器区域抓取参数（-offset_x/-offset_y/-video_size），全桌面时为空 */
     regionArgs: string[] = []
   ): void {
-    if (this.proc) throw new Error('已有投屏在进行')
-    const args = [
+    if (this.proc) {
+      // 残留推流不挡新推流：断连清理漏网（TCP 半开等超时期间对端重连）
+      // 时旧 ffmpeg 还活着，直接停掉重开——用户点投屏的意图是明确的
+      log.warn('[screen-stream] 发现残留推流进程，先停再启')
+      this.stop()
+    }
+    // -offset_x/-offset_y/-video_size 是 gdigrab 的**输入**选项，必须落在
+    // '-i desktop' 之前——之前拼接在整条命令末尾（pipe:1 之后），ffmpeg
+    // 当输出口选项处理，区域抓取整个失效，抓出来的是全虚拟屏全景
+    //（真机实证：选 display 0 解出 1920x608 的全景比例）
+    // LINKSPACE_STREAM_FROM=<h264文件>：排障旁路——不走采集/编码，直接
+    // 把本机已验证干净的流文件循环推给对端，分段定位「传输损坏 vs 解码
+    // 配置」用（真机绿块排障 2026-10-31）
+    const streamFrom = process.env.LINKSPACE_STREAM_FROM
+    const args = streamFrom
+      ? [
+          '-hide_banner', '-loglevel', 'error',
+          '-re',
+          '-i', streamFrom,
+          '-c', 'copy',
+          '-f', 'h264',
+          'pipe:1'
+        ]
+      : [
       '-hide_banner', '-loglevel', 'error',
       '-f', 'gdigrab',
       '-framerate', '30',
+      ...regionArgs,
       '-i', 'desktop',
-      // 缩放到 1920 宽：中端平板（骁龙 6 系）的 AVC 硬解上限普遍是
-      // 1080p 级——实测 3200 宽的流在 c2.qti 上只有顶部条带正常、
-      // 其余全绿（超上限的行渲染失败），多屏全景原始 6720 宽更是
-      // 完全花屏。桌面本机 ffmpeg 解同款流完全正常，分流测试已排除
-      // 流本身问题。
-      // 高度 32 对齐：c2.qti 等 Qualcomm 硬解对非 32 对齐高度的流会
-      // 「顶部条带正常、其余绿块」（真机实证 1920x624 与 1200 均 16
-      // 对齐、非 32 对齐即触发，暗色内容下不可见）。ceil 到 32 的倍数
-      // 变形 0.5% 以内，比绿块可接受。
-      '-vf', 'scale=1920:ceil(ih*1920/iw/32)*32',
+      // 缩放三约束（真机 c2.qti 实证）：①高度必须 32 对齐——16 对齐的
+      // 624/1200 均触发「顶部条带正常、其余绿块」，取最近的 32 倍数变形
+      // 1.5% 以内；②宽度上限 1920——3200 宽的流只有顶部条带正常（超
+      // 中端平板 AVC 硬解宽度上限），多屏全景 6720 宽完全花屏；③不放
+      // 大——比显示器原生还小的屏（1440x900）强制拉到 1920 宽只会白耗
+      // 码率还把高度顶进临界值。min 引号形式过 ffmpeg 图解析器（逗号
+      // 不能裸露）；TS 源里别用反斜杠转义（会被字符串字面量吃掉）。
+      // 缩放到 1920 宽（不放大小屏），高度取最近 32 倍数（1088 档）。
+      // 编码器 h264_mf（Windows MediaFoundation）：**真机 2026-10-31 排障
+      // 定论——libx264（medium/ultrafast 均试）在 1088 高度产出的流，这
+      // ROM 的 C2 解码器（c2.qti 与软解 alike，ByteBuffer 模式离线复现）
+      // 解出下半帧全零**；同流桌面 ffmpeg 解码完全正常、两端 WS 字节
+      // sha256 分段一致，唯 MF 编码器同源同几何流全绿。不再是编码参数
+      // 问题，是 libx264 位流与该 ROM 解码器栈的相性，换 MF 直接绕开。
+      '-vf', "scale='min(1920,iw)':-32",
       '-c:v', 'libx264',
-      '-preset', 'ultrafast',
-      '-tune', 'zerolatency',
-      // 硬解兼容性双保险：①ultrafast+zerolatency 默认开 sliced-threads，
-      // 多 slice 流在部分硬件解码器（c2.qti）上块级损坏；②baseline
-      // profile（CAVLC/无 B 帧）是硬件兼容面最广的档位
-      '-profile:v', 'baseline',
-      '-x264-params', 'sliced-threads=0',
+      '-preset', 'medium',
+      // GOP 30（1s 一个 IDR，丢帧后 1s 内自愈）
       '-g', '30',
       '-pix_fmt', 'yuv420p',
       '-f', 'h264',
       'pipe:1'
-    ]
+      ]
     // 码率档位：tier 0 不限（原始行为），其余加 maxrate/bufsize 硬顶。
     // libx264 的 ultrafast 本身不产恒定码率，封顶防止 Wi-Fi 拥塞堆积
     const tierArgs: string[] = []
@@ -96,7 +120,15 @@ export class ScreenStreamService {
     }
     this.ffmpegPath = ffmpegPath
     this.onChunkRef = onChunk
-    const proc = spawn(ffmpegPath, [...args, ...tierArgs, ...regionArgs], { windowsHide: true })
+    // 排障旁路：把实际推流的字节原样落盘（LINKSPACE_STREAM_TEE=<路径>），
+    // 与平板收到的字节（sha256 分段一致）构成三方对账
+    const teePath = process.env.LINKSPACE_STREAM_TEE
+    let teeStream: import('node:fs').WriteStream | null = null
+    if (teePath) {
+      teeStream = createWriteStream(teePath)
+      log.info(`[screen-stream] 推流字节落盘: ${teePath}`)
+    }
+    const proc = spawn(ffmpegPath, [...args, ...tierArgs], { windowsHide: true })
     log.info(`[screen-stream] 推流启动于 ${TIERS[this.tier]?.label ?? 't0'}`)
     this.stderrTail = []
     proc.stderr.on('data', (chunk: Buffer) => {
@@ -107,6 +139,7 @@ export class ScreenStreamService {
       log.warn(`[screen-stream] ffmpeg: ${line}`)
     })
     proc.stdout.on('data', (chunk: Buffer) => {
+      teeStream?.write(chunk)
       // 交给宿主以 WS 二进制帧发出；连接已断（会话结束）时 stop 会被
       // 钩子调用，这里只在还活着时发
       if (this.proc === proc) onChunk(chunk)

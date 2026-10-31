@@ -7,7 +7,7 @@
 // 信任边界只有一道：传输服务的 isKnownDevice 直接读 TrustStore。
 // 没有「顺便信任」或「开发期放行」的后门。
 
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import type { Server } from 'node:https'
 import { app, clipboard } from 'electron'
 import { getDeviceCert, setIdentityDir, deviceIdOfCert, type DeviceCert } from './transfer/identity'
@@ -274,8 +274,12 @@ export class Host {
           this.transfers.verifyToken(transferKey, token)
       },
       cert,
-      this.opts.bind ? { bind: this.opts.bind } : {}
+      {
+        ...(this.opts.bind ? { bind: this.opts.bind } : {}),
+        preferredPort: this.profile.getLastPort() || undefined
+      }
     )
+    this.profile.setLastPort(this.fileServer.port)
     return this.fileServer.port
   }
 
@@ -331,6 +335,11 @@ export class Host {
     if (!survivor) {
       this.inputCoordinator?.onPeerDisconnected(pid)
       this.inputController?.onPeerDisconnected(pid)
+      // 投流跟着连接走：会话失效钩子（onChanged）正常会停流，但断连
+      // 清理链路多级间接，实测有漏网（ffmpeg 在对端重装后仍推流 20s+，
+      // 挡死下一次 start）——这里直接兜底，stop 幂等
+      this.screenStream.stop()
+      this.streamRegion = null
       for (const task of this.transfers.list()) {
         if (task.peerId !== pid) continue
         if (task.direction !== 'send' || task.state !== 'offered') continue
@@ -854,10 +863,27 @@ export class Host {
           if (r) return { w: r.w, h: r.h }
           return this.opts.inputLocalScreen?.() ?? this.defaultLocalScreen()
         },
-        inject: (events, session) =>
-          this.opts.inputInject
-            ? this.opts.inputInject(events, session)
-            : log.warn(`收到 ${events.length} 条输入事件，但未接入注入层，已丢弃`),
+        inject: (events, session) => {
+          // 选定显示器投屏时：mapPoint 已映射进该屏的本地坐标（物理
+          // 像素），注入前平移回虚拟屏相对坐标——下层的 inputInject
+          // 包装（index.ts）统一补回虚拟屏负 origin，这里不能再补一次
+          //（此前双重加 origin 且 r 是 DIP 坐标，选屏投屏时指针严重错位）
+          const r = this.streamRegion
+          const vs = this.opts.inputVirtualScreen?.()
+          const translated = r
+            ? events.map((ev) => {
+                if (ev.t !== 'move') return ev
+                const bx = r.x - (vs?.x ?? 0)
+                const by = r.y - (vs?.y ?? 0)
+                return {
+                  ...ev,
+                  x: Math.min(bx + r.w - 1, Math.max(bx, ev.x + bx)),
+                  y: Math.min(by + r.h - 1, Math.max(by, ev.y + by))
+                }
+              })
+            : events
+          this.opts.inputInject?.(translated, session)
+        },
         releaseAll: () => this.opts.inputReleaseAll?.(),
         send: sendTo,
         log: (msg) => log.info(msg),
@@ -866,24 +892,6 @@ export class Host {
           // 会话授权的一部分，没有会话就没有画面
           if (!this.inputCoordinator?.activeSession) this.screenStream.stop()
           this.emit('inputChanged')
-        },
-        inject: (events, session) => {
-          // 选定显示器投屏时：mapPoint 已映射进该屏的本地坐标，
-          // 注入前平移回虚拟屏绝对坐标（SendInput 的绝对坐标
-          // 覆盖整个虚拟屏）
-          const r = this.streamRegion
-          const translated = r
-            ? events.map((ev) =>
-                ev.t === 'move'
-                  ? {
-                      ...ev,
-                      x: Math.min(r.x + r.w - 1, Math.max(r.x, ev.x + r.x)),
-                      y: Math.min(r.y + r.h - 1, Math.max(r.y, ev.y + r.y))
-                    }
-                  : ev
-              )
-            : events
-          this.opts.inputInject?.(translated, session)
         },
         onRequest: (req) => {
           // 走查自动批准：LINKSPACE_AUTO_APPROVE=1 时跳过人工确认（仅
@@ -947,9 +955,11 @@ export class Host {
     // 链路可用（实测），TCP 全双工允许桌面在这个方向发数据
     control.on('screen.stream.request', (conn, msg) => {
       const peerId = conn.peerId
+      log.info(`[screen-stream] 收到投屏请求 display=${(msg.payload as { display?: unknown })?.display ?? '(无)'} from=${peerId ?? '(未登记)'}`)
       if (!peerId) return
       const active = this.inputCoordinator?.activeSession
       if (!active || active.peerId !== peerId) {
+        log.warn(`[screen-stream] 拒绝：无活动键鼠会话（active=${active ? active.peerId : 'null'}）`)
         sendTo(peerId, 'screen.stream.error', { message: '投屏需要先建立键鼠会话' })
         return
       }
@@ -958,34 +968,92 @@ export class Host {
         return
       }
       // 多显示器选择（ToDesk 体验，用户 2026-10-31 提出）：不带 display
-      // 的请求先回显示器清单，带 display 的按其虚拟屏坐标区域抓取
-      const requested = (msg.payload as { display?: unknown } | null)?.display
+      // 的请求先回显示器清单，带 display 的按其虚拟屏坐标区域抓取。
+      // 单显示器免选择器，直接投 0 号屏；自动重连带 lastStreamDisplayIndex
+      // 时同样直连，不会再弹清单。
+      let requested = (msg.payload as { display?: unknown } | null)?.display
       const displays = this.opts.inputDisplays?.() ?? []
       if (typeof requested !== 'number') {
         if (displays.length === 0) {
           sendTo(peerId, 'screen.stream.error', { message: '无法枚举显示器' })
           return
         }
-        sendTo(peerId, 'screen.stream.displays', { displays })
-        return
+        if (displays.length > 1) {
+          sendTo(peerId, 'screen.stream.displays', { displays })
+          return
+        }
+        requested = 0
       }
-      const region = displays[Number(requested)] ?? null
+      const vs = this.opts.inputVirtualScreen?.()
+      let region = displays[Number(requested)] ?? null
+      // 与虚拟屏物理边界求交：Electron DIP 边界乘 scaleFactor 换算物理
+      // 坐标有 ±1px 舍入漂移，越界 1px gdigrab 直接拒开（实测
+      // Capture area extends outside window area）
+      if (region && vs) {
+        const x0 = Math.max(region.x, vs.x)
+        const y0 = Math.max(region.y, vs.y)
+        const x1 = Math.min(region.x + region.w, vs.x + vs.w)
+        const y1 = Math.min(region.y + region.h, vs.y + vs.h)
+        region = x1 > x0 && y1 > y0 ? { x: x0, y: y0, w: x1 - x0, h: y1 - y0 } : null
+      }
       this.streamRegion = region
+      // gdigrab 的 -offset_x/-offset_y 用的是**物理虚拟屏绝对坐标**（其
+      // 报错原文实证：Capture area ... extends outside window area
+      // (-3840,-188),(2880,1972)——正是物理虚拟屏边界），inputDisplays
+      // 返回的物理矩形可直接用；这俩是 gdigrab 的输入选项，必须落在
+      // '-i desktop' 之前（此前拼在命令尾，抓区域从未生效过）
       const regionArgs = region
-        ? ['-offset_x', String(region.x), '-offset_y', String(region.y), '-video_size', `${region.w}x${region.h}`]
+        ? [
+            '-offset_x',
+            String(region.x),
+            '-offset_y',
+            String(region.y),
+            '-video_size',
+            `${region.w}x${region.h}`
+          ]
         : []
       try {
-        this.screenStream.start(this.opts.screenFfmpegPath, (chunk) => conn.sendBinary(chunk), regionArgs)
+        let streamBytesSent = 0
+        let sentHash = createHash('sha256')
+        let sentCarry = Buffer.alloc(0)
+        this.screenStream.start(
+          this.opts.screenFfmpegPath,
+          (chunk) => {
+            streamBytesSent += chunk.length
+            // 端到端取证：按精确 1MB 分段哈希（两侧对齐），定位字节损坏段
+            // （真机绿块排障 2026-10-31：软解也花 → 先证明字节本身是否一致）
+            let buf = Buffer.concat([sentCarry, chunk])
+            while (buf.length >= 1_048_576) {
+              sentHash.update(buf.subarray(0, 1_048_576))
+              log.info(`[screen-stream] 发送MB#${Math.floor(streamBytesSent / 1e6)} sha=${sentHash.digest('hex').slice(0, 16)}`)
+              sentHash = createHash('sha256')
+              buf = buf.subarray(1_048_576)
+            }
+            sentCarry = buf
+            conn.sendBinary(chunk)
+          },
+          regionArgs
+        )
         // 码率自适应（B-3）：周期采样发送积压，持续拥塞降档、长稳升档。
         // 换档在 screen-stream 内部同步重启 ffmpeg（stop+start 同 tick，
         // 本探针不会插进间隙）；推流停止（会话结束/对端断开/手动）后
         // running=false，探针自停车并复位档位
+        let lastProbeBytes = 0
+        let probeTick = 0
         const backlogProbe = setInterval(() => {
           if (!this.screenStream.running) {
             clearInterval(backlogProbe)
             this.screenStreamCurrentTier = 0
             this.streamCongestionScore = 0
             return
+          }
+          // 发送速率遥测（每 8 个采样 ≈16s 一条）：ffmpeg 出了字节没有、
+          // ws 堵没堵，一眼可辨（真机排障：解码端收不到帧时先分段定位）
+          if (++probeTick % 8 === 0 && streamBytesSent !== lastProbeBytes) {
+            log.info(
+              `[screen-stream] 累计 ${(streamBytesSent / 1e6).toFixed(1)}MB，backlog ${conn.backlog()}B`
+            )
+            lastProbeBytes = streamBytesSent
           }
           const backlog = conn.backlog()
           if (backlog > 1_000_000) {
@@ -1049,7 +1117,7 @@ export class Host {
       clipboard.writeText(text)
       log.info(`[screen.paste] 已写入剪贴板（${text.length} 字符）并注入 Ctrl+V`)
       // Ctrl+V 走与对端事件完全相同的注入路径（已过会话校验与解码）
-      this.inputCoordinator.onEvent(peerId, {
+      this.inputCoordinator?.onEvent(peerId, {
         sessionId: active.sessionId,
         events: [
           { t: 'key', vk: 0x11, down: true },

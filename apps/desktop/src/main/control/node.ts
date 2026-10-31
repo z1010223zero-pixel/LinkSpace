@@ -242,7 +242,10 @@ export class ControlNode {
       tlsFingerprint: tlsFingerprintOf(ws),
       lastSeen: Date.now(),
       send<T>(type: string, payload: T) {
-        if (ws.readyState !== WebSocket.OPEN) return
+        if (ws.readyState !== WebSocket.OPEN) {
+          log.warn(`连接 ${conn.peerId || '(未知)'} 已非 OPEN（${ws.readyState}），丢弃 ${type}`)
+          return
+        }
         const msg: Envelope<T> = {
           v: PROTOCOL_VERSION,
           type,
@@ -254,7 +257,7 @@ export class ControlNode {
           ts: Date.now(),
           payload
         }
-        ws.send(JSON.stringify(msg))
+        ws.send(JSON.stringify(msg), (err) => noteSendError(type, err))
       },
       /**
        * 二进制帧发送（屏幕投屏的视频块）。与 JSON 控制消息共用同一条
@@ -264,7 +267,7 @@ export class ControlNode {
        */
       sendBinary(data: Buffer) {
         if (ws.readyState !== WebSocket.OPEN) return
-        ws.send(data, { binary: true })
+        ws.send(data, { binary: true }, (err) => noteSendError('binary', err))
       },
       backlog() {
         return ws.readyState === WebSocket.OPEN ? ws.bufferedAmount : 0
@@ -278,6 +281,17 @@ export class ControlNode {
       }
     }
     const node = this
+    // 发送失败诊断：ws.send 的错误只在回调里报，静默吞掉会让「对端
+    // 收不到回告」变成无头案（真机踩过：投屏 start 丢件两侧全无日志）
+    let sendFailures = 0
+
+    const noteSendError = (where: string, err: Error | null | undefined) => {
+      if (!err) return
+      sendFailures++
+      if (sendFailures <= 3 || sendFailures % 100 === 0) {
+        log.warn(`连接 ${conn.peerId || '(未知)'} ${where} 发送失败(#${sendFailures}): ${err.message}`)
+      }
+    }
 
     ws.on('message', (raw) => {
       conn.lastSeen = Date.now()

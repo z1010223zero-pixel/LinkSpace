@@ -79,19 +79,30 @@ const host = new Host({
   // scrcpy 投屏走 adb 不走局域网控制通道，但保持声明一致
   caps: ['file', 'clipboard', 'scrcpy', 'input'],
   inputLocalScreen,
-  // 多显示器枚举（B-2 选择器）：Electron 显示器边界即虚拟屏坐标系
+  // 多显示器枚举（B-2 选择器）：gdigrab 抓取与 SendInput 归一化都以
+  // **物理**像素为基准（GetSystemMetrics 系，实测虚拟屏 6720x2160），
+  // 而 Electron bounds 是 DIP 逻辑分辨率（200%/175% 缩放下各差 2/1.75
+  // 倍）——必须乘回 scaleFactor，否则选屏抓区域偏、触控映射错位
   inputDisplays: win32
     ? () => {
         const { screen } = require('electron') as {
-          screen?: { getAllDisplays: () => Array<{ bounds: { x: number; y: number; width: number; height: number } }> }
+          screen?: {
+            getAllDisplays: () => Array<{
+              bounds: { x: number; y: number; width: number; height: number }
+              scaleFactor: number
+            }>
+          }
         }
         return (
-          screen?.getAllDisplays().map((d) => ({
-            x: d.bounds.x,
-            y: d.bounds.y,
-            w: d.bounds.width,
-            h: d.bounds.height
-          })) ?? []
+          screen
+            ?.getAllDisplays()
+            .map((d) => ({
+              x: Math.round(d.bounds.x * d.scaleFactor),
+              y: Math.round(d.bounds.y * d.scaleFactor),
+              w: Math.round(d.bounds.width * d.scaleFactor),
+              h: Math.round(d.bounds.height * d.scaleFactor)
+            }))
+            .sort((a, b) => a.x - b.x || a.y - b.y) ?? []
         )
       }
     : undefined,
