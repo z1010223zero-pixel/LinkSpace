@@ -52,7 +52,12 @@ export class ScreenStreamService {
    * 启动推流：抓全桌面编码，stdout 的字节块经 onChunk 交给宿主以
    * WebSocket 二进制帧发出。ffmpeg 在 stdin 保持打开期间持续产出。
    */
-  start(ffmpegPath: string, onChunk: (data: Buffer) => void): void {
+  start(
+    ffmpegPath: string,
+    onChunk: (data: Buffer) => void,
+    /** 多显示器区域抓取参数（-offset_x/-offset_y/-video_size），全桌面时为空 */
+    regionArgs: string[] = []
+  ): void {
     if (this.proc) throw new Error('已有投屏在进行')
     const args = [
       '-hide_banner', '-loglevel', 'error',
@@ -64,7 +69,11 @@ export class ScreenStreamService {
       // 其余全绿（超上限的行渲染失败），多屏全景原始 6720 宽更是
       // 完全花屏。桌面本机 ffmpeg 解同款流完全正常，分流测试已排除
       // 流本身问题。
-      '-vf', 'scale=1920:-2',
+      // 高度 32 对齐：c2.qti 等 Qualcomm 硬解对非 32 对齐高度的流会
+      // 「顶部条带正常、其余绿块」（真机实证 1920x624 与 1200 均 16
+      // 对齐、非 32 对齐即触发，暗色内容下不可见）。ceil 到 32 的倍数
+      // 变形 0.5% 以内，比绿块可接受。
+      '-vf', 'scale=1920:ceil(ih*1920/iw/32)*32',
       '-c:v', 'libx264',
       '-preset', 'ultrafast',
       '-tune', 'zerolatency',
@@ -87,7 +96,7 @@ export class ScreenStreamService {
     }
     this.ffmpegPath = ffmpegPath
     this.onChunkRef = onChunk
-    const proc = spawn(ffmpegPath, [...args, ...tierArgs], { windowsHide: true })
+    const proc = spawn(ffmpegPath, [...args, ...tierArgs, ...regionArgs], { windowsHide: true })
     log.info(`[screen-stream] 推流启动于 ${TIERS[this.tier]?.label ?? 't0'}`)
     this.stderrTail = []
     proc.stderr.on('data', (chunk: Buffer) => {

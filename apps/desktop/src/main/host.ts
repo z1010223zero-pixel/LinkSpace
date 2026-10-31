@@ -54,6 +54,8 @@ export interface HostOptions {
   bind?: string
   /** 本机屏幕尺寸（键鼠共享坐标映射用）。留空走 Electron screen，测试注入假值 */
   inputLocalScreen?: () => ScreenSize
+  /** 显示器枚举（B-2 多显示器选择）：返回每块屏的虚拟屏坐标与尺寸 */
+  inputDisplays?: () => Array<{ x: number; y: number; w: number; h: number }>
   /**
    * 输入事件注入出口。正常路径由 index.ts 接 Win32 注入层；
    * 无头测试注入捕获数组。缺省为丢弃并告警——没有注入层的
@@ -139,6 +141,8 @@ export class Host {
    *  负数=连续空闲采样（恢复升档）；探测清零换挡 */
   private streamCongestionScore = 0
   private screenStreamCurrentTier = 0
+  /** 本次投屏选中的显示器区域（虚拟屏坐标）；null = 未选/全桌面 */
+  private streamRegion: { x: number; y: number; w: number; h: number } | null = null
   private readonly inputLayout: InputLayoutStore
   private listeners: { [K in keyof HostEvents]?: Listener<K>[] } = {}
   /** 已连接的对端：deviceId → Connection */
@@ -844,7 +848,12 @@ export class Host {
     this.inputCoordinator = new InputSessionCoordinator({
       callbacks: {
         isPeerAuthorized: (peerId) => this.trust.isKnown(peerId),
-        localScreen: () => this.opts.inputLocalScreen?.() ?? this.defaultLocalScreen(),
+        localScreen: () => {
+          // 选定显示器投屏时，触控映射的目标就是那块屏（而不是全虚拟屏）
+          const r = this.streamRegion
+          if (r) return { w: r.w, h: r.h }
+          return this.opts.inputLocalScreen?.() ?? this.defaultLocalScreen()
+        },
         inject: (events, session) =>
           this.opts.inputInject
             ? this.opts.inputInject(events, session)
@@ -857,6 +866,24 @@ export class Host {
           // 会话授权的一部分，没有会话就没有画面
           if (!this.inputCoordinator?.activeSession) this.screenStream.stop()
           this.emit('inputChanged')
+        },
+        inject: (events, session) => {
+          // 选定显示器投屏时：mapPoint 已映射进该屏的本地坐标，
+          // 注入前平移回虚拟屏绝对坐标（SendInput 的绝对坐标
+          // 覆盖整个虚拟屏）
+          const r = this.streamRegion
+          const translated = r
+            ? events.map((ev) =>
+                ev.t === 'move'
+                  ? {
+                      ...ev,
+                      x: Math.min(r.x + r.w - 1, Math.max(r.x, ev.x + r.x)),
+                      y: Math.min(r.y + r.h - 1, Math.max(r.y, ev.y + r.y))
+                    }
+                  : ev
+              )
+            : events
+          this.opts.inputInject?.(translated, session)
         },
         onRequest: (req) => {
           // 走查自动批准：LINKSPACE_AUTO_APPROVE=1 时跳过人工确认（仅
@@ -918,7 +945,7 @@ export class Host {
     // 视频块走 WS 二进制帧复用平板连出的控制连接：平板的 ServerSocket
     // 对任何入站端口都不通（ICMP 通、TCP 全拒），唯有平板自己连出的
     // 链路可用（实测），TCP 全双工允许桌面在这个方向发数据
-    control.on('screen.stream.request', (conn, _msg) => {
+    control.on('screen.stream.request', (conn, msg) => {
       const peerId = conn.peerId
       if (!peerId) return
       const active = this.inputCoordinator?.activeSession
@@ -930,8 +957,25 @@ export class Host {
         sendTo(peerId, 'screen.stream.error', { message: '本机缺少 ffmpeg，无法投屏' })
         return
       }
+      // 多显示器选择（ToDesk 体验，用户 2026-10-31 提出）：不带 display
+      // 的请求先回显示器清单，带 display 的按其虚拟屏坐标区域抓取
+      const requested = (msg.payload as { display?: unknown } | null)?.display
+      const displays = this.opts.inputDisplays?.() ?? []
+      if (typeof requested !== 'number') {
+        if (displays.length === 0) {
+          sendTo(peerId, 'screen.stream.error', { message: '无法枚举显示器' })
+          return
+        }
+        sendTo(peerId, 'screen.stream.displays', { displays })
+        return
+      }
+      const region = displays[Number(requested)] ?? null
+      this.streamRegion = region
+      const regionArgs = region
+        ? ['-offset_x', String(region.x), '-offset_y', String(region.y), '-video_size', `${region.w}x${region.h}`]
+        : []
       try {
-        this.screenStream.start(this.opts.screenFfmpegPath, (chunk) => conn.sendBinary(chunk))
+        this.screenStream.start(this.opts.screenFfmpegPath, (chunk) => conn.sendBinary(chunk), regionArgs)
         // 码率自适应（B-3）：周期采样发送积压，持续拥塞降档、长稳升档。
         // 换档在 screen-stream 内部同步重启 ffmpeg（stop+start 同 tick，
         // 本探针不会插进间隙）；推流停止（会话结束/对端断开/手动）后
@@ -963,10 +1007,10 @@ export class Host {
           }
         }, 2000)
         sendTo(peerId, 'screen.stream.start', {
-          w: this.opts.inputVirtualScreen?.().w ?? 1920,
-          h: this.opts.inputVirtualScreen?.().h ?? 1080
+          w: region?.w ?? this.opts.inputVirtualScreen?.().w ?? 1920,
+          h: region?.h ?? this.opts.inputVirtualScreen?.().h ?? 1080
         })
-        log.info(`[screen-stream] 已为 ${peerId} 开启投屏`)
+        log.info(`[screen-stream] 已为 ${peerId} 开启投屏${region ? `（显示器 ${region.w}x${region.h} @ ${region.x},${region.y}）` : '（全桌面）'}`)
       } catch (err) {
         const tail = this.screenStream.lastErrors().join(' | ')
         log.warn(`[screen-stream] 启动失败: ${String(err)} ${tail}`)

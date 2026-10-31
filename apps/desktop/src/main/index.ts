@@ -79,6 +79,22 @@ const host = new Host({
   // scrcpy 投屏走 adb 不走局域网控制通道，但保持声明一致
   caps: ['file', 'clipboard', 'scrcpy', 'input'],
   inputLocalScreen,
+  // 多显示器枚举（B-2 选择器）：Electron 显示器边界即虚拟屏坐标系
+  inputDisplays: win32
+    ? () => {
+        const { screen } = require('electron') as {
+          screen?: { getAllDisplays: () => Array<{ bounds: { x: number; y: number; width: number; height: number } }> }
+        }
+        return (
+          screen?.getAllDisplays().map((d) => ({
+            x: d.bounds.x,
+            y: d.bounds.y,
+            w: d.bounds.width,
+            h: d.bounds.height
+          })) ?? []
+        )
+      }
+    : undefined,
   screenFfmpegPath: locateFfmpeg(),
   inputVirtualScreen: win32 ? () => win32.virtualScreen() : undefined,
   inputInject: inputSink
