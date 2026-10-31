@@ -85,6 +85,10 @@ export class ScreenStreamService {
       : [
       '-hide_banner', '-loglevel', 'error',
       '-f', 'gdigrab',
+      // draw_mouse=0：采集不含真实光标——注入移动与采集互相打架会让
+      // 镜像里光标持续闪烁（用户实测）；触端按绝对坐标直接映射，
+      // 不依赖画面里的光标
+      '-draw_mouse', '0',
       '-framerate', '30',
       ...regionArgs,
       '-i', 'desktop',
@@ -105,6 +109,9 @@ export class ScreenStreamService {
       '-vf', "scale='min(1920,iw)':-32",
       '-c:v', 'libx264',
       '-preset', 'medium',
+      // 关 lookahead：medium 默认攒 40 帧（约 1.3s）才出首帧，是投屏
+      // 启动 3-5s 延迟的大头；sync-lookahead 同理
+      '-x264-params', 'rc-lookahead=0:sync-lookahead=0',
       // GOP 30（1s 一个 IDR，丢帧后 1s 内自愈）
       '-g', '30',
       '-pix_fmt', 'yuv420p',
