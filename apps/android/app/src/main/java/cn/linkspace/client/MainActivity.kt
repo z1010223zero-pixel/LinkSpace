@@ -10,6 +10,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -1033,6 +1034,9 @@ fun ScreenMirrorScreen(service: LinkSpaceService, info: LinkSpaceService.ScreenS
     val scrollAccum = remember { floatArrayOf(0f) }
     // 会话声明的本机屏幕（触控坐标空间基准，来自 session.accept）
     val inputState by service.inputState.collectAsStateWithLifecycle()
+    // 触控模式：false=点哪指哪（绝对映射）；true=滑动跟随（触控板语义，
+    // 用户 2026-10-31 提出可切换）
+    var relativeMode by remember { mutableStateOf(false) }
     val density = LocalDensity.current
 
     // letterbox：容器尺寸 + 视频显示矩形（等比缩放置中，黑边留白）
@@ -1109,6 +1113,10 @@ fun ScreenMirrorScreen(service: LinkSpaceService, info: LinkSpaceService.ScreenS
                             }
                             lastFlushAt = System.currentTimeMillis()
                         }
+                        // 相对模式的虚拟光标（触摸即触控板：滑动=相对移动，
+                        // 抬起再触从当前位置继续，绝不跳位）
+                        var relX = sessionScreen.w / 2f
+                        var relY = sessionScreen.h / 2f
                         while (true) {
                             val event = awaitPointerEvent()
                             val pressed = event.changes.filter { it.pressed }
@@ -1145,17 +1153,27 @@ fun ScreenMirrorScreen(service: LinkSpaceService, info: LinkSpaceService.ScreenS
                                         dragArmed = true
                                         sendRemote(controller, listOf(InputController.down("left")))
                                     }
-                                    // 黑边 clamp：触点收敛进视频矩形后按比例换算
-                                    val vx = (c.position.x - videoRect.left).coerceIn(0f, videoRect.width)
-                                    val vy = (c.position.y - videoRect.top).coerceIn(0f, videoRect.height)
-                                    moveBatch.add(
-                                        InputController.move(
-                                            (vx / videoRect.width * sessionScreen.w).toInt()
-                                                .coerceIn(0, sessionScreen.w - 1),
-                                            (vy / videoRect.height * sessionScreen.h).toInt()
-                                                .coerceIn(0, sessionScreen.h - 1)
+                                    if (relativeMode) {
+                                        // 相对模式：位移×灵敏度累积进虚拟光标，
+                                        // 不跳位（ToDesk 触摸同款）
+                                        relX = (relX + delta.x * 2.5f)
+                                            .coerceIn(0f, (sessionScreen.w - 1).toFloat())
+                                        relY = (relY + delta.y * 2.5f)
+                                            .coerceIn(0f, (sessionScreen.h - 1).toFloat())
+                                        moveBatch.add(InputController.move(relX.toInt(), relY.toInt()))
+                                    } else {
+                                        // 绝对模式：黑边 clamp 后触点按比例进会话空间
+                                        val vx = (c.position.x - videoRect.left).coerceIn(0f, videoRect.width)
+                                        val vy = (c.position.y - videoRect.top).coerceIn(0f, videoRect.height)
+                                        moveBatch.add(
+                                            InputController.move(
+                                                (vx / videoRect.width * sessionScreen.w).toInt()
+                                                    .coerceIn(0, sessionScreen.w - 1),
+                                                (vy / videoRect.height * sessionScreen.h).toInt()
+                                                    .coerceIn(0, sessionScreen.h - 1)
+                                            )
                                         )
-                                    )
+                                    }
                                     val now = System.currentTimeMillis()
                                     if (moveBatch.size >= 16 || now - lastFlushAt >= 30) flushMoves()
                                     c.consume()
@@ -1167,6 +1185,8 @@ fun ScreenMirrorScreen(service: LinkSpaceService, info: LinkSpaceService.ScreenS
                                     if (dragArmed) {
                                         sendRemote(controller, listOf(InputController.up("left")))
                                     } else if (System.currentTimeMillis() - downAt < 250 && !moved) {
+                                        // 轻点=左键单击：绝对模式光标已被前面的
+                                        // move 带到触点；相对模式光标在原位（无跳位）
                                         sendRemote(
                                             controller,
                                             listOf(InputController.down("left"), InputController.up("left"))
@@ -1179,7 +1199,7 @@ fun ScreenMirrorScreen(service: LinkSpaceService, info: LinkSpaceService.ScreenS
                     }
                 }
         )
-        // 顶栏：状态 + 退出
+        // 顶栏：状态 + 触控模式切换 + 退出
         Row(
             Modifier
                 .fillMaxWidth()
@@ -1189,6 +1209,17 @@ fun ScreenMirrorScreen(service: LinkSpaceService, info: LinkSpaceService.ScreenS
         ) {
             Text("投屏中 · ${info.w}x${info.h}", color = Color.White, fontSize = 13.sp)
             Spacer(Modifier.weight(1f))
+            // 触控模式（用户 2026-10-31 提出可切换）：点哪指哪=绝对映射；
+            // 滑动跟随=触控板语义，抬起再触从当前光标继续
+            Text(
+                if (relativeMode) "模式：滑动跟随" else "模式：点哪指哪",
+                color = Color.White.copy(alpha = 0.85f),
+                fontSize = 12.sp,
+                modifier = Modifier
+                    .padding(end = 10.dp)
+                    .clickable { relativeMode = !relativeMode }
+                    .padding(4.dp)
+            )
             Button(onClick = { service.stopScreenStream() }) { Text("退出投屏") }
         }
     }
