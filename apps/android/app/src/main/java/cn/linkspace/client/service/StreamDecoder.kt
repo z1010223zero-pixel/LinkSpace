@@ -5,37 +5,37 @@ import android.util.Log
 import org.bytedeco.ffmpeg.avcodec.AVCodecContext
 import org.bytedeco.ffmpeg.avformat.AVFormatContext
 import org.bytedeco.ffmpeg.avformat.Read_packet_Pointer_BytePointer_int
-import org.bytedeco.ffmpeg.avformat.Write_packet_Pointer_BytePointer_int
 import org.bytedeco.ffmpeg.avformat.Seek_Pointer_long_int
 import org.bytedeco.ffmpeg.avutil.AVDictionary
 import org.bytedeco.ffmpeg.avutil.AVFrame
 import org.bytedeco.ffmpeg.global.avcodec
 import org.bytedeco.ffmpeg.global.avformat
 import org.bytedeco.ffmpeg.global.avutil
-import org.bytedeco.ffmpeg.global.swscale
 import org.bytedeco.javacpp.BytePointer
-import org.bytedeco.javacpp.IntPointer
 import org.bytedeco.javacpp.Pointer
-import org.bytedeco.javacpp.PointerPointer
 import java.io.InputStream
-import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * 裸 H.264 Annex-B 字节流 → **FFmpeg 软解（libavcodec 直调）** → RGBA
  * Bitmap → [onFrame] 回调（渲染由 StreamView 接管）。
  *
- * 为什么是 FFmpeg 软解 + 直调 API（RustDesk 同款路线，2026-11-01 定论）：
- * ①本 ROM 的 MediaCodec——c2.qti/c2.android、Surface/ByteBuffer——对
- * 「实时涓流喂入」的活流全线不可靠（下半帧全零或零输出活锁），离线
- * 文件流同参数却全绿；②JavaCV 的 FFmpegFrameGrabber.start() 内部走
- * avformat_find_stream_info，裸 h264 无时间戳时探测永不收敛（真机
- * 实测静默吞 10MB+ 不返回），probesize/analyzeduration 压不死。
- * 因此直调 libavformat/libavcodec：**跳过 find_stream_info**，参数由
- * 首帧 SPS 经 avcodec_parameters_to_context 自取，行为完全受控。
+ * 为什么是 FFmpeg 软解（RustDesk 同款路线，2026-11-01 定论）：本 ROM 的
+ * MediaCodec——不论 c2.qti 硬解还是 c2.android 软解、Surface 还是
+ * ByteBuffer 模式——对「实时涓流喂入」的活流全线不可靠（下半帧全零
+ * 或零输出活锁），离线文件流同参数却全绿。libavcodec 是 RustDesk/
+ * ijkplayer 验证过千机百 ROM 的兜底，JavaCV（bytedeco 预编译）免
+ * NDK 构建。
  *
- * 喂数模型：WS 读循环经 [feed] 把原始字节写入 [LiveByteStream]，解码
- * 线程 av_read_frame 阻塞拉取，FFmpeg 自行找 start code/分帧。
+ * 直调而非 JavaCV 的 FrameGrabber：avformat_find_stream_info 对裸
+ * h264（无时间戳）永不收敛，真机实测静默吞 10MB+ 不返回；这里跳过
+ * 探测，参数由首帧 SPS 经 avcodec_parameters_to_context 自取。
+ *
+ * **积压治理（真机 2026-11-01 定论）**：解码（含逐像素 RGB 转换）
+ * 跟不上实时时，无界管道会让延迟发散到分钟级——画面停在几十分钟前，
+ * 表现为「闪烁/跳位/操作不了」。管道超 3MB 即丢到最近关键帧（SPS）
+ * 重同步，延迟上界 ≈ 2-3s。丢帧的正确位置是网络缓冲（整 GOP 丢弃），
+ * 不是解码器的字节流内部。
  *
  * 生命周期：start 起解码线程；shutdown 置位 + 关流打断。一次性使用，
  * 重看投屏就再建一个实例。
@@ -50,35 +50,6 @@ class StreamDecoder(
 
     private val stopped = AtomicBoolean(false)
     private val pipe = LiveByteStream()
-
-    // FunctionPointer 必须持强引用：native 侧只存函数地址，Java 侧引用
-    // 被 GC 回收后回调即悬空（真机踩过：open_input 中段段错误）
-    private val readCb = object : Read_packet_Pointer_BytePointer_int() {
-        override fun call(opaque: Pointer?, buf: BytePointer, bufSize: Int): Int {
-            try {
-                if (bufSize <= 0) return 0
-                // 短读语义：等首个字节最多 2s（活流静默期不能当 EOF——
-                // 否则 av_read_frame 空转几圈就把流掐了），拿到首字节后
-                // 只取当前已有量立刻返回（攒满 64KB 再吐会让活流每请求
-                // 都等数秒，画面冻结）
-                val n = pipe.readAvailable(tmpShare, 0, minOf(bufSize, tmpShare.size), 2000L)
-                if (n <= 0) return avutil.AVERROR_EOF
-                buf.position(0)
-                buf.put(tmpShare, 0, n)
-                return n
-            } catch (t: Throwable) {
-                // 回调里抛 Java 异常会以 C++ 异常穿透 JNI 直接 abort 进程
-                //（真机踩过），必须在此全吞
-                Log.e(TAG, "AVIO 读回调异常", t)
-                return avutil.AVERROR_EOF
-            }
-        }
-    }
-    /** 回调共享缓冲（解码线程独占，免每次分配 64KB） */
-    private val tmpShare = ByteArray(64 * 1024)
-    private val seekCb = object : Seek_Pointer_long_int() {
-        override fun call(opaque: Pointer?, offset: Long, whence: Int): Long = -1
-    }
 
     /** 解码输出的实际分辨率（触控映射基准） */
     @Volatile
@@ -113,7 +84,34 @@ class StreamDecoder(
             // 自定义 AVIO：读回调直连 [LiveByteStream]，seek 一律不支持
             //（裸活流不可回退，跳过 find_stream_info 后 ffmpeg 不会 seek）
             val ioBuffer = java.nio.ByteBuffer.allocateDirect(64 * 1024)
-            val avio = avformat.avio_alloc_context(BytePointer(ioBuffer), 64 * 1024, 0, null, readCb, null as Write_packet_Pointer_BytePointer_int?, seekCb)
+            val readCb = object : Read_packet_Pointer_BytePointer_int() {
+                override fun call(opaque: Pointer?, buf: BytePointer, bufSize: Int): Int {
+                    try {
+                        if (bufSize <= 0) return 0
+                        // 短读语义：等首字节最多 2s（活流静默期不能当 EOF——
+                        // 否则 av_read_frame 空转几圈就把流掐了），拿到首字节
+                        // 后只取当前已有量立刻返回（攒满再吐会让活流每请求
+                        // 都等数秒，画面冻结）
+                        val n = pipe.readAvailable(avioScratch, 0, minOf(bufSize, avioScratch.size), 2000L)
+                        if (n <= 0) return avutil.AVERROR_EOF
+                        buf.position(0)
+                        buf.put(avioScratch, 0, n)
+                        return n
+                    } catch (t: Throwable) {
+                        // 回调里抛 Java 异常会以 C++ 异常穿透 JNI 直接 abort
+                        // 进程（真机踩过），必须在此全吞
+                        Log.e(TAG, "AVIO 读回调异常", t)
+                        return avutil.AVERROR_EOF
+                    }
+                }
+            }
+            val seekCb = object : Seek_Pointer_long_int() {
+                override fun call(opaque: Pointer?, offset: Long, whence: Int): Long = -1
+            }
+            val avio = avformat.avio_alloc_context(
+                BytePointer(ioBuffer), ioBuffer.capacity(), 0, null, readCb,
+                null as org.bytedeco.ffmpeg.avformat.Write_packet_Pointer_BytePointer_int?, seekCb
+            )
             formatCtx.pb(avio)
             val opts = AVDictionary()
             avutil.av_dict_set(opts, "fflags", "nobuffer", 0)
@@ -135,8 +133,11 @@ class StreamDecoder(
 
             val pkt = avcodec.av_packet_alloc()
             val frame = avutil.av_frame_alloc()
-            var framePixels: IntArray? = null
             var bmp: Bitmap? = null
+            var framePixels: IntArray? = null
+            var yScratch: ByteArray? = null
+            var uScratch: ByteArray? = null
+            var vScratch: ByteArray? = null
             var rendered = 0L
 
             fun drainAndRender() {
@@ -147,21 +148,28 @@ class StreamDecoder(
                         avutil.av_frame_unref(frame)
                         continue
                     }
-                    if (w != outWidth || h != outHeight) {
+                    if (w != outWidth || h != outHeight || bmp == null) {
                         outWidth = w
                         outHeight = h
                         bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                        yScratch = ByteArray(w)
+                        uScratch = ByteArray(w / 2 + 8)
+                        vScratch = ByteArray(w / 2 + 8)
                         onSize(w, h)
                         Log.i(TAG, "FFmpeg 软解就绪: ${w}x${h}")
                     }
-                    // YUV420P → RGB 直读平面（sws_scale 在本机返回 -22 的原因
-                    // 未查明，先用逐像素转换，1088p 约 25-40ms/帧，后续换 libyuv）
+                    val bitmap = bmp ?: return
+                    // YUV420P → RGB：平面按行 bulk 读入 scratch（消除每像素
+                    // JNI 调用，2M 次 get 是性能瓶颈），再走 Java 数组转换
                     val yB = frame.data(0)
                     val uB = frame.data(1)
                     val vB = frame.data(2)
                     val yRow = frame.linesize(0)
                     val uRow = frame.linesize(1)
                     val vRow = frame.linesize(2)
+                    val yS = yScratch ?: return
+                    val uS = uScratch ?: return
+                    val vS = vScratch ?: return
                     var px = framePixels
                     if (px == null || px.size < w * h) {
                         px = IntArray(w * h)
@@ -169,19 +177,24 @@ class StreamDecoder(
                     }
                     var idx = 0
                     for (row in 0 until h) {
-                        val yBase = row * yRow
+                        yB.position(row.toLong() * yRow)
+                        yB.get(yS, 0, w)
                         val uvRow = row shr 1
-                        val uBase = uvRow * uRow
-                        val vBase = uvRow * vRow
+                        val uCols = w shr 1
+                        uB.position(uvRow.toLong() * uRow)
+                        uB.get(uS, 0, uCols)
+                        vB.position(uvRow.toLong() * vRow)
+                        vB.get(vS, 0, uCols)
+                        val yBase = row * w
                         var col = 0
                         while (col < w) {
-                            val y = (yB.get((yBase + col).toLong()).toInt() and 0xff) - 16
+                            val y = ((yS[col].toInt() and 0xff) - 16) * 1192
                             val uvi = col shr 1
-                            val u = (uB.get((uBase + uvi).toLong()).toInt() and 0xff) - 128
-                            val v = (vB.get((vBase + uvi).toLong()).toInt() and 0xff) - 128
-                            var r = (1192 * y + 1634 * v) shr 10
-                            var g = (1192 * y - 833 * v - 400 * u) shr 10
-                            var b = (1192 * y + 2066 * u) shr 10
+                            val u = (uS[uvi].toInt() and 0xff) - 128
+                            val v = (vS[uvi].toInt() and 0xff) - 128
+                            var r = (y + 1634 * v) shr 10
+                            var g = (y - 833 * v - 400 * u) shr 10
+                            var b = (y + 2066 * u) shr 10
                             if (r < 0) r = 0 else if (r > 255) r = 255
                             if (g < 0) g = 0 else if (g > 255) g = 255
                             if (b < 0) b = 0 else if (b > 255) b = 255
@@ -189,34 +202,25 @@ class StreamDecoder(
                             col++
                         }
                     }
-                    (bmp ?: return).setPixels(px, 0, w, 0, 0, w, h)
+                    bitmap.setPixels(px, 0, w, 0, 0, w, h)
                     rendered++
-                    if (rendered == 1L || rendered % 120 == 0L) {
+                    if (rendered == 1L || rendered % 300 == 0L) {
                         Log.i(TAG, "已解码渲染 $rendered 帧")
                     }
-                    if (rendered == 30L) {
-                        val b = bmp!!
-                        Log.i(
-                            TAG,
-                            "像素采样 (200,200)=#${Integer.toHexString(b.getPixel(200, 200))} " +
-                                "(960,540)=#${Integer.toHexString(b.getPixel(960, 540))} " +
-                                "(1700,900)=#${Integer.toHexString(b.getPixel(1700, 900))}"
-                        )
-                    }
-                    onFrame(bmp!!)
+                    onFrame(bitmap)
                     avutil.av_frame_unref(frame)
                 }
             }
 
             var readCalls = 0L
-            var lastReadLog = System.currentTimeMillis()
+            var lastStat = System.currentTimeMillis()
             while (!stopped.get()) {
                 val ret = avformat.av_read_frame(formatCtx, pkt)
                 readCalls++
                 val nowMs = System.currentTimeMillis()
-                if (nowMs - lastReadLog > 5000) {
-                    Log.i(TAG, "av_read_frame 循环 readCalls=$readCalls ret=$ret stopped=${stopped.get()}")
-                    lastReadLog = nowMs
+                if (nowMs - lastStat > 10000) {
+                    Log.i(TAG, "解码循环 readCalls=$readCalls ret=$ret 管道积压=${pipe.backlog()}B")
+                    lastStat = nowMs
                 }
                 if (ret < 0) break // EOF 或错误：推流端收尾/断流
                 if (avcodec.avcodec_send_packet(codecCtx, pkt) >= 0) {
@@ -243,8 +247,9 @@ class StreamDecoder(
 
     /**
      * 极简阻塞字节流：生产端（WS 读循环）write，消费端（FFmpeg 的读
-     * 回调）read。无界队列防丢块（教训同旧实现）；关写端后读端返回
-     * AVERROR_EOF 让 ffmpeg 走收尾。
+     * 回调）read。**积压治理**：超 3MB 丢到最近关键帧（SPS）重同步——
+     * 解码跟不上实时时无界积压让延迟发散到分钟级（真机实测画面停在
+     * 几十分钟前）；丢整 GOP 不产生绿块。
      */
     private class LiveByteStream : InputStream() {
         private val lock = Object()
@@ -252,13 +257,53 @@ class StreamDecoder(
         private var current: ByteArray? = null
         private var pos = 0
         private var closed = false
+        private var bufferedBytes = 0L
 
         fun write(data: ByteArray) {
             synchronized(lock) {
                 if (closed) return
                 chunks.addLast(data.copyOf())
+                bufferedBytes += data.size
+                if (bufferedBytes > BACKLOG_CAP) dropToLastKeyframe()
                 lock.notifyAll()
             }
+        }
+
+        /** 丢到最近关键帧（SPS NAL）重同步；找不到 SPS 则清空（等下一个 IDR） */
+        private fun dropToLastKeyframe() {
+            val all = ByteArray(bufferedBytes.toInt())
+            var off = 0
+            current?.let {
+                val n = it.size - pos
+                System.arraycopy(it, pos, all, off, n)
+                off += n
+            }
+            for (c in chunks) {
+                System.arraycopy(c, 0, all, off, c.size)
+                off += c.size
+            }
+            chunks.clear()
+            current = null
+            pos = 0
+            var lastSps = -1
+            var i = 0
+            while (i + 3 < off) {
+                if (all[i] == 0x00.toByte() && all[i + 1] == 0x00.toByte() && all[i + 2] == 0x01.toByte()) {
+                    if ((all[i + 3].toInt() and 0x1f) == 7) lastSps = i // SPS
+                    i += 4
+                } else {
+                    i++
+                }
+            }
+            val keep = if (lastSps >= 0) lastSps else off // 无 SPS：全清
+            bufferedBytes = (off - keep).toLong()
+            var p = keep
+            while (p < off) {
+                val n = minOf(60 * 1024, off - p)
+                chunks.addLast(all.copyOfRange(p, p + n))
+                p += n
+            }
+            Log.w(TAG, "管道积压丢帧: 保留 ${bufferedBytes}B（自最近关键帧起）")
         }
 
         fun closeWriter() {
@@ -268,7 +313,7 @@ class StreamDecoder(
             }
         }
 
-        override fun read(b: ByteArray, off: Int, len: Int): Int = readAvailable(b, off, len, 0L)
+        fun backlog(): Long = synchronized(lock) { bufferedBytes }
 
         /**
          * 读取至多 len 字节：等首字节最多 timeoutMs，拿到后立刻把「现有
@@ -297,6 +342,7 @@ class StreamDecoder(
                     current = chunks.removeFirstOrNull() ?: break
                     pos = 0
                 }
+                bufferedBytes -= filled
                 return filled
             }
         }
@@ -305,6 +351,8 @@ class StreamDecoder(
             val cur = current
             return (cur != null && pos < cur.size) || chunks.isNotEmpty()
         }
+
+        override fun read(b: ByteArray, off: Int, len: Int): Int = readAvailable(b, off, len, 0L)
 
         override fun read(): Int {
             val one = ByteArray(1)
@@ -316,5 +364,11 @@ class StreamDecoder(
 
     companion object {
         private const val TAG = "LinkSpace/Stream"
+
+        /** AVIO 回调共享缓冲 */
+        private val avioScratch = ByteArray(256 * 1024)
+
+        /** 管道积压上限：超过即丢到最近关键帧（约 8-10s 的典型码率） */
+        private const val BACKLOG_CAP = 3L * 1024 * 1024
     }
 }
