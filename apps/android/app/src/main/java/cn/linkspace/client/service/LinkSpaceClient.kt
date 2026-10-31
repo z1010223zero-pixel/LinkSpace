@@ -265,12 +265,23 @@ class LinkSpaceClient(private val identity: Identity) {
                 val e = readExact(2)!!
                 len = ((e[0].toLong() and 0xff) shl 8) or (e[1].toLong() and 0xff)
             }
+            var e8hex = ""
             if (len == 127L) {
                 val e = readExact(8)!!
                 len = 0
                 for (i in 0..7) len = (len shl 8) or (e[i].toLong() and 0xff)
+                e8hex = e.joinToString("") { "%02x".format(it) }
             }
-            if (len > 32L * 1024 * 1024) throw IllegalStateException("WS 帧过大: $len")
+            if (len > 32L * 1024 * 1024) {
+                // 失同步诊断：正常流里不可能出现（桌面 ws 库对单 Buffer
+                // 不分片、单帧 ≤64KB）。真机踩过 5.4GB 的荒谬长度——
+                // 帧边界错位，把视频字节误当帧头。记下原始 8 字节定位
+                throw IllegalStateException(
+                    "WS 帧过大: $len (b0=0x%02x b1=0x%02x len8=%s)".format(
+                        b0[0], b1[0], e8hex
+                    )
+                )
+            }
             // 服务端发的帧不带掩码，直接读负载即可
             if (opcode == 0x8) return null
             val payload = readExact(len.toInt()) ?: return null

@@ -756,6 +756,16 @@ fun TouchpadScreen(service: LinkSpaceService) {
                     else MaterialTheme.colorScheme.secondaryContainer
                 )
             ) { Text("键盘") }
+            // 投屏粘贴（B-7）：文本框内容整段经 screen.paste 上屏——
+            // vk 通道表达不了的中文从这里走
+            FilledTonalButton(
+                onClick = {
+                    if (text.isNotEmpty()) {
+                        service.sendScreenPaste(text)
+                        text = ""
+                    }
+                }
+            ) { Text("粘贴") }
             FilledTonalButton(
                 onClick = { ctrlSticky = !ctrlSticky },
                 colors = ButtonDefaults.filledTonalButtonColors(
@@ -1003,6 +1013,17 @@ fun ScreenMirrorScreen(service: LinkSpaceService, info: LinkSpaceService.ScreenS
     var containerPx by remember { mutableStateOf(androidx.compose.ui.unit.IntSize.Zero) }
     val videoRect = remember(info.w, info.h, containerPx) {
         letterboxRect(containerPx.width, containerPx.height, info.w, info.h)
+    }
+
+    // 投屏观看期间保持亮屏：熄屏会销毁渲染面（SurfaceView 随窗口失效）
+    // 并让解码线程断流退出——看一半黑掉是最差的失败形态
+    val activity = LocalContext.current as? android.app.Activity
+    DisposableEffect(activity) {
+        val window = activity?.window
+        window?.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        onDispose {
+            window?.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
     }
 
     Box(

@@ -857,7 +857,16 @@ class LinkSpaceService private constructor(private val appContext: Context) {
             // 都从这条连接回来（文本帧 = JSON 控制消息，二进制帧 = 视频块）
             val myPrefix = identity.get().fingerprint.replace(":", "").take(12)
             while (true) {
-                val frame = runCatching { client.readFrame(conn) }.getOrNull() ?: break
+                val frame = try {
+                    client.readFrame(conn)
+                } catch (e: Exception) {
+                    Log.w(TAG, "读循环异常退出: ${e.javaClass.simpleName}: ${e.message}")
+                    break
+                }
+                if (frame == null) {
+                    Log.i(TAG, "读循环退出：对端关闭连接")
+                    break
+                }
                 if (frame.first == 0x2) {
                     // 视频块：解码器已挂就直接喂（持续路径）；渲染面未就绪时
                     // 缓冲（含流头 SPS/PPS，丢了就只能等下一个 IDR），等
@@ -989,6 +998,36 @@ class LinkSpaceService private constructor(private val appContext: Context) {
     }
 
     /**
+     * 投屏粘贴（协议 4.8）：把 text 交给被控端写剪贴板并注入 Ctrl+V。
+     * 键盘通道按 vk 注入，IME 组合输入（中文）无法表达——粘贴通道是
+     * 中文上屏的正道。寄生 input 会话：被控端校验活动会话与来源。
+     */
+    fun sendScreenPaste(text: String) {
+        val out = outbound ?: run {
+            _inputMessage.value = "没有到桌面的控制连接"
+            return
+        }
+        if (text.isEmpty()) return
+        // 上限 512KiB（协议 4.8，与剪贴板同步一致）；超限整段拒绝，
+        // 控制端可分小段重试
+        if (text.toByteArray(Charsets.UTF_8).size > 512 * 1024) {
+            _inputMessage.value = "粘贴内容超过 512KiB 上限"
+            return
+        }
+        out.jobs.let {
+            CoroutineScope(Dispatchers.IO).launch {
+                runCatching {
+                    client.sendText(
+                        out.conn,
+                        envelope(Protocol.TYPE_SCREEN_PASTE, out.peerId) { put("text", text) }.toString()
+                    )
+                }.onFailure { Log.w(TAG, "screen.paste 发送失败: ${it.message}") }
+            }
+        }
+        Log.i(TAG, "screen.paste 已发送（${text.length} 字符）")
+    }
+
+    /**
      * 投屏界面渲染面就绪后调用：建解码器并冲入此前缓冲的视频块。
      * 渲染面就绪晚于视频流到达是常态（UI 切换需要一两帧）。
      */
@@ -1002,6 +1041,12 @@ class LinkSpaceService private constructor(private val appContext: Context) {
             onEnded = { reason ->
                 _inputMessage.value = reason
                 _screenStream.value = null
+                // 解码线程的任何死亡（断流/渲染面失效）都必须同时清掉引用：
+                // 残留的非空 streamDecoder 会让下次投屏请求被
+                // 「if (streamDecoder != null) return」挡死，且读循环会往
+                // 已死实例的缓冲里无界堆帧（真机踩过：死后再点投屏无响应）
+                streamDecoder?.shutdown()
+                streamDecoder = null
             },
             onSize = { w, h ->
                 streamFallbackSize = w to h

@@ -56,6 +56,9 @@ object Protocol {
     const val TYPE_SCREEN_STREAM_STOP = "screen.stream.stop"
     const val TYPE_SCREEN_STREAM_ERROR = "screen.stream.error"
 
+    /** 投屏粘贴（协议 4.8）：写被控端剪贴板并注入 Ctrl+V，寄生 input 会话 */
+    const val TYPE_SCREEN_PASTE = "screen.paste"
+
     /** sessionId 约束，与桌面端 SESSION_ID_RE 一致 */
     const val SESSION_ID_RE = "[A-Za-z0-9_-]{1,64}"
 

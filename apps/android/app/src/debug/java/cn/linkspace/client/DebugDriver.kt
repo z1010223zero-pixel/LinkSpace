@@ -36,6 +36,7 @@ object DebugDriver {
     const val ACTION_CLIPBOARD = "cn.linkspace.client.DEBUG_CLIPBOARD"
     const val ACTION_REQUEST_CONTROL = "cn.linkspace.client.DEBUG_REQUEST_CONTROL"
     const val ACTION_SCREEN_STREAM = "cn.linkspace.client.DEBUG_SCREEN_STREAM"
+    const val ACTION_SCREEN_PASTE = "cn.linkspace.client.DEBUG_SCREEN_PASTE"
 
     /** null = 未启动。注意 Job() 工厂创建的是「活跃」Job，不能拿它当「未启动」哨兵 */
     private var autoAcceptJob: Job? = null
@@ -66,6 +67,11 @@ object DebugDriver {
             ACTION_CLIPBOARD -> handleClipboard(context, service, intent)
             ACTION_REQUEST_CONTROL -> requestControl(context, service)
             ACTION_SCREEN_STREAM -> service.requestScreenStream()
+            ACTION_SCREEN_PASTE -> {
+                val text = intent.getStringExtra("text") ?: return
+                service.sendScreenPaste(text)
+                log("screen.paste 已提交（${'$'}{text.length} 字符）")
+            }
         }
     }
 
