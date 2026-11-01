@@ -110,7 +110,10 @@ class MainActivity : ComponentActivity() {
                         ).onFailure { android.util.Log.w("LinkSpace/Debug", "发起控制失败: ${it.message}") }
                     }
                 }
-                "cn.linkspace.DEBUG_SCREEN_STREAM" -> service.requestScreenStream()
+                "cn.linkspace.DEBUG_SCREEN_STREAM" -> {
+                    val display = intent.getIntExtra("display", -1)
+                    service.requestScreenStream(display)
+                }
             }
         }
     }
@@ -1048,8 +1051,6 @@ fun ScreenMirrorScreen(service: LinkSpaceService, info: LinkSpaceService.ScreenS
     // 投屏观看期间保持亮屏：熄屏会销毁渲染面（SurfaceView 随窗口失效）
     // 并让解码线程断流退出——看一半黑掉是最差的失败形态
     val activity = LocalContext.current as? android.app.Activity
-    // 触控映射基准 = 本机在 session.start 里声明的屏幕（同一次请求用的
-    // displayMetrics，两个值必须一致）
     // 触控映射基准 = 本端在 session.start 里申报的屏幕（与桌面 mapPoint
     // 的 from 严格一致）；会话未建时退回当前 metrics
     val ownScreen = inputState.ownScreen ?: run {
@@ -1201,29 +1202,14 @@ fun ScreenMirrorScreen(service: LinkSpaceService, info: LinkSpaceService.ScreenS
                     }
                 }
         )
-        // 顶栏：状态 + 触控模式切换 + 退出
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .background(Color.Black.copy(alpha = 0.45f))
-                .padding(horizontal = 12.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text("投屏中 · ${info.w}x${info.h}", color = Color.White, fontSize = 13.sp)
-            Spacer(Modifier.weight(1f))
-            // 触控模式（用户 2026-10-31 提出可切换）：点哪指哪=绝对映射；
-            // 滑动跟随=触控板语义，抬起再触从当前光标继续
-            Text(
-                if (relativeMode) "模式：滑动跟随" else "模式：点哪指哪",
-                color = Color.White.copy(alpha = 0.85f),
-                fontSize = 12.sp,
-                modifier = Modifier
-                    .padding(end = 10.dp)
-                    .clickable { relativeMode = !relativeMode }
-                    .padding(4.dp)
-            )
-            Button(onClick = { service.stopScreenStream() }) { Text("退出投屏") }
-        }
+        // 悬浮控制球（ToDesk 式）：拖动可停靠任意位置，点按展开菜单。
+        // 独立 hit 区 + 可拖离屏幕边缘，不受系统状态栏/触控层遮挡
+        FloatingControlPill(
+            relativeMode = relativeMode,
+            onToggleMode = { relativeMode = !relativeMode },
+            onExit = { service.stopScreenStream() },
+            modifier = Modifier.align(Alignment.TopEnd)
+        )
     }
 }
 
