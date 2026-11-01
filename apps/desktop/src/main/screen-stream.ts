@@ -40,10 +40,24 @@ export const TIERS: Array<{ label: string; bps: number | null }> = [
   { label: 't3-1.5M', bps: 1_500_000 }
 ]
 
+/**
+ * 用户可选分辨率档位。这里只约束目标宽度，高度按源宽高比等比缩放，
+ * 并对齐 32（本机解码排障定论）。libx264 用码率除以帧率的单帧 VBV，
+ * 参考 Sunshine 的低延迟策略：一帧内就能排空，不攒几百毫秒缓冲。
+ */
+export const STREAM_QUALITY_PRESETS: Array<{ label: string; width: number; fps: number; bps: number }> = [
+  { label: '720p', width: 1280, fps: 30, bps: 4_000_000 },
+  { label: '1080p', width: 1920, fps: 30, bps: 8_000_000 },
+  { label: '1440p', width: 2560, fps: 30, bps: 14_000_000 },
+  { label: '2160p', width: 3840, fps: 30, bps: 24_000_000 }
+]
+
 export class ScreenStreamService {
   private proc: ChildProcessWithoutNullStreams | null = null
   private stderrTail: string[] = []
   private tier = 0
+  private scaleWidth = 1920
+  private regionArgs: string[] = []
 
   get running(): boolean {
     return this.proc != null
@@ -57,7 +71,9 @@ export class ScreenStreamService {
     ffmpegPath: string,
     onChunk: (data: Buffer) => void,
     /** 多显示器区域抓取参数（-offset_x/-offset_y/-video_size），全桌面时为空 */
-    regionArgs: string[] = []
+    regionArgs: string[] = [],
+    /** 用户选择的目标宽度，默认 1920 */
+    scaleWidth: number = 1920
   ): void {
     if (this.proc) {
       // 残留推流不挡新推流：断连清理漏网（TCP 半开等超时期间对端重连）
@@ -73,6 +89,8 @@ export class ScreenStreamService {
     // 把本机已验证干净的流文件循环推给对端，分段定位「传输损坏 vs 解码
     // 配置」用（真机绿块排障 2026-10-31）
     const streamFrom = process.env.LINKSPACE_STREAM_FROM
+    this.scaleWidth = scaleWidth
+    this.regionArgs = regionArgs
     const args = streamFrom
       ? [
           '-hide_banner', '-loglevel', 'error',
@@ -106,7 +124,7 @@ export class ScreenStreamService {
       // 解出下半帧全零**；同流桌面 ffmpeg 解码完全正常、两端 WS 字节
       // sha256 分段一致，唯 MF 编码器同源同几何流全绿。不再是编码参数
       // 问题，是 libx264 位流与该 ROM 解码器栈的相性，换 MF 直接绕开。
-      '-vf', "scale='min(1920,iw)':-32",
+      '-vf', `scale='min(${scaleWidth},iw)':-32`,
       '-c:v', 'libx264',
       '-preset', 'ultrafast',
       '-tune', 'zerolatency',
@@ -119,12 +137,17 @@ export class ScreenStreamService {
       '-f', 'h264',
       'pipe:1'
       ]
-    // 码率档位：tier 0 不限（原始行为），其余加 maxrate/bufsize 硬顶。
-    // libx264 的 ultrafast 本身不产恒定码率，封顶防止 Wi-Fi 拥塞堆积
+    // 自适应码率与用户画质档位取交集：拥塞时仍能下降；用户选低清晰度
+    // 时也不会因为 t0 无上限而把 Wi-Fi 打爆。
+    const preset = STREAM_QUALITY_PRESETS.find((p) => p.width === scaleWidth)
+    const presetBps = preset?.bps ?? 8_000_000
+    const fps = preset?.fps ?? 30
     const tierArgs: string[] = []
-    const bps = TIERS[this.tier]?.bps ?? null
-    if (bps) {
-      tierArgs.push('-b:v', String(bps), '-maxrate', String(bps), '-bufsize', String(bps * 2))
+    const tierBps = TIERS[this.tier]?.bps ?? null
+    const bps = Math.min(tierBps ?? presetBps, presetBps)
+    if (bps > 0) {
+      const frameBps = Math.round(bps / fps)
+      tierArgs.push('-b:v', String(bps), '-maxrate', String(bps), '-bufsize', String(frameBps))
     }
     this.ffmpegPath = ffmpegPath
     this.onChunkRef = onChunk
@@ -137,7 +160,7 @@ export class ScreenStreamService {
       log.info(`[screen-stream] 推流字节落盘: ${teePath}`)
     }
     const proc = spawn(ffmpegPath, [...args, ...tierArgs], { windowsHide: true })
-    log.info(`[screen-stream] 推流启动于 ${TIERS[this.tier]?.label ?? 't0'}`)
+    log.info(`[screen-stream] 推流启动于 ${TIERS[this.tier]?.label ?? 't0'} · ${scaleWidth}p · ${(bps / 1_000_000).toFixed(1)}Mbps`)
     this.stderrTail = []
     proc.stderr.on('data', (chunk: Buffer) => {
       const line = chunk.toString().trim()
@@ -180,7 +203,7 @@ export class ScreenStreamService {
     log.info(`[screen-stream] 码率档位 ${TIERS[this.tier]?.label} → ${TIERS[clamped]?.label}（重启推流，解码器带内消化）`)
     this.tier = clamped
     this.stop()
-    this.start(path, onChunk)
+    this.start(path, onChunk, this.regionArgs, this.scaleWidth)
   }
 
   private ffmpegPath: string | null = null

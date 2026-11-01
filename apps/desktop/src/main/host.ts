@@ -28,7 +28,7 @@ import {
 } from './input/session'
 import type { InputEvent, ScreenSize } from './input/protocol'
 import { InputLayoutStore } from './input/layout'
-import { ScreenStreamService } from './screen-stream'
+import { ScreenStreamService, STREAM_QUALITY_PRESETS } from './screen-stream'
 import { log } from './log'
 
 export interface HostOptions {
@@ -972,6 +972,13 @@ export class Host {
       // 单显示器免选择器，直接投 0 号屏；自动重连带 lastStreamDisplayIndex
       // 时同样直连，不会再弹清单。
       let requested = (msg.payload as { display?: unknown } | null)?.display
+      const requestedScaleWidth =
+        typeof (msg.payload as { scaleWidth?: unknown } | null)?.scaleWidth === 'number'
+          ? (msg.payload as { scaleWidth: number }).scaleWidth
+          : 1920
+      const scaleWidth = STREAM_QUALITY_PRESETS.some((p) => p.width === requestedScaleWidth)
+        ? requestedScaleWidth
+        : 1920
       const displays = this.opts.inputDisplays?.() ?? []
       if (typeof requested !== 'number') {
         if (displays.length === 0) {
@@ -1034,6 +1041,8 @@ export class Host {
             conn.sendBinary(chunk)
           },
           regionArgs
+          ,
+          scaleWidth
         )
         // 码率自适应（B-3）：周期采样发送积压，持续拥塞降档、长稳升档。
         // 换档在 screen-stream 内部同步重启 ffmpeg（stop+start 同 tick，
@@ -1077,7 +1086,8 @@ export class Host {
         }, 2000)
         sendTo(peerId, 'screen.stream.start', {
           w: region?.w ?? this.opts.inputVirtualScreen?.().w ?? 1920,
-          h: region?.h ?? this.opts.inputVirtualScreen?.().h ?? 1080
+          h: region?.h ?? this.opts.inputVirtualScreen?.().h ?? 1080,
+          scaleWidth
         })
         log.info(`[screen-stream] 已为 ${peerId} 开启投屏${region ? `（显示器 ${region.w}x${region.h} @ ${region.x},${region.y}）` : '（全桌面）'}`)
       } catch (err) {
