@@ -10,6 +10,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -109,7 +110,10 @@ class MainActivity : ComponentActivity() {
                         ).onFailure { android.util.Log.w("LinkSpace/Debug", "发起控制失败: ${it.message}") }
                     }
                 }
-                "cn.linkspace.DEBUG_SCREEN_STREAM" -> service.requestScreenStream()
+                "cn.linkspace.DEBUG_SCREEN_STREAM" -> {
+                    val display = intent.getIntExtra("display", -1)
+                    service.requestScreenStream(display)
+                }
             }
         }
     }
@@ -731,6 +735,32 @@ fun TouchpadScreen(service: LinkSpaceService) {
                 }
                 controller.stop()
             }) { Text("结束控制") }
+
+            // 多显示器选择器（B-2）：被控端回报清单即弹，选中后按
+            // 该屏区域推流
+            val displayChoices by service.streamDisplays.collectAsStateWithLifecycle()
+            if (displayChoices.isNotEmpty()) {
+                AlertDialog(
+                    onDismissRequest = { service.clearStreamDisplays() },
+                    title = { Text("选择要投屏的显示器") },
+                    text = {
+                        Column {
+                            displayChoices.forEachIndexed { index, d ->
+                                TextButton(
+                                    onClick = {
+                                        service.clearStreamDisplays()
+                                        service.requestScreenStream(index)
+                                    }
+                                ) { Text("显示器 ${index + 1}（${d.w}x${d.h}）") }
+                            }
+                        }
+                    },
+                    confirmButton = {},
+                    dismissButton = {
+                        OutlinedButton(onClick = { service.clearStreamDisplays() }) { Text("取消") }
+                    }
+                )
+            }
             // 屏幕投屏：桌面画面流到本机全屏显示，触点按画面比例直接
             // 映射成绝对坐标事件（寄生在当前键鼠会话内）
             OutlinedButton(onClick = { service.requestScreenStream() }) { Text("投屏") }
@@ -1007,6 +1037,10 @@ fun ScreenMirrorScreen(service: LinkSpaceService, info: LinkSpaceService.ScreenS
     val scrollAccum = remember { floatArrayOf(0f) }
     // 会话声明的本机屏幕（触控坐标空间基准，来自 session.accept）
     val inputState by service.inputState.collectAsStateWithLifecycle()
+    // 触控模式：false=点哪指哪（绝对映射）；true=滑动跟随（触控板语义，
+    // 用户 2026-10-31 提出可切换）
+    var relativeMode by remember { mutableStateOf(false) }
+    val streamScaleWidth by service.streamScaleWidth.collectAsStateWithLifecycle()
     val density = LocalDensity.current
 
     // letterbox：容器尺寸 + 视频显示矩形（等比缩放置中，黑边留白）
@@ -1018,6 +1052,12 @@ fun ScreenMirrorScreen(service: LinkSpaceService, info: LinkSpaceService.ScreenS
     // 投屏观看期间保持亮屏：熄屏会销毁渲染面（SurfaceView 随窗口失效）
     // 并让解码线程断流退出——看一半黑掉是最差的失败形态
     val activity = LocalContext.current as? android.app.Activity
+    // 触控映射基准 = 本端在 session.start 里申报的屏幕（与桌面 mapPoint
+    // 的 from 严格一致）；会话未建时退回当前 metrics
+    val ownScreen = inputState.ownScreen ?: run {
+        val m = LocalContext.current.resources.displayMetrics
+        InputController.Screen(m.widthPixels.coerceAtLeast(1), m.heightPixels.coerceAtLeast(1))
+    }
     DisposableEffect(activity) {
         val window = activity?.window
         window?.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -1033,24 +1073,16 @@ fun ScreenMirrorScreen(service: LinkSpaceService, info: LinkSpaceService.ScreenS
             .onSizeChanged { containerPx = it }
     ) {
         if (videoRect.width > 0 && videoRect.height > 0) {
+            // 自绘 StreamView：解码器（ByteBuffer 模式）产出 Bitmap 直投，
+            // 无 surface 生命周期——本 ROM surface 模式解码活锁，见
+            // StreamDecoder 类注释（2026-10-31 绿块排障定论）
+            val cursorFraction by service.cursorFraction.collectAsStateWithLifecycle()
             AndroidView(
                 factory = { ctx ->
-                    android.view.SurfaceView(ctx).apply {
-                        holder.addCallback(object : android.view.SurfaceHolder.Callback {
-                            override fun surfaceCreated(holder: android.view.SurfaceHolder) {
-                                // 渲染面就绪：服务层 accept 桌面 ffmpeg 的连接并起解码
-                                service.connectStreamSurface(holder.surface)
-                            }
-
-                            override fun surfaceChanged(holder: android.view.SurfaceHolder, format: Int, width: Int, height: Int) {}
-
-                            override fun surfaceDestroyed(holder: android.view.SurfaceHolder) {
-                                // 解码器随推流断开自愈退出（桌面杀流 → EOF/异常路径），
-                                // 面已随本 view 销毁被 release
-                            }
-                        })
-                    }
+                    cn.linkspace.client.StreamView(ctx).also { service.attachStreamView(it) }
                 },
+                update = { it.setCursor(cursorFraction?.first ?: -1f, cursorFraction?.second ?: -1f) },
+                onRelease = { service.attachStreamView(null) },
                 modifier = Modifier
                     .align(Alignment.Center)
                     .size(
@@ -1069,15 +1101,31 @@ fun ScreenMirrorScreen(service: LinkSpaceService, info: LinkSpaceService.ScreenS
                         var downAt = 0L
                         var moved = false
                         var dragArmed = false
-                        // 触控坐标空间必须与 session.start 声明的本机屏幕一致
-                        // （桌面 mapPoint 以它为 from）——投屏画面（虚拟屏全景，
-                        // 宽高比与平板屏不同）上的触点按比例换算进该空间
-                        val sessionScreen = inputState.remoteScreen
-                            ?: InputController.Screen(1440, 900)
+                        // 触控坐标空间 = **本机在 session.start 里声明的屏幕**
+                        // （桌面 mapPoint 以它为 from 换算到目标屏）——与触控板
+                        // 同一空间，不是对端的屏幕/解码尺寸（此前误用
+                        // remoteScreen，落点按倍数缩放全偏，用户实测）
+                        val sessionScreen = ownScreen
+                        // move 攒批（触控板同款：16 条或 30ms 合并），点按/
+                        // 拖拽/滚轮前 flush 保序
+                        val moveBatch = mutableListOf<org.json.JSONObject>()
+                        var lastFlushAt = 0L
+                        fun flushMoves() {
+                            if (moveBatch.isNotEmpty()) {
+                                sendRemote(controller, moveBatch)
+                                moveBatch.clear()
+                            }
+                            lastFlushAt = System.currentTimeMillis()
+                        }
+                        // 相对模式的虚拟光标（触摸即触控板：滑动=相对移动，
+                        // 抬起再触从当前位置继续，绝不跳位）
+                        var relX = sessionScreen.w / 2f
+                        var relY = sessionScreen.h / 2f
                         while (true) {
                             val event = awaitPointerEvent()
                             val pressed = event.changes.filter { it.pressed }
                             if (pressed.size >= 2) {
+                                flushMoves()
                                 var dy = 0f
                                 pressed.forEach { dy += it.positionChange().y }
                                 scrollAccum[0] += dy / pressed.size
@@ -1095,24 +1143,52 @@ fun ScreenMirrorScreen(service: LinkSpaceService, info: LinkSpaceService.ScreenS
                             } else if (pressed.size == 1) {
                                 val c = pressed.first()
                                 if (c.changedToDown()) {
+                                    flushMoves()
                                     downAt = System.currentTimeMillis()
                                     moved = false
                                     dragArmed = false
+                                    // 绝对模式必须在 down 时先落点：否则轻点
+                                    // 只会把旧光标位置处的 down/up 发出去，
+                                    // 用户看到的是“点了但点在别处”。落点
+                                    // 后 up 才是真正的“点哪指哪”。
+                                    if (!relativeMode) {
+                                        val vx = (c.position.x - videoRect.left).coerceIn(0f, videoRect.width)
+                                        val vy = (c.position.y - videoRect.top).coerceIn(0f, videoRect.height)
+                                        sendRemote(
+                                            controller,
+                                            listOf(
+                                                InputController.move(
+                                                    (vx / videoRect.width * sessionScreen.w).toInt()
+                                                        .coerceIn(0, sessionScreen.w - 1),
+                                                    (vy / videoRect.height * sessionScreen.h).toInt()
+                                                        .coerceIn(0, sessionScreen.h - 1)
+                                                )
+                                            )
+                                        )
+                                    }
                                 }
                                 val delta = c.positionChange()
                                 if (delta != androidx.compose.ui.geometry.Offset.Zero) {
                                     moved = moved || kotlin.math.abs(delta.x) > 2f || kotlin.math.abs(delta.y) > 2f
                                     // 静置长按后进入拖拽：一次 down(left)，此后 move 都带按键
                                     if (!dragArmed && !moved && System.currentTimeMillis() - downAt > 300) {
+                                        flushMoves()
                                         dragArmed = true
                                         sendRemote(controller, listOf(InputController.down("left")))
                                     }
-                                    // 黑边 clamp：触点收敛进视频矩形后按比例换算
-                                    val vx = (c.position.x - videoRect.left).coerceIn(0f, videoRect.width)
-                                    val vy = (c.position.y - videoRect.top).coerceIn(0f, videoRect.height)
-                                    sendRemote(
-                                        controller,
-                                        listOf(
+                                    if (relativeMode) {
+                                        // 相对模式：位移×灵敏度累积进虚拟光标，
+                                        // 不跳位（ToDesk 触摸同款）
+                                        relX = (relX + delta.x * 2.5f)
+                                            .coerceIn(0f, (sessionScreen.w - 1).toFloat())
+                                        relY = (relY + delta.y * 2.5f)
+                                            .coerceIn(0f, (sessionScreen.h - 1).toFloat())
+                                        moveBatch.add(InputController.move(relX.toInt(), relY.toInt()))
+                                    } else {
+                                        // 绝对模式：黑边 clamp 后触点按比例进会话空间
+                                        val vx = (c.position.x - videoRect.left).coerceIn(0f, videoRect.width)
+                                        val vy = (c.position.y - videoRect.top).coerceIn(0f, videoRect.height)
+                                        moveBatch.add(
                                             InputController.move(
                                                 (vx / videoRect.width * sessionScreen.w).toInt()
                                                     .coerceIn(0, sessionScreen.w - 1),
@@ -1120,15 +1196,20 @@ fun ScreenMirrorScreen(service: LinkSpaceService, info: LinkSpaceService.ScreenS
                                                     .coerceIn(0, sessionScreen.h - 1)
                                             )
                                         )
-                                    )
+                                    }
+                                    val now = System.currentTimeMillis()
+                                    if (moveBatch.size >= 16 || now - lastFlushAt >= 30) flushMoves()
                                     c.consume()
                                 }
                             } else {
+                                flushMoves()
                                 val up = event.changes.firstOrNull { it.changedToUp() }
                                 if (up != null) {
                                     if (dragArmed) {
                                         sendRemote(controller, listOf(InputController.up("left")))
                                     } else if (System.currentTimeMillis() - downAt < 250 && !moved) {
+                                        // 轻点=左键单击：绝对模式光标已被前面的
+                                        // move 带到触点；相对模式光标在原位（无跳位）
                                         sendRemote(
                                             controller,
                                             listOf(InputController.down("left"), InputController.up("left"))
@@ -1141,18 +1222,16 @@ fun ScreenMirrorScreen(service: LinkSpaceService, info: LinkSpaceService.ScreenS
                     }
                 }
         )
-        // 顶栏：状态 + 退出
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .background(Color.Black.copy(alpha = 0.45f))
-                .padding(horizontal = 12.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text("投屏中 · ${info.w}x${info.h}", color = Color.White, fontSize = 13.sp)
-            Spacer(Modifier.weight(1f))
-            Button(onClick = { service.stopScreenStream() }) { Text("退出投屏") }
-        }
+        // 悬浮控制球（ToDesk 式）：拖动可停靠任意位置，点按展开菜单。
+        // 独立 hit 区 + 可拖离屏幕边缘，不受系统状态栏/触控层遮挡
+        FloatingControlPill(
+            relativeMode = relativeMode,
+            onToggleMode = { relativeMode = !relativeMode },
+            scaleWidth = streamScaleWidth,
+            onSelectScaleWidth = { width -> service.requestScreenStream(displayIndex = -1, scaleWidth = width) },
+            onExit = { service.stopScreenStream() },
+            modifier = Modifier.align(Alignment.TopEnd)
+        )
     }
 }
 

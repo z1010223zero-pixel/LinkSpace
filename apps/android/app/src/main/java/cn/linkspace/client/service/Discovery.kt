@@ -26,6 +26,15 @@ class Discovery(private val context: Context) {
     private var multicastLock: WifiManager.MulticastLock? = null
 
     private val seen = ConcurrentHashMap<String, DiscoveredService>()
+
+    /**
+     * 原始发现信息，供周期重解析用。NsdManager 只对「新发现」的服务触发
+     * resolve，对端重启后同名服务的再通告（端口/地址可能已变）往往不再
+     * 触发 onServiceFound——实测桌面重启换端口后平板拿着旧端口连 8 秒
+     * 超时，最长要瘫到软过期（300s）。周期性拿原始 info 重 resolve 是
+     * 唯一可靠的刷新路径。
+     */
+    private val rawInfos = ConcurrentHashMap<String, NsdServiceInfo>()
     private val listeners = mutableListOf<(List<DiscoveredService>) -> Unit>()
 
     @Volatile
@@ -106,12 +115,15 @@ class Discovery(private val context: Context) {
         }
 
         override fun onServiceFound(info: NsdServiceInfo) {
+            // 留下原始 info 供 sweepLoop 周期重解析（见 rawInfos 注释）
+            rawInfos[info.serviceName] = info
             // resolve 是异步的，且必须对每个新发现的服务各做一次
             runCatching { nsd.resolveService(info, newResolveListener()) }
                 .onFailure { Log.w(TAG, "resolveService 抛错: ${it.message}") }
         }
 
         override fun onServiceLost(info: NsdServiceInfo) {
+            rawInfos.remove(info.serviceName)
             seen.remove(info.serviceName)
             notifyListeners()
         }
@@ -200,27 +212,44 @@ class Discovery(private val context: Context) {
         runCatching { multicastLock?.release() }
         multicastLock = null
         seen.clear()
+        rawInfos.clear()
     }
 
     /**
-     * 软过期清扫：mDNS 的 goodbye 不可靠（设备直接断网不会有），
-     * NsdManager 的 onServiceLost 因此经常不触发。超过 STALE_MS 未再
-     * 通告的服务一律移除并回流列表——与桌面端 discovery.ts 的 sweep
-     * 同一规则。onServiceFound 会对重复通告反复 resolve，即本表的刷新路径。
+     * 巡检线程，30s 一轮、两件事：
+     *   1. 软过期清扫（每 STALE_MS/2 一轮）：mDNS 的 goodbye 不可靠
+     *      （设备直接断网不会有），NsdManager 的 onServiceLost 因此经常
+     *      不触发。超过阈值未再见即移除并回流列表——与桌面端 discovery.ts
+     *      的 sweep 同一规则。onServiceFound 会对重复通告反复 resolve，
+     *      即本表的另一条刷新路径。
+     *   2. 周期重解析 rawInfos（每轮）：对端重启换端口/换 IP 后，同名
+     *      服务的再通告大概率不再触发 onServiceFound（平台 mdnsd 已缓存），
+     *      主动重 resolve 才能在 30s 内修正 host/port，而不是瘫到软过期。
+     *      串行小间隔执行，避开 NsdManager 的并发 resolve 上限。
      */
     private fun sweepLoop() {
+        var lastSweepAt = 0L
         while (running) {
-            runCatching { Thread.sleep(STALE_MS / 2) }.getOrNull() ?: return
+            runCatching { Thread.sleep(30_000) }.getOrNull() ?: return
             val now = System.currentTimeMillis()
-            var removed = false
-            for ((name, svc) in seen) {
-                if (now - svc.lastSeen > STALE_MS) {
-                    seen.remove(name)
-                    removed = true
-                    Log.d(TAG, "软过期移除 ${svc.displayName}")
+            if (now - lastSweepAt >= STALE_MS / 2) {
+                lastSweepAt = now
+                var removed = false
+                for ((name, svc) in seen) {
+                    if (now - svc.lastSeen > STALE_MS) {
+                        seen.remove(name)
+                        rawInfos.remove(name)
+                        removed = true
+                        Log.d(TAG, "软过期移除 ${svc.displayName}")
+                    }
                 }
+                if (removed) notifyListeners()
             }
-            if (removed) notifyListeners()
+            for ((_, info) in rawInfos) {
+                runCatching { nsd.resolveService(info, newResolveListener()) }
+                    .onFailure { Log.w(TAG, "重解析抛错: ${it.message}") }
+                runCatching { Thread.sleep(400) }.getOrNull() ?: return
+            }
         }
     }
 

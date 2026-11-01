@@ -44,10 +44,16 @@ android {
     }
 
     packaging {
+        // FFmpeg 的 .so 体积大，默认不压缩打包要求 APK 内页对齐，
+        // 本 ROM 流式安装解原生库失败（res=-2）——改为安装时解压的老打包
+        jniLibs.useLegacyPackaging = true
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
         // BouncyCastle 是 multi-release jar，三个包都带 META-INF/versions/9/... 元数据，
         // 直接合并会报路径重复。这些是 JDK9 模块描述，Android 用不到。
         resources.excludes += "/META-INF/versions/**"
+        // bytedeco javacpp/ffmpeg 两个 android-arm64 jar 都带同一份
+        // native-image 配置，Android 用不到，排除掉才能合并
+        resources.excludes += "META-INF/native-image/**"
     }
 }
 
@@ -68,6 +74,25 @@ dependencies {
 
     // 协程
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+
+    // 投屏解码：FFmpeg 软解（RustDesk 同款路线）。本机 ROM 的 MediaCodec
+    // 对实时喂入的活流全线不可靠（2026-10-31 排障：软/硬解、Surface/
+    // ByteBuffer、AU 对齐全试过，离线文件流却全绿），直接换 libavcodec。
+    // JavaCV = bytedeco 预编译 libavcodec + Java API，免 NDK 构建；
+    // 只带 arm64 一个 ABI 控体积。
+    implementation("org.bytedeco:javacv:1.5.10") {
+        // 只用 FFmpegFrameGrabber/AndroidFrameConverter，不带 opencv/openblas
+        exclude(group = "org.bytedeco", module = "opencv")
+        exclude(group = "org.bytedeco", module = "openblas")
+        exclude(group = "org.bytedeco", module = "videoinput")
+        exclude(group = "org.bytedeco", module = "flycapture")
+        exclude(group = "org.bytedeco", module = "libdc1394")
+        exclude(group = "org.bytedeco", module = "libfreenect")
+        exclude(group = "org.bytedeco", module = "librealsense2")
+    }
+    implementation("org.bytedeco:ffmpeg:6.1.1-1.5.10")
+    implementation("org.bytedeco:ffmpeg:6.1.1-1.5.10:android-arm64")
+    implementation("org.bytedeco:javacpp:1.5.10:android-arm64")
 
     testImplementation("junit:junit:4.13.2")
     // InputController 等纯逻辑用 org.json 承载消息，JVM 单测需要同名实现
