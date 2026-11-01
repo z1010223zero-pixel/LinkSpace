@@ -1146,6 +1146,25 @@ fun ScreenMirrorScreen(service: LinkSpaceService, info: LinkSpaceService.ScreenS
                                     downAt = System.currentTimeMillis()
                                     moved = false
                                     dragArmed = false
+                                    // 绝对模式必须在 down 时先落点：否则轻点
+                                    // 只会把旧光标位置处的 down/up 发出去，
+                                    // 用户看到的是“点了但点在别处”。落点
+                                    // 后 up 才是真正的“点哪指哪”。
+                                    if (!relativeMode) {
+                                        val vx = (c.position.x - videoRect.left).coerceIn(0f, videoRect.width)
+                                        val vy = (c.position.y - videoRect.top).coerceIn(0f, videoRect.height)
+                                        sendRemote(
+                                            controller,
+                                            listOf(
+                                                InputController.move(
+                                                    (vx / videoRect.width * sessionScreen.w).toInt()
+                                                        .coerceIn(0, sessionScreen.w - 1),
+                                                    (vy / videoRect.height * sessionScreen.h).toInt()
+                                                        .coerceIn(0, sessionScreen.h - 1)
+                                                )
+                                            )
+                                        )
+                                    }
                                 }
                                 val delta = c.positionChange()
                                 if (delta != androidx.compose.ui.geometry.Offset.Zero) {
