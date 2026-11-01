@@ -1040,6 +1040,7 @@ fun ScreenMirrorScreen(service: LinkSpaceService, info: LinkSpaceService.ScreenS
     // 触控模式：false=点哪指哪（绝对映射）；true=滑动跟随（触控板语义，
     // 用户 2026-10-31 提出可切换）
     var relativeMode by remember { mutableStateOf(false) }
+    val streamScaleWidth by service.streamScaleWidth.collectAsStateWithLifecycle()
     val density = LocalDensity.current
 
     // letterbox：容器尺寸 + 视频显示矩形（等比缩放置中，黑边留白）
@@ -1226,6 +1227,8 @@ fun ScreenMirrorScreen(service: LinkSpaceService, info: LinkSpaceService.ScreenS
         FloatingControlPill(
             relativeMode = relativeMode,
             onToggleMode = { relativeMode = !relativeMode },
+            scaleWidth = streamScaleWidth,
+            onSelectScaleWidth = { width -> service.requestScreenStream(displayIndex = -1, scaleWidth = width) },
             onExit = { service.stopScreenStream() },
             modifier = Modifier.align(Alignment.TopEnd)
         )

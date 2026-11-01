@@ -172,8 +172,8 @@
 
 | 类型 | 方向 | payload | 说明 |
 |---|---|---|---|
-| `screen.stream.request` | 控制端 → 被控端 | `{}` | 请求开始投屏。前置：活动键鼠会话存在且 peerId 匹配、被控端 ffmpeg 可用，否则回 `error` |
-| `screen.stream.start` | 被控端 → 控制端 | `{ w, h }` | 推流开始。`w/h` 是被控端虚拟屏全景尺寸（触控换算基准之一；实际流分辨率以流内 SPS 为准，平板按其 letterbox 等比渲染） |
+| `screen.stream.request` | 控制端 → 被控端 | `{ display?: number, scaleWidth?: number }` | 请求开始投屏。前置：活动键鼠会话存在且 peerId 匹配、被控端 ffmpeg 可用，否则回 `error`。`display` 用于多显示器选择；`scaleWidth` 是目标宽度档位（1280/1920/2560/3840），省略默认 1920。**[PROTOCOL] 2026-11-01 登记** |
+| `screen.stream.start` | 被控端 → 控制端 | `{ w, h, scaleWidth }` | 推流开始。`w/h` 是被控端虚拟屏全景尺寸（触控换算基准之一；实际流分辨率以流内 SPS 为准，平板按其 letterbox 等比渲染）；`scaleWidth` 是当前档位。**[PROTOCOL] 2026-11-01 登记** |
 | `screen.stream.stop` | 双向 | `{}` | 停止投屏（控制端取消 / 被控端 ffmpeg 意外退出时通知对端清 UI）。会话结束（session.stop/断连）隐式终止投流，不发本消息 |
 | `screen.stream.error` | 被控端 → 控制端 | `{ message }` | 投屏失败回告（无会话 / 缺 ffmpeg / 启动失败） |
 

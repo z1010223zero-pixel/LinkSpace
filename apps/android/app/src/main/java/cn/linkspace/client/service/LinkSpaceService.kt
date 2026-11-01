@@ -913,6 +913,7 @@ class LinkSpaceService private constructor(private val appContext: Context) {
                     // ---------- 屏幕投屏 ----------
                     Protocol.TYPE_SCREEN_STREAM_START -> {
                         Log.i(TAG, "收到投屏启动 w=${payload.optInt("w")} h=${payload.optInt("h")}")
+                        _streamScaleWidth.value = payload.optInt("scaleWidth", lastStreamScaleWidth)
                         streamFallbackSize = payload.optInt("w", 1920) to payload.optInt("h", 1080)
                         _screenStream.value = ScreenStreamInfo(
                             streamFallbackSize.first,
@@ -1007,6 +1008,9 @@ class LinkSpaceService private constructor(private val appContext: Context) {
     /** 上次投屏选中的显示器索引（自动重连时沿用） */
     private var lastStreamDisplayIndex = -1
 
+    /** 上次投屏分辨率（目标宽度），自动重连和换档时沿用 */
+    private var lastStreamScaleWidth = 1920
+
     /**
      * 观看页的渲染视图（弱引用防泄漏）。解码器每帧回调后主线程
      * submit；观看页销毁时置空，解码出的帧自然丢弃。
@@ -1049,7 +1053,7 @@ class LinkSpaceService private constructor(private val appContext: Context) {
                         InputController.Screen(m.widthPixels.coerceAtLeast(1), m.heightPixels.coerceAtLeast(1)),
                         displayName
                     ).getOrThrow()
-                    requestScreenStream(lastStreamDisplayIndex)
+                    requestScreenStream(lastStreamDisplayIndex, lastStreamScaleWidth)
                 }
                 if (r.isSuccess) {
                     Log.i(TAG, "自动重连成功（第 $round 次）")
@@ -1102,6 +1106,9 @@ class LinkSpaceService private constructor(private val appContext: Context) {
     private val _screenStream = MutableStateFlow<ScreenStreamInfo?>(null)
     val screenStream: StateFlow<ScreenStreamInfo?> = _screenStream
 
+    private val _streamScaleWidth = MutableStateFlow(1920)
+    val streamScaleWidth: StateFlow<Int> = _streamScaleWidth
+
     /** 进行中的投屏解码器。null = 无投屏 */
     private var streamDecoder: StreamDecoder? = null
     /** 桌面回 start 时填的虚拟屏尺寸（触控映射的回退基准） */
@@ -1112,21 +1119,26 @@ class LinkSpaceService private constructor(private val appContext: Context) {
     /** 视频块缓冲：WS 二进制帧到达早于渲染面就绪时暂存（含流头 SPS/PPS） */
     private val pendingVideo = java.util.ArrayDeque<ByteArray>()
 
-    fun requestScreenStream(displayIndex: Int = -1) {
+    fun requestScreenStream(displayIndex: Int = -1, scaleWidth: Int = 1920) {
         val out = outbound ?: run {
             _inputMessage.value = "没有到桌面的控制连接"
             return
         }
-        // 已在投屏中就不再重复请求
-        if (streamDecoder != null) return
-        lastStreamDisplayIndex = displayIndex
+        // 同一分辨率重复请求直接忽略；换分辨率则允许重建推流
+        if (streamDecoder != null && scaleWidth == lastStreamScaleWidth) return
+        // 换分辨率时如果不指定显示器，沿用当前选屏，避免再次弹显示器清单
+        val resolvedDisplayIndex = if (displayIndex >= 0) displayIndex else lastStreamDisplayIndex
+        lastStreamDisplayIndex = resolvedDisplayIndex
+        lastStreamScaleWidth = scaleWidth
+        _streamScaleWidth.value = scaleWidth
         pendingVideo.clear()
         val text = envelope(Protocol.TYPE_SCREEN_STREAM_REQUEST, out.peerId) {
             // 带 display 的请求直接选屏；不带则被控端回显示器清单
-            if (displayIndex >= 0) put("display", displayIndex)
+            if (resolvedDisplayIndex >= 0) put("display", resolvedDisplayIndex)
+            put("scaleWidth", scaleWidth)
         }.toString()
         outboundWriter.execute { runCatching { client.sendText(out.conn, text) } }
-        Log.i(TAG, "投屏请求已发（display=$displayIndex）")
+        Log.i(TAG, "投屏请求已发（display=$resolvedDisplayIndex, scaleWidth=$scaleWidth）")
     }
 
     /**

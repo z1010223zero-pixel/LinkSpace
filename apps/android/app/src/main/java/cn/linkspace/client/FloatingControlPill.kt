@@ -49,6 +49,8 @@ import kotlin.math.roundToInt
 fun FloatingControlPill(
     relativeMode: Boolean,
     onToggleMode: () -> Unit,
+    scaleWidth: Int,
+    onSelectScaleWidth: (Int) -> Unit,
     onExit: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -101,6 +103,13 @@ fun FloatingControlPill(
                         label = if (relativeMode) "触控：滑动跟随 ✓" else "触控：点哪指哪 ✓",
                         onClick = {
                             onToggleMode()
+                            menuExpanded = false
+                        }
+                    )
+                    ResolutionMenu(
+                        currentWidth = scaleWidth,
+                        onSelect = { width ->
+                            onSelectScaleWidth(width)
                             menuExpanded = false
                         }
                     )
@@ -172,6 +181,34 @@ fun FloatingControlPill(
                 color = Color.White,
                 fontSize = 20.sp,
                 fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
+            )
+        }
+    }
+}
+
+private val RESOLUTION_OPTIONS = listOf(
+    "720p" to 1280,
+    "1080p" to 1920,
+    "1440p" to 2560,
+    "2160p" to 3840
+)
+
+@Composable
+private fun ResolutionMenu(
+    currentWidth: Int,
+    onSelect: (Int) -> Unit
+) {
+    Column {
+        Text(
+            "分辨率",
+            color = Color.White.copy(alpha = 0.6f),
+            fontSize = 12.sp,
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 4.dp)
+        )
+        RESOLUTION_OPTIONS.forEach { (label, width) ->
+            MenuAction(
+                label = if (width == currentWidth) "$label ✓" else label,
+                onClick = { onSelect(width) }
             )
         }
     }
