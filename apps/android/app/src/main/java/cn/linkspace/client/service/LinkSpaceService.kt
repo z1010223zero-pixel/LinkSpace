@@ -1210,14 +1210,19 @@ class LinkSpaceService private constructor(private val appContext: Context) {
     private fun startStreamDecoder() {
         if (streamDecoder != null) return
         startAnrWatchdog()
+        var decoderRef: StreamDecoder? = null
         val decoder = StreamDecoder(
             onFrame = { bmp ->
+                if (streamDecoder !== decoderRef) return@StreamDecoder
                 // 直投视图（submit 内部按 vsync 合流重绘），不经主线程
                 // Handler——解码快于绘制时逐帧 post 会洪泛主线程把触摸
                 // 事件饿出 ANR（真机踩过）
                 streamRenderView?.get()?.submit(bmp)
             },
             onEnded = { reason ->
+                // 老解码器可能在换分辨率、新实例已登记后才走到 onEnded。
+                // 这里必须按实例判等，否则老回调会把新解码器一起 shutdown。
+                if (streamDecoder !== decoderRef) return@StreamDecoder
                 _inputMessage.value = reason
                 _screenStream.value = null
                 // 解码线程的任何死亡（断流/内部错误）都必须同时清掉引用：
@@ -1226,12 +1231,14 @@ class LinkSpaceService private constructor(private val appContext: Context) {
                 streamDecoder = null
             },
             onSize = { w, h ->
+                if (streamDecoder !== decoderRef) return@StreamDecoder
                 streamFallbackSize = w to h
                 // 解码实际尺寸（流内 SPS）回灌 UI：letterbox 等比渲染以它为准
                 // （session.start 时声明的尺寸可能与 ffmpeg 实际推流输出不同）
                 _screenStream.value = ScreenStreamInfo(w, h)
             }
         )
+        decoderRef = decoder
         streamDecoder = decoder
         synchronized(pendingVideo) {
             while (pendingVideo.isNotEmpty()) decoder.feed(pendingVideo.poll())
