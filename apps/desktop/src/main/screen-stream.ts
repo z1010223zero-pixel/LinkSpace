@@ -108,10 +108,11 @@ export class ScreenStreamService {
       // 问题，是 libx264 位流与该 ROM 解码器栈的相性，换 MF 直接绕开。
       '-vf', "scale='min(1920,iw)':-32",
       '-c:v', 'libx264',
-      '-preset', 'medium',
-      // 关 lookahead：medium 默认攒 40 帧（约 1.3s）才出首帧，是投屏
-      // 启动 3-5s 延迟的大头；sync-lookahead 同理
-      '-x264-params', 'rc-lookahead=0:sync-lookahead=0',
+      '-preset', 'ultrafast',
+      '-tune', 'zerolatency',
+      // zerolatency 已关 lookahead/sync lookahead；这里再显式钉住，
+      // 并关 sliced-threads 保持单 slice 兼容性
+      '-x264-params', 'rc-lookahead=0:sync-lookahead=0:sliced-threads=0',
       // GOP 30（1s 一个 IDR，丢帧后 1s 内自愈）
       '-g', '30',
       '-pix_fmt', 'yuv420p',

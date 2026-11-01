@@ -985,7 +985,8 @@ export class Host {
         requested = 0
       }
       const vs = this.opts.inputVirtualScreen?.()
-      let region = displays[Number(requested)] ?? null
+      let region: { x: number; y: number; w: number; h: number } | null =
+        displays[Number(requested)] ?? null
       // 与虚拟屏物理边界求交：Electron DIP 边界乘 scaleFactor 换算物理
       // 坐标有 ±1px 舍入漂移，越界 1px gdigrab 直接拒开（实测
       // Capture area extends outside window area）
