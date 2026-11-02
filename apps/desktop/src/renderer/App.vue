@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type {
+  DeviceBindingView,
   DeviceEdge,
   DeviceView,
   DiscoveredDevice,
@@ -22,6 +23,8 @@ import SessionBanner, { type BannerItem } from './components/SessionBanner.vue'
 import TransferList from './components/TransferList.vue'
 
 const devices = ref<DeviceView[]>([])
+/** 显式绑定清单（serial↔deviceId），屏幕页绑定入口用 */
+const bindings = ref<DeviceBindingView[]>([])
 const sessions = ref<SessionView[]>([])
 const transfers = ref<TransferTaskView[]>([])
 const transferInfo = ref<TransferInfo | null>(null)
@@ -395,6 +398,22 @@ async function loadTrusted(): Promise<void> {
   ensureSelection()
 }
 
+async function loadBindings(): Promise<void> {
+  const list = await window.linkspace.listBindings().catch(() => [])
+  bindings.value = Array.isArray(list) ? list : []
+}
+
+/** 可绑定的已配对 Android 设备（投屏只针对平板/手机） */
+const bindTargets = computed(() =>
+  trusted.value.filter((t) => t.deviceType === 'android-phone' || t.deviceType === 'android-tablet')
+)
+
+/** serial 对应的已配对显示名（DeviceView.deviceId → trusted），未解析到为 null */
+function pairedNameFor(device: DeviceView): string | null {
+  if (!device.deviceId) return null
+  return trusted.value.find((t) => t.deviceId === device.deviceId)?.displayName ?? null
+}
+
 async function connectAndPair(svc: DiscoveredDevice): Promise<void> {
   await withBusy('pair:' + svc.serviceName, async () => {
     clearNotice()
@@ -512,6 +531,32 @@ async function startMirror(serial: string, index: number): Promise<void> {
       await loadSessions()
       await loadDevices()
     }
+  })
+}
+
+async function bindDevice(serial: string, deviceId: string): Promise<void> {
+  await withBusy('bind:' + serial, async () => {
+    clearNotice()
+    const res = await window.linkspace.bindDevice(serial, deviceId)
+    if (!res.ok) {
+      pushNotice(res.error.message)
+      return
+    }
+    await loadBindings()
+    await loadDevices()
+  })
+}
+
+async function unbindDevice(serial: string): Promise<void> {
+  await withBusy('unbind:' + serial, async () => {
+    clearNotice()
+    const res = await window.linkspace.unbindDevice(serial)
+    if (!res.ok) {
+      pushNotice(res.error.message)
+      return
+    }
+    await loadBindings()
+    await loadDevices()
   })
 }
 
@@ -901,6 +946,7 @@ onMounted(async () => {
   await loadDiscovered()
   await loadPairings()
   await loadTrusted()
+  await loadBindings()
   await loadLayout()
   await loadInputState()
   await loadReverseStatus()
@@ -1324,7 +1370,9 @@ onBeforeUnmount(() => {
           <template v-else-if="currentPage === 'screen'">
             <section class="card">
               <h3 class="card__title">投屏设置</h3>
-              <p class="card__sub">把 Android 设备的画面投到电脑上（scrcpy）。画质档位决定分辨率与码率。</p>
+              <p class="card__sub">
+                把 Android 设备的画面投到电脑上（scrcpy，过渡方案：反向流可用时优先走反向流）。画质档位决定分辨率与码率。
+              </p>
               <div class="settings-row">
                 <div class="settings-row__text">
                   <div class="settings-row__label">投屏画质</div>
@@ -1350,8 +1398,13 @@ onBeforeUnmount(() => {
                   :stop-busy="
                     busy['stop-mirror:' + (sessionsFor(device.serial).find((s) => s.state === 'starting' || s.state === 'running' || s.state === 'stopping')?.id ?? '')]
                   "
+                  :bind-targets="bindTargets"
+                  :paired-name="pairedNameFor(device)"
+                  :bind-busy="busy['bind:' + device.serial] || busy['unbind:' + device.serial]"
                   @start="startMirror"
                   @stop="stopMirror"
+                  @bind="bindDevice"
+                  @unbind="unbindDevice"
                   @drag-start="onDragStart"
                   @drag-enter="onDragEnter"
                   @drag-end="onDragEnd"

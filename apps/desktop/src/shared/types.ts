@@ -26,6 +26,25 @@ export interface DeviceView {
   wireless: boolean
   /** 该设备上处于活跃状态的会话 */
   activeSessions: SessionView[]
+  /**
+   * 2.5-1 统一设备模型：adb serial 解析到的 LinkSpace 身份。
+   * 未解析到已配对设备时 deviceId 为 null、paired/bound/scrcpyAllowed 全假；
+   * UI 据此决定「启动投屏」是否可点、是否要先绑定，不再拿两套模型各说各话。
+   */
+  deviceId: string | null
+  /** 是否已配对（信任清单内） */
+  paired: boolean
+  /** 是否存在用户显式建立的 serial↔deviceId 绑定 */
+  bound: boolean
+  /** 门禁是否会放行（配对 + 绑定/IP-join 已满足），与 scrcpy:startFor 同口径 */
+  scrcpyAllowed: boolean
+}
+
+/** 显式绑定条目（serial↔deviceId，USB 投屏前置条件），供屏幕页绑定入口展示 */
+export interface DeviceBindingView {
+  serial: string
+  deviceId: string
+  boundAt: number
 }
 
 /** 投屏画质档位。高清不压分辨率，代价是 Wi-Fi 下更吃带宽 */
@@ -212,6 +231,12 @@ export interface LinkSpaceApi {
   startMirror(serial: string, opts?: StartOptions): Promise<IpcResult<SessionView>>
   stopMirror(id: string): Promise<IpcResult<void>>
   listSessions(): Promise<SessionView[]>
+  /** 显式绑定清单（serial↔deviceId，USB 投屏前置条件） */
+  listBindings(): Promise<DeviceBindingView[]>
+  /** 把一台 adb 设备绑定到一台已配对设备（deviceId 须已配对） */
+  bindDevice(serial: string, deviceId: string): Promise<IpcResult<void>>
+  /** 删除一条显式绑定 */
+  unbindDevice(serial: string): Promise<IpcResult<void>>
   envInfo(): Promise<EnvInfo>
   listTransfers(): Promise<TransferTaskView[]>
   /** 接收方：弹目录选择框并接受传输，value 为所选目录（取消时为 null） */

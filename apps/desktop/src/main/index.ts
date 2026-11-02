@@ -127,6 +127,11 @@ const host = new Host({
   inputReleaseAll: inputSink ? () => inputSink.releaseAll() : undefined
 })
 
+// 2.5-1 统一设备模型：设备列表（adb 枚举）经 Host 的身份解析并上 LinkSpace
+// 身份（deviceId/配对/绑定），UI 不再拿两套模型各说各话。DeviceManager 本身
+// 不直接依赖 Host（保持可测试），只接一个解析回调。
+devices.setIdentityResolver((serial) => host.scrcpyIdentityOf(serial))
+
 // 边缘穿越（7.1）：光标贴到已分配设备的边缘即自动发起控制请求。
 // 采集层只在非控制态喂坐标，控制中不会再次触发。
 const edgeSwitcher = new EdgeSwitcher({

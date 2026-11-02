@@ -27,6 +27,22 @@ export interface DeviceBinding {
   boundAt: number
 }
 
+/**
+ * scrcpy 设备身份（2.5-1 统一设备模型）：adb 侧的 serial 解析到 LinkSpace
+ * 侧的 deviceId 后的快照。DeviceManager.view() 经它把两套模型并成一套，
+ * UI 据此决定「启动投屏」是否可点、是否要先绑定。
+ */
+export interface ScrcpyIdentity {
+  /** 解析到的 LinkSpace deviceId，未解析到为 null */
+  deviceId: string | null
+  /** 是否已配对（信任清单内） */
+  paired: boolean
+  /** 是否存在用户显式建立的 serial↔deviceId 绑定 */
+  bound: boolean
+  /** 门禁是否会放行（配对 + 绑定/IP-join 已满足） */
+  allowed: boolean
+}
+
 export interface DeviceBindingStoreOptions {
   /** 绑定文件所在目录；与 TrustStore 同处一个 dataDir。测试可注入临时目录 */
   dir?: string

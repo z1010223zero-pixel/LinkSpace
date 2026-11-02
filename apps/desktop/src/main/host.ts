@@ -17,6 +17,7 @@ import {
   resolveScrcpyDeviceId,
   serialBelongsToDevice,
   type DeviceBinding,
+  type ScrcpyIdentity,
   type ScrcpyResolveResult
 } from './device-binding'
 import { TransferManager, type TransferFile, type TransferTask } from './transfer/manager'
@@ -542,6 +543,27 @@ export class Host {
         return null
       }
     })
+  }
+
+  /**
+   * scrcpy 设备身份快照（2.5-1）：供 DeviceManager.view() 把 adb 列表与
+   * 配对清单并成一套。allowed 直接复用门禁判定，与 scrcpy:startFor 同口径；
+   * deviceId 为 null 表示 serial 解析不到任何已配对设备（UI 上显示未配对）。
+   * 注意：无线未配对设备即使在线也不会暴露 deviceId——身份只来自已配对
+   * 的连接或显式绑定，不拿 IP/型号反推。
+   */
+  scrcpyIdentityOf(serial: string): ScrcpyIdentity {
+    const boundId = this.bindings.deviceIdOf(serial)
+    const gate = this.resolveScrcpyDevice(serial)
+    if (gate.ok) {
+      return { deviceId: gate.deviceId, paired: true, bound: gate.via === 'binding', allowed: true }
+    }
+    return {
+      deviceId: boundId,
+      paired: boundId !== null && this.trust.isKnown(boundId),
+      bound: boundId !== null,
+      allowed: false
+    }
   }
 
   /**
