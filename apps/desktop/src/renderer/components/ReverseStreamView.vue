@@ -10,7 +10,7 @@ import type {
 // 输入经 IPC 走 input.event 落到平板。
 //
 // B 线 UI 重设计（docs/ui-redesign.md §3.2）：标题栏常驻 + 工具栏默认折叠，
-// 深色走 §5 token（A 线未在 style.css 落 .theme-dark 前，先在 scoped 里定义同名变量），
+// 深色走 §5 token：全局 .theme-dark（style.css）提供，组件内不再重复定义。
 // 状态行只留分辨率与控制状态，调试信息（帧数/MB/关键帧重同步）进“详情”展开项。
 // 只改表现层：画布指针/滚轮/键盘转发逻辑、IPC 调用一律不动。
 //
@@ -310,7 +310,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="rs-view">
+  <div class="rs-view theme-dark">
     <header class="rs-titlebar">
       <span class="rs-title">{{ peerName }} 的屏幕</span>
       <span v-if="qualityLabel" class="rs-quality-badge">{{ qualityLabel }}</span>
@@ -404,15 +404,6 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .rs-view {
-  /* 深色 token（docs/ui-redesign.md §5）：A 线尚未在 style.css 落 .theme-dark，
-     先在组件内用同名变量定义；A 线到位、窗口挂上 .theme-dark 后删掉这里，改由全局接管。
-     强调色不重定义，沿用全局 --accent #2f6bff。 */
-  --bg: #161617;
-  --surface: #1e1e1f;
-  --surface-2: #232325;
-  --text: #e8eaed;
-  --text-secondary: #9aa0a6;
-  --border: #2c3138;
   display: flex;
   flex-direction: column;
   height: 100vh;
