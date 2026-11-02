@@ -36,7 +36,8 @@ import kotlin.math.roundToInt
  * 触控与手势逻辑不动；B 线只加一层表现：根部包局部深色 token
  * （docs/ui-redesign-android.md §2.1：只包 ScreenMirrorScreen，
  * 不做全局深色模式；此前靠硬编码 Color.Black 撑场）。
- * 标题栏见 [StreamTopBar]（提交 2 接入）。
+ * 标题栏见 [StreamTopBar]：设备名 · 画质徽章常驻，工具栏默认折叠；
+ * 延迟位等服务层补字段后再填数，不编造。
  *
  * 手势语义（VNC 惯例）：
  *   - 单指滑动 = 移动光标（绝对坐标，无按键）
@@ -45,11 +46,22 @@ import kotlin.math.roundToInt
  *   - 双指滑动 = 滚轮
  */
 @Composable
-fun ScreenMirrorScreen(service: LinkSpaceService, info: LinkSpaceService.ScreenStreamInfo) {
+fun ScreenMirrorScreen(
+    service: LinkSpaceService,
+    info: LinkSpaceService.ScreenStreamInfo,
+    clipboardEnabled: Boolean,
+    onClipboardToggle: (Boolean) -> Unit
+) {
     val controller = service.input
     val scrollAccum = remember { floatArrayOf(0f) }
     // 会话声明的本机屏幕（触控坐标空间基准，来自 session.accept）
     val inputState by service.inputState.collectAsStateWithLifecycle()
+    // 标题栏设备名：已信任列表里按 peerId 查显示名，查不到就显示原始 peerId
+    //（与首页反向推流卡同一口径）；peerId 为空时退回“电脑”。
+    val trusted by service.trusted.collectAsStateWithLifecycle()
+    val peerName = inputState.peerId?.let { peerId ->
+        trusted.firstOrNull { it.deviceId == peerId }?.displayName ?: peerId
+    } ?: "电脑"
     // 触控模式：false=点哪指哪（绝对映射）；true=滑动跟随（触控板语义，
     // 用户 2026-10-31 提出可切换）
     var relativeMode by remember { mutableStateOf(false) }
@@ -235,6 +247,23 @@ fun ScreenMirrorScreen(service: LinkSpaceService, info: LinkSpaceService.ScreenS
                             }
                         }
                     }
+            )
+            // 常驻标题栏（B 线新增，审计问题 7/14 的缺口）：设备名 · 画质徽章
+            // + chevron + 关闭；工具栏默认折叠。标题栏在触控层之上，
+            // 其按钮先消费触摸；栏面空白处触摸会透传到触控层（仍移动光标）。
+            StreamTopBar(
+                deviceName = peerName,
+                scaleWidth = streamScaleWidth,
+                // latencyText 暂不传：服务层无延迟字段，见 StreamTopBar 头注释
+                relativeMode = relativeMode,
+                onToggleMode = { relativeMode = !relativeMode },
+                clipboardEnabled = clipboardEnabled,
+                onClipboardToggle = onClipboardToggle,
+                onSelectScaleWidth = { width ->
+                    service.requestScreenStream(displayIndex = -1, scaleWidth = width)
+                },
+                onClose = { service.stopScreenStream() },
+                modifier = Modifier.align(Alignment.TopCenter)
             )
             // 悬浮控制球（ToDesk 式）：拖动可停靠任意位置，点按展开菜单。
             // 独立 hit 区 + 可拖离屏幕边缘，不受系统状态栏/触控层遮挡

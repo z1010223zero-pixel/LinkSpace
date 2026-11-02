@@ -52,6 +52,9 @@ internal object StreamTokens {
     val CornerMd = 8.dp
     val CornerLg = 12.dp
 
+    /** 胶囊圆角 999dp（徽章 / 标签） */
+    val CornerPill = 999.dp
+
     // ---- 字号 token（12/13/14/16/20 档里 B 线用到的） ----
     /** 投屏标题栏设备名 */
     val TitleSize = 16.sp

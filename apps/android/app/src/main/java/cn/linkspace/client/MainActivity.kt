@@ -260,7 +260,7 @@ fun MainScreen(service: LinkSpaceService, onClipboardToggle: (Boolean) -> Unit) 
     if (inputState.phase == "active") {
         val ss = screenStreamInfo
         if (ss != null) {
-            ScreenMirrorScreen(service, ss)
+            ScreenMirrorScreen(service, ss, clipboardEnabled, onClipboardToggle)
         } else {
             TouchpadScreen(service)
         }
