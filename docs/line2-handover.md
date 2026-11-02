@@ -1,7 +1,7 @@
 # 线 2 交接文档：`decision/line2-accessibility-first`
 
 > 面向接手者：用户本地 Windows 工作区（`d:\test\testforai\LinkSpace`）的 agent。
-> 写于 2026-11-02，对应分支头 `9726dcd`。目标：**只读本文 + 文中引用的文档，不用再问，就能开工。**
+> 写于 2026-11-02，2026-11-03 更新至分支头 `a9436b1`。目标：**只读本文 + 文中引用的文档，不用再问，就能开工。**
 >
 > 与 `docs/HANDOVER.md` 的关系：那份是 **2026-10-29 的旧快照**（阶段 3 合并前，文件头自己标了过时），里面的许可证说法（GPL）已被 2026-10-30 的路线 B 推翻、阶段 3 状态、验证脚本数量都过期了。**不要用它接手线 2**，线 2 的交接只认本文。
 
@@ -13,7 +13,7 @@
 
 | 项 | 值 |
 |---|---|
-| 开发分支（只动它） | `decision/line2-accessibility-first`，头 `9726dcd`（2026-11-02） |
+| 开发分支（只动它） | `decision/line2-accessibility-first`，头 `a9436b1`（2026-11-03） |
 | master（不动，不合并） | `73a61fa`，与本分支的共同祖先；本分支的全部工作都不在 master 上 |
 | 线 2 的含义 | 电脑控平板/手机：电脑窗口里看到平板画面并用键鼠操作 |
 
@@ -27,10 +27,10 @@ git fetch origin
 git status          # 有未提交的改动先处理（stash 或提交），再切分支
 git checkout decision/line2-accessibility-first
 git pull --ff-only origin decision/line2-accessibility-first
-git log --oneline -1   # 应为 9726dcd
+git log --oneline -1   # 应为 a9436b1
 ```
 
-切完先核对：`git log --oneline 73a61fa..HEAD` 应列出 9 个提交（89a41b9、1212163、7e3ded3、85fa40f、16a2d65、1effd24、545d428、374834b、9726dcd）。
+切完先核对：`git log --oneline -1` 为 `a9436b1`；`git log --oneline 73a61fa..HEAD` 自 9726dcd 起又多了 UI 重设计、未阻塞项两波与若干合并提交，不再是 9 个。
 
 ### 0.3 先读文档的顺序
 
@@ -45,7 +45,7 @@ git log --oneline -1   # 应为 9726dcd
 ## 1. 项目与方向（5 分钟版）
 
 - **差异点（2026-11-02，用户定，`architecture.md` C7 / ADR-009）**：任一设备可以控制其他设备——**对称互控、带画面，不分主控/被控方向**。区别于 TwinDesk（Remote 是无屏纯输入，电脑控平板需无线调试配对门槛）和 ToDesk/RustDesk（以远程桌面为主线）。
-- **现状**：线 1 平板控电脑已实现（带画面 + 键鼠）；线 2 电脑控平板做到“能控起来”（见 §2，W1–W7），但**真机联调全部未验证**；线 3 平板当扩展屏产品里为零，IddCx PoC 通过但代码在仓外。
+- **现状**：线 1 平板控电脑已实现（带画面 + 键鼠）；线 2 电脑控平板做到“能控起来”（见 §2，W1–W7），未阻塞项七项已实现（见 §2 新增），但**真机联调全部未验证**；线 3 平板当扩展屏产品里为零，IddCx PoC 通过但代码在仓外。
 - **线 2 选型（已定，记在分支，不在 master）**：
   - 注入选 **A：AccessibilityService 为主**，scrcpy 只当过渡；回退条件写死：A 在联想小新平板 Pro GT 真机验证中任一硬指标不过（输入延迟、中文输入、剪贴板、断网恢复），则回退重评 B（adb/scrcpy 产品化）。
   - **无人值守先不做，每次控制平板端确认**；以后可加“信任设备自动放行”opt-in（未决）。
@@ -120,50 +120,29 @@ git log --oneline -1   # 应为 9726dcd
 - builder 合并树（`/data/home/linkspace-build-coord2`，头 9726dcd）：`:app:testDebugUnitTest :app:assembleDebug` **BUILD SUCCESSFUL（40s，41 个任务）**，APK **41,997,106 字节**，单测 **65 项 0 失败**，构建日志 **0 警告**。最新 APK 就在这个目录：`/data/home/linkspace-build-coord2/apps/android/app/build/outputs/apk/debug/app-debug.apk`。
 - 注意：builder 上 `/data/home/linkspace-build` 那个检出还停在 1effd24（旧 APK），不要用它；合并树在 `linkspace-build-coord2`。
 
+### 未阻塞项第一波 + 第二波（2026-11-03，头 `a9436b1`，用户令“先继续开发未阻塞项”）
+
+> 七项全部已推到决策分支，master 未动。每项先在各自 `wip/next-*` 草稿分支上做、协调人逐项核实后合并；合并冲突三处（protocol.json 单行 JSON、check-protocol.mjs、verify-input.ts）均由协调人按“两边内容都保留”解决，其中 check-protocol 曾出现两个 §7（协调人已在 `a9436b1` 改为信封 §8、文本直通 §9）。
+
+- **① mvp-acceptance.md 线 2 验收组（`d71c45d`）**：新增第 10 组 10.1–10.16，与任务清单 2.6 一一对应；组头标注全部须真机走查；原第 10 组发布门限顺延为第 11 组，线 2 门限是否纳入第一版发布门限待定。
+- **② screen.stream.stop 方向位（`9488134`）**：stop payload 加 `direction?: "forward" | "reverse"`，缺失按旧版本规则解析（单路停那路、双向只停 forward），接收方只在确实停掉一路时才回发同 direction 确认；协议 §4.7 + protocol.json 已登记；并发停流行为待 2.6 真机走查。
+- **③ 左右键映射（`b175615`）**：右键返回、中键 Home（抬起时触发），左键不变；`b` 端到端早已透传，塌陷只在 Android 注入端；协议 §4.6 + protocol.json 已登记。
+- **④ scrcpy 收敛（2.5，`7a738cf`）**：2.5-1 设备模型统一（adb 设备并 LinkSpace 身份，preload 暴露绑定入口，DeviceCard 可绑/解绑；补了 W2 剩余的最大口子）+ 2.5-2 反向流优先（反向流在跑时拒 scrcpy 同设备启动、发起成功后停同设备 scrcpy）+ 断开恢复（枚举失败保旧列表、连续两次不见约 10 秒才停会话）；退役条件写进 `modules/scrcpy-adapter/README.md`。
+- **⑤ 中文输入通道（2.3-3，`8b36ed4`）**：调研见 `docs/chinese-input-research.md`（RustDesk 源码核实：无自研输入法，整段文本走 commitText、按键走 sendKeyEvent；ToDesk 机制查不到；scrcpy 官方文档 v5.0.1）；实现 B1 拼音直通（默认）+ B2 新消息 `input.text` → `commitText`（8 KiB/段分段，超限整条丢弃回 `input.error`）+ C `screen.paste` 补桌面→平板接收侧（此前根本不存在）；`input.error` 五类失败回传（no-focus / accessibility-disabled / unsupported-version / inject-failed / too-large）；画面窗口输入模式开关 + “电脑输入法请切英文”常驻提示；B1/B2 同一输入框不混用。新核实：`AccessibilityInputConnection` 白名单只有 9 个方法，`commitText` 返回 void 无成功回执，`finishComposingText` 不可用。**B1 能否成立取决于平板自带输入法是否响应 `sendKeyEvent` 组字，是最大不确定性，待 2.6 真机走查。**
+- **⑥ from-to 身份绑定 + id 去重（`f5a9af7`）**：from 绑定 fail-closed（丢弃 + 记告警，不断连；首条 announce 登记后固定）+ id 去重每连接最近 1024 条（`dedupMaxIdsPerConnection`）；protocol.md §3 缺口已关闭。
+- **合并树验证（分支头 `a9436b1`，协调人独立重跑）**：a1：`npm run build` 通过、typecheck 0、`verify:input` / `verify:binding` 全部通过、`verify:protocol` **112 项 0 失败 4 警告**。builder 合并树（`/data/home/linkspace-build-final`，头 a9436b1）：`:app:assembleDebug` BUILD SUCCESSFUL，APK **42,188,968 字节**，单测 **100 项 0 失败**。最新 APK 就在这个目录：`/data/home/linkspace-build-final/apps/android/app/build/outputs/apk/debug/app-debug.apk`。
+- 注意：builder 上 `/data/home/linkspace-build-coord2` 的检出还停在 9726dcd（旧 APK），不要用它；合并树在 `linkspace-build-final`。builder `/` 根分区已约 99–100% 满（仅剩约 0.1 GiB），构建走 `/data` + `TMPDIR=/data/home/tmp`。
+
 ---
 
 ## 3. 下一步任务（按顺序，含依赖）
 
-> 顺序即依赖顺序。2.6 真机走查可以、也应当尽早并行——它验证 W5–W7，也直接决定回退条件是否触发。
+> 2026-11-03 更新：本节原 3.1–3.5 的五项（中文输入、scrcpy 收敛、stop 方向位、左右键映射、mvp-acceptance 线 2 验收组）与 from-to 绑定 + id 去重已全部实现并合进本分支（见 §2 新增小节）。下面只剩真机走查与两项未动的线 2 子项。
 
-### 3.1 中文输入通道（任务清单 2.3-3）——第一优先
+### 3.1 人工走查 2.6（真机：联想小新平板 Pro GT）——下一步第一优先
 
-- **为什么先做**：W5 已证实按键注入走不通中文输入（见 §5），这是线 2 相对线 1 最大的功能缺口；不解决它，电脑控平板在中文场景下不可用。
-- **入口文件**：桌面 `apps/desktop/src/renderer/components/ReverseStreamView.vue`（输入通道）、`apps/desktop/src/main/input/session.ts`；Android `apps/android/app/src/main/java/cn/linkspace/client/service/LinkSpaceAccessibilityService.kt`、`ControlledInputInjector.kt`；协议 `docs/protocol.md` §4.6（先登记再动手，`[PROTOCOL]` 标签，见 §6）。
-- **约束（不要走弯路）**：不能靠按键注入（`dispatchKeyEvent` 不存在）；线 1 的 `screen.paste` 粘贴 workaround（剪贴板 + Ctrl+V，无 IME 候选栏）只能当兜底，不能当正解。候选方向自行评估后定：Android 输入法通道（InputConnection `commitText` / `setComposingText`，需焦点输入框）、或自研输入法、或候选栏同步方案。
-- **验收标准**：在平板自带输入法界面输入中文，候选栏跟随、组词不丢字、切窗口不乱；写入 2.6 走查清单并真机打勾。
-
-### 3.2 scrcpy 收敛（任务清单 2.5）
-
-- **已完成的部分**：2.5-1 的核心（W2）：scrcpy 启动走配对授权、撤销信任级联断开、设备绑定模型（`device-binding.ts`）。
-- **剩下的事**：
-  - `devices:bind` 的**渲染层 UI 未接**（只有 IPC channel）：用户在桌面端显式建立 USB 绑定关系要有入口，否则 USB 设备永远 fail closed。
-  - 2.5-2 收尾：scrcpy 明确标为**过渡方案**并写清下线条件（反向流已跑通，下线条件是 2.6 走查通过后移除 scrcpy 控制路径，只保留过渡期开关）；用户在 LinkSpace 窗口内完成全部操作，无需感知 scrcpy 进程。
-- **入口文件**：`apps/desktop/src/main/device-binding.ts`、`apps/desktop/src/main/scrcpy-adapter.ts`（只在确需时最小改动）、`apps/desktop/src/main/ipc.ts`、`apps/desktop/src/renderer/App.vue`。
-- **验收标准**：未配对设备无法启动 scrcpy（已做）；撤销信任即断开 scrcpy 会话（已做）；USB 绑定有 UI 入口且绑定关系与信任条目同处；过渡方案有明确的下线条件（写进文档，不只口头）。
-
-### 3.3 `screen.stream.stop` 加方向位（`protocol.md` §4.7 已知局限）
-
-- **问题**：`screen.stream.stop` 目前是 `{}`，没有方向位；双向流同时在跑时一方停流会把另一方也停掉。
-- **入口文件**：`docs/protocol.md` §4.7、`modules/protocol/protocol.json`（先登记，`[PROTOCOL]` 标签）、`apps/desktop/src/main/screen-stream.ts`、`apps/android/.../service/ReverseScreenStreamer.kt`、`LinkSpaceService.kt`。
-- **验收标准**：双向流并发时停一方不影响另一方；`verify:input` 新增对应断言并通过；协议登记与两端实现一致。
-
-### 3.4 左右键映射（W5 已知局限）
-
-- **问题**：目前左/右/中键都落成同一种点按（见 W5 提交记录与 2.6 清单）。
-- **入口文件**：`apps/android/.../service/ControlledInputInjector.kt`、`LinkSpaceAccessibilityService.kt`（`dispatchGesture` 的手势语义区分）。
-- **验收标准**（按 2.6 清单）：左键点按、**右键返回、中键 Home**、滚轮方向正确；JVM 单测覆盖映射关系；真机打勾。
-
-### 3.5 其余未完成项（同属线 2，不要漏）
-
-- **2.4-2 断线恢复**：控制链路断开后平板侧恢复本机输入、不卡键、不残留注入状态；断网/息屏/锁屏后恢复本机输入正常。入口：`ControlledInputSession.kt` + `LinkSpaceService.kt` 断连路径；验收：`verify:heartbeat` 级别的断线用例有无头或真机记录。
-- **2.4-3 剪贴板防回环**：电脑与平板两套剪贴板同步不互推回环（scrcpy 与 LinkSpace 两套同步并存时的风险见 `docs/scrcpy-manual-checklist.md` §3.6）。验收：双向各复制一次，内容各到对端一次，不循环放大；超 512 KiB 按线 1 口径处理。
-- **`mvp-acceptance.md` 新增线 2 验收组**：任务清单的线 2 门限要求与 2.6 一一对应，目前**还没加**（文件里搜不到“线 2”）。做 2.6 之前先把这组补上，否则门限无处打勾。
-
-### 3.6 人工走查 2.6（真机：联想小新平板 Pro GT）
-
-- **底版**：任务清单 2.6（6 大组）+ W7 新增 7 条，见 `docs/symmetric-control-tasks.md` 2.6 节，**全部未打勾**。以 `docs/scrcpy-manual-checklist.md` 为底版逐项走查。
-- **先走的顺序**：W5 的注入落点（单击/双击/长按/拖拽/滑动/右键返回/中键 Home/滚轮）→ W7 的画面窗口（入口出现、确认框、系统录屏授权框、换档位、断开/关窗口）→ W6 的码率自适应与延迟 → 断网/息屏/重启/长挂机 → 多设备不串流。
+- **底版**：任务清单 2.6 + W7 新增 7 条 + mvp-acceptance.md 第 10 组 10.1–10.16，**全部未打勾**。以 `docs/scrcpy-manual-checklist.md` 为底版逐项走查。
+- **先走的顺序**：W5 的注入落点（单击/双击/长按/拖拽/滑动/右键返回/中键 Home/滚轮）→ W7 的画面窗口（入口出现、确认框、系统录屏授权框、换档位、断开/关窗口）→ 中文输入三通道（B1 候选栏跟随是最大不确定性：平板自带输入法是否响应 `sendKeyEvent` 组字）→ W6 的码率自适应与延迟 → 断网/息屏/重启/长挂机 → 多设备不串流。
 - **真机调试现成工具**（见 `docs/agent-division.md` §3.1，仍有效）：
   - 平板无线调试端口随重连变化：`adb connect <ip>:<当前端口>`。
   - debug 广播链：`am broadcast -a cn.linkspace.DEBUG_REQUEST_CONTROL`（发起控制）→ 桌面确认 → `am broadcast -a cn.linkspace.DEBUG_SCREEN_STREAM`（发起投屏）→ `adb exec-out screencap -p > cap.png` 验画面。
@@ -171,7 +150,10 @@ git log --oneline -1   # 应为 9726dcd
   - 桌面 GUI 实例：**任何时候只跑一个**（同 userData 起双实例会 mDNS 通告互踢）；CDP 9222 主用。
 - **回退触发**：走查中任一硬指标不过（输入延迟、中文输入、剪贴板、断网恢复），按 §1 的回退条件重评 B 路线，不硬上。
 
----
+### 3.2 其余未完成项（同属线 2，不要漏）
+
+- **2.4-2 断线恢复**：控制链路断开后平板侧恢复本机输入、不卡键、不残留注入状态；断网/息屏/锁屏后恢复本机输入正常。入口：`ControlledInputSession.kt` + `LinkSpaceService.kt` 断连路径；验收：`verify:heartbeat` 级别的断线用例有无头或真机记录。
+- **2.4-3 剪贴板防回环**：电脑与平板两套剪贴板同步不互推回环（scrcpy 与 LinkSpace 两套同步并存时的风险见 `docs/scrcpy-manual-checklist.md` §3.6）。验收：双向各复制一次，内容各到对端一次，不循环放大；超 512 KiB 按线 1 口径处理。
 
 ## 4. 构建与验证手册
 
@@ -180,7 +162,7 @@ git log --oneline -1   # 应为 9726dcd
 | 环境 | 能干什么 | 不能干什么 |
 |---|---|---|
 | **a1-free-sg**（Tailscale，`ubuntu`，gh 已登录） | 桌面端全部验证（§4.2）；打 git bundle 中转 | **无 Android SDK、无 Docker、无 gradle**，Android 编不了；无 mDNS 环境，`verify:e2e` 在干净 HEAD 上同样失败；`npm run verify` 主项因无 adb 设备失败（0 台在线）——都是环境限制，不是代码问题 |
-| **InstaBox builder**（`m_agqwzic66hiyg72z25qnpnwayy`） | Android 编译（§4.3） | gh **未登录**、无任何 GitHub 凭证，私有仓拉不下来；`/` 根分区 **100% 满只剩 150M**，所有东西必须放 `/data/home` 下；无平板，编过 ≠ 真机验证 |
+| **InstaBox builder**（`m_agqwzic66hiyg72z25qnpnwayy`） | Android 编译（§4.3） | gh **未登录**、无任何 GitHub 凭证，私有仓拉不下来；`/` 根分区 **约 99–100% 满仅剩约 0.1 GiB**，所有东西必须放 `/data/home` 下（构建另设 `TMPDIR=/data/home/tmp`）；无平板，编过 ≠ 真机验证 |
 | **Windows 本地**（`d:\test\testforai\LinkSpace`） | **首选**：桌面 + Android 都能编能跑，真机联调只能在这里做 | 工具链在 `.toolchain/`（见 §4.3），**不在仓内**（已加入 `.gitignore`），换机器要重装 |
 
 > 更正一条旧说法：方向文档 §5 已纠正，a1 实有 **Java 21 与 Maven**、Node 24/npm 11；缺的是 Android SDK、Docker、gradle。
@@ -193,7 +175,7 @@ npm install
 npm run typecheck            # vue-tsc --noEmit，0 错误
 npm run verify:input         # 含 W7 新增 6.5 节 13 项断言，全部通过
 npm run verify:binding       # scrcpy 门禁与撤销级联，全部通过
-npm run verify:protocol      # 75 项通过、0 失败、4 项预期内警告
+npm run verify:protocol      # 112 项通过、0 失败、4 项预期内警告（2026-11-03 未阻塞项合进后）
 npm run build                # electron-vite build，通过
 # 回归（改协议/传输/配对/剪贴板/心跳后加跑）：
 npm run verify:transfer && npm run verify:pairing && npm run verify:heartbeat \
@@ -229,18 +211,18 @@ export GRADLE_USER_HOME="/d/test/testforai/LinkSpace/.toolchain/gradle-home"  # 
 #     compileSdk 35 必须有 android-35；/opt/android-sdk 只有 android-34，别用它）
 #   GRADLE_USER_HOME=/data/home/.gradle
 # 构建（在 builder 上执行）：
-cd /data/home/linkspace-build-coord2/apps/android
+cd /data/home/linkspace-build-final/apps/android
 ANDROID_HOME=/data/home/android-sdk GRADLE_USER_HOME=/data/home/.gradle \
   /data/home/gradle-8.10.2/bin/gradle :app:testDebugUnitTest :app:assembleDebug --no-daemon
-# 产物：app/build/outputs/apk/debug/app-debug.apk（9726dcd 是 41,997,106 字节）
+# 产物：app/build/outputs/apk/debug/app-debug.apk（a9436b1 是 42,188,968 字节）
 ```
 
 **代码更新到 builder 的流程**（builder 上 gh 未登录，私有仓拉不下来，不要绕路去登录——走 bundle 中转）：
 
 1. a1 上：`gh repo clone z1010223zero-pixel/LinkSpace /tmp/linkspace-x -- --branch decision/line2-accessibility-first`，再 `git bundle create /tmp/linkspace.bundle HEAD`（约 1MB）。
-2. 本地中转：`scp` 下来。传包脚本在 Muse 本地 `~/workspace/upload_bundle.py`（按需复用）：把 bundle 拆成 50KB 一段 base64，经 InstaBox exec API 传到 builder（**exec 单条命令上限 65536 字节**，超了会报 400）。
+2. 本地中转：`scp` 下来。传包脚本在 Muse 本地 `~/workspace/upload_bundle_param.py <唯一前缀> <唯一目标名>`（按需复用）：把 bundle 拆成 50KB 一段 base64，经 InstaBox exec API 传到 builder（**exec 单条命令上限 65536 字节**，超了会报 400）。**分块文件与 builder 目标名必须用唯一随机后缀，共享默认名已被并行工人互相覆盖损坏过两次；传完按 sha256 校验通过后再解码。**
 3. builder 上：`base64 -d` 还原后 `git clone /data/home/linkspace.bundle <新目录>`（bundle 只带 HEAD 一个提交、没有分支名，克隆后 `git checkout -b decision/line2-accessibility-first`）。
-4. 注意：`/data/home/linkspace-build` 那个检出还停在 1effd24，别用它；每次新建一个带后缀的目录（如 `linkspace-build-coord2`），不要覆盖正在用的。
+4. 注意：`/data/home/linkspace-build-coord2` 的检出还停在 9726dcd（旧 APK），别用它；最新在 `linkspace-build-final`（a9436b1）。每次新建一个带后缀的目录，不要覆盖正在用的；旧检出删前先确认其头提交已被决策分支 supersede。
 
 ### 4.4 验证通过的标准
 
@@ -255,13 +237,13 @@ ANDROID_HOME=/data/home/android-sdk GRADLE_USER_HOME=/data/home/.gradle \
 | 项 | 内容 | 影响 |
 |---|---|---|
 | **AccessibilityService 没有 `dispatchKeyEvent`** | 查过 android-35 的 `android.jar`，对照过 RustDesk InputService 源码。按键分三档：系统键走 `performGlobalAction`，其余走 API 33+ 输入连接 `sendKeyEvent`（只在有获得焦点的输入框时才有连接），音量键等走全局动作。**非文本场景的通用按键不在公开 API 能力内**，全量按键须走 scrcpy/adb（B 路线） | 选 A 已知的短板；中文输入不能靠按键注入（见 §3.1）；线 2 的键盘故事比线 1 窄 |
-| **`screen.stream.stop` 无方向位** | `protocol.md` §4.7 已登记：双向流并发时一方停流会停掉另一方；真要并发需给 stop 加流标识 | 见 §3.3 |
-| **左右键未映射** | 目前左/右/中键都落成同一种点按；右键返回、中键 Home 未映射 | 见 §3.4 |
+| **`screen.stream.stop` 方向位已实现** | 2026-11-03 合进分支（`9488134`）：stop 加 `direction`，协议 §4.7 已登记；并发停流行为待 2.6 真机走查 | 已实现，见 §2 新增 |
+| **左右键已映射** | 2026-11-03 合进分支（`b175615`）：右键返回、中键 Home；真机语义待 2.6 走查 | 已实现，见 §2 新增 |
 | **h264_mf 注释与 libx264 代码漂移** | `screen-stream.ts` 的注释称 2026-10-31 真机排障定论“换 h264_mf 绕开 libx264 与该 ROM 解码器的相性问题”，但代码里编码器仍是 `-c:v libx264`。二者必有一处过时 | 待 Windows 真机核实；**不要凭猜测改编码器** |
-| **中文输入通道未定** | 2.3-3，见 §3.1 | 线 2 第一优先 |
+| **中文输入通道已定 + 已实现** | 2026-11-03 合进分支（`8b36ed4`）：B1/B2/C 三通道 + `input.error`；B1 能否成立待 2.6 真机走查 | 已实现，见 §2 新增 |
 | **信任设备自动放行未定** | 无人值守的 opt-in 形态，是否做/何时做，需用户以后定 | 不在本批动手 |
-| **from 绑定与 id 去重未实现** | `protocol.md` §3 已登记为两端均未实现的已知缺口 | 不隐瞒，不谎称已实现 |
-| **mvp-acceptance.md 无线 2 验收组** | 任务清单的线 2 门限要求与 2.6 一一对应，目前文件里搜不到“线 2” | 见 §3.5，做 2.6 前先补 |
+| **from 绑定与 id 去重已实现** | 2026-11-03 合进分支（`f5a9af7`）：fail-closed 绑定 + 每连接 1024 条去重；protocol.md §3 缺口已关闭 | 已实现，见 §2 新增 |
+| **mvp-acceptance.md 线 2 验收组已补** | 2026-11-03 合进分支（`d71c45d`）：第 10 组 10.1–10.16 | 已实现，见 §2 新增 |
 
 ---
 
@@ -291,3 +273,4 @@ ANDROID_HOME=/data/home/android-sdk GRADLE_USER_HOME=/data/home/.gradle \
 | 6 | builder 上 `/data/home/linkspace-build` 检出还停在 1effd24，合并树在 `linkspace-build-coord2`；新 agent 容易拿错 APK | 本文 §2 末尾与 §4.3 显目标注；每次更新代码新建带后缀的目录 |
 | 7 | `docs/agent-division.md` 是双 Agent 时代（A/B）的文档，§1–§3 的任务编号（B-1…B-10）已过期 | 只有 §4 协议契约仍有效（本文 §6 第 4 条引用它）；其余章节当历史资料读，不要按它的任务编号开工 |
 | 8 | 任务清单 2.5-1 的门槛栏有一处显示异常（“不再有两套设备模型并存”在某些终端渲染成乱码） | 已核实文件本身是合法 UTF-8、无替换字符，是终端渲染问题，不是文件损坏；不改 |
+| 9 | 未阻塞项收尾时发现 `check-protocol.mjs` 出现两个 §7（左右键 §7 与信封 §7，协调人合并时判断条件误判导致重编号未生效），且 bundle 传输的共享默认名被并行工人互相覆盖损坏过两次 | 协调人已在 `a9436b1` 把信封改为 §8、文本直通改为 §9；传 bundle 一律用唯一随机后缀的分块目录/目标名 + sha256 校验（见 §4.3） |

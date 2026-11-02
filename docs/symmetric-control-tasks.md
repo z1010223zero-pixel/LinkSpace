@@ -8,6 +8,21 @@
 
 ---
 
+## 完成状态（2026-11-03，未阻塞项第一波 + 第二波已合进本分支，头 `a9436b1`）
+
+> 只标状态，不改各节原文的任务表述。真机走查（2.6）与线 3 仍未动。
+
+- **① mvp-acceptance.md 线 2 验收组**：已补（`d71c45d`），第 10 组 10.1–10.16，与 2.6 一一对应；线 2 门限是否纳入第一版发布门限待定。
+- **② screen.stream.stop 方向位**：已实现（`9488134`）：stop payload 加 `direction?: "forward" | "reverse"`，缺失按旧版本规则解析，接收方只在确实停掉一路时才回发确认；协议 §4.7 + protocol.json 已登记；并发停流行为待 2.6 真机走查。
+- **③ 左右键映射**：已实现（`b175615`）：右键返回、中键 Home（抬起时触发），左键不变；`b` 端到端早已透传，塌陷只在 Android 注入端；协议 §4.6 + protocol.json 已登记；真机语义待 2.6 走查。
+- **④ scrcpy 收敛（2.5）**：已实现（`7a738cf`）：2.5-1 设备模型统一（adb 设备并 LinkSpace 身份，preload 暴露绑定入口，DeviceCard 可绑/解绑）+ 2.5-2 反向流优先（反向流在跑时拒 scrcpy 同设备启动、发起成功后停同设备 scrcpy）+ 断开恢复（枚举失败保旧列表、连续两次不见约 10 秒才停会话）；退役条件写进 `modules/scrcpy-adapter/README.md`（反向流通 2.6 走查且用户确认后下线 scrcpy 启动入口）。
+- **⑤ 中文输入通道（2.3-3）**：方案已定 + 已实现（`8b36ed4`）：调研见 `docs/chinese-input-research.md`，B1 拼音直通（默认）+ B2 `input.text` → `commitText` + C `screen.paste` 补桌面→平板接收侧，降级链 B1→B2→C→A；`input.error` 五类失败回传；协议 §4.9 + protocol.json 已登记；**B1 能否成立取决于平板自带输入法是否响应 `sendKeyEvent` 组字，待 2.6 真机走查**。
+- **⑥ from-to 身份绑定 + id 去重**：已实现（`f5a9af7`）：from 绑定 fail-closed（丢弃 + 记告警，不断连；首条 announce 登记后固定）+ id 去重每连接最近 1024 条；protocol.md §3 缺口已关闭；端到端行为待 2.6 走查。
+- **验证基线（合并树 a9436b1，协调人独立重跑）**：桌面 build + typecheck 0 + verify:input/binding 全过 + verify:protocol 112 项 0 失败 4 警告；Android builder assembleDebug 成功、单测 100 项 0 失败、APK 42,188,968 字节（`/data/home/linkspace-build-final`）。
+- **仍阻塞**：2.6 真机联调、线 3（PoC 入库、display-extend、Windows 收尾、联动验证）、PC 锁屏抓屏、h264_mf 注释漂移、软编软解优化。
+
+---
+
 ## 前置 P0：把协议与会话状态机抽成共享层
 
 **为什么先做**：`modules/` 下 6 个模块目前只有 README 占位，真实现在 `apps/desktop/src/main/` 与 `apps/android/.../service/` 各写一份，协议 TS / Kotlin 靠注释手工同步（`protocol.md` 自认信封级校验、`transfer.progress` 两端均未实现）。每加一条线都要在两端各写一份且迟早写岔。
