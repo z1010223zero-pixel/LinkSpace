@@ -290,7 +290,7 @@ check('Android 中键落点 GLOBAL_ACTION_HOME', true, ktA11y.includes('GLOBAL_A
 check('Windows 右键落点 MOUSEEVENTF_RIGHTDOWN', true, tsSink.includes('MOUSEEVENTF_RIGHTDOWN'), 'input/win32/sink.ts')
 check('Windows 中键落点 MOUSEEVENTF_MIDDLEDOWN', true, tsSink.includes('MOUSEEVENTF_MIDDLEDOWN'), 'input/win32/sink.ts')
 check('protocol.md 登记左右键映射', true, md.includes('右键返回') && md.includes('GLOBAL_ACTION_BACK'), 'docs/protocol.md §4.6')
-// ---------- 7. 信封绑定与去重（协议 §3） ----------
+// ---------- 8. 信封绑定与去重（协议 §3） ----------
 check('dedupMaxIdsPerConnection', C.dedupMaxIdsPerConnection, evalNum(tsConst(tsNode, 'MAX_SEEN_MESSAGE_IDS')), 'control/node.ts MAX_SEEN_MESSAGE_IDS')
 check('dedupMaxIdsPerConnection', C.dedupMaxIdsPerConnection, evalNum(ktConst(kt, 'MAX_SEEN_MESSAGE_IDS')), 'Protocol.kt MAX_SEEN_MESSAGE_IDS')
 
@@ -314,7 +314,7 @@ mustContain('id 去重（桌面）', tsNode, 'seenIds.isDuplicate(msg.id)', 'con
 mustContain('id 去重（Android 入站）', ktServer, 'seen.isDuplicate(id)', 'TransferServer.kt')
 mustContain('id 去重（Android 出站主读循环）', ktService, 'seenIds.isDuplicate(id)', 'LinkSpaceService.kt')
 
-// ---------- 8. 文本直通 input.text / input.error（协议 4.9，线 2 中文输入） ----------
+// ---------- 9. 文本直通 input.text / input.error（协议 4.9，线 2 中文输入） ----------
 const inputTextEntry = protocol.messageTypes.find((m) => m.type === 'input.text')
 check('input.text payload', ['sessionId', 'text'], inputTextEntry?.payload ?? null, 'protocol.json messageTypes')
 const inputErrorEntry = protocol.messageTypes.find((m) => m.type === 'input.error')
