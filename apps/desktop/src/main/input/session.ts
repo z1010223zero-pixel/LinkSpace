@@ -311,6 +311,11 @@ export class InputController {
     return this.active?.peerId ?? null
   }
 
+  /** 是否有控制请求已发出、等对端确认（线 2 W7：反向窗口据此不重发） */
+  get hasPendingRequest(): boolean {
+    return this.pending.size > 0
+  }
+
   /**
    * 请求控制对端。Promise 在 accept/reject/超时三者之一时落定。
    * 调用方（UI）不需要关心时序，只需要处理两种结果。

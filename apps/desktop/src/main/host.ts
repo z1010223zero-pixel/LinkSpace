@@ -166,6 +166,21 @@ export class Host {
   /** 反向投屏断线重连计时器（退避 5/10/20/30s×4，与线 1 同口径） */
   private reverseStreamReconnectTimer: NodeJS.Timeout | null = null
   private reverseStreamReconnectAttempt = 0
+  /**
+   * 反向窗口的键鼠会话声明（线 2 W7）：input 会话在 session.start 里
+   * 声明的屏幕尺寸就是流尺寸（w/h），平板按此把窗口坐标映射回本屏。
+   * 流尺寸只有 screen.stream.start 到达时才知道，因此输入会话不在开窗
+   * 时发起，而在流开始后自动发起（见 start 处理里的调用）。
+   * 有值 = 已发起请求（待确认）或会话活动中；会话结束/失败时清掉。
+   */
+  private reverseInputRequested: { peerId: string; screen: ScreenSize } | null = null
+  /** 最近一次反向输入请求被拒/超时/失败的原因（窗口展示 + 重试用） */
+  private reverseInputError: { peerId: string; message: string } | null = null
+  /**
+   * 最近一次反向流非用户主动结束的原因（线 2 W7：平板拒绝/超时/断连时
+   * 主窗口提示用，用户自己点断开/关窗口时为空）。新请求发出时清掉。
+   */
+  private lastReverseStreamEndReason: string | null = null
   /** 本次投屏选中的显示器区域（虚拟屏坐标）；null = 未选/全桌面 */
   private streamRegion: { x: number; y: number; w: number; h: number } | null = null
   private readonly inputLayout: InputLayoutStore
@@ -1011,7 +1026,11 @@ export class Host {
         send: sendTo,
         log: (msg) => log.info(msg),
         onAccepted: () => this.emit('inputChanged'),
-        onEnded: () => this.emit('inputChanged')
+        onRejected: () => this.emit('inputChanged'),
+        onEnded: (peerId) => {
+          if (this.reverseInputRequested?.peerId === peerId) this.reverseInputRequested = null
+          this.emit('inputChanged')
+        }
       }
     })
 
@@ -1248,6 +1267,11 @@ export class Host {
       })
       log.info(`[screen-stream] 反向投屏已开始（${peerId}，${w}x${h} @ ${scaleWidth}p）`)
       this.emit('reverseStreamChanged')
+      // W7：流一开即请求键鼠控制——窗口的输入走 input.event（与线 1
+      // 同通道），声明的屏幕尺寸就是流尺寸；平板端每次都要确认（9.1），
+      // 未确认/拒绝时只看画面、输不进去，事件是安全空操作。
+      const inputReq = this.requestInputControlWithScreen(peerId, { w, h })
+      if (!inputReq.ok) log.info(`[screen-stream] 反向键鼠控制未发起：${inputReq.error}`)
     })
     control.on('screen.stream.error', (conn, msg) => {
       const peerId = conn.peerId
@@ -1324,6 +1348,7 @@ export class Host {
     }
     const width = STREAM_QUALITY_PRESETS.some((p) => p.width === scaleWidth) ? scaleWidth : 1920
     // 同对端同分辨率重复请求：直接重发（对端幂等回 start）
+    this.lastReverseStreamEndReason = null
     this.reverseStreamPeerId = peerId
     this.reverseStreamScaleWidth = width
     this.reverseStreamReconnectAttempt = 0
@@ -1340,7 +1365,7 @@ export class Host {
     if (!target) return
     this.clearReverseStreamReconnectTimer()
     this.peers.get(target)?.send('screen.stream.stop', {})
-    if (this.reverseStreamPeerId === target) this.stopReverseReceiver('本机停止反向投屏')
+    if (this.reverseStreamPeerId === target) this.stopReverseReceiver('本机停止反向投屏', true)
   }
 
   /** UI（W7）：反向投屏当前状态（对端、分辨率、接收端统计） */
@@ -1352,10 +1377,87 @@ export class Host {
     }
   }
 
+  /**
+   * 反向窗口的键鼠控制（线 2 W7）：以流尺寸为声明屏幕发起 input 会话。
+   * 与 requestInputControl 的区别只在屏幕尺寸——后者声明本机虚拟屏，
+   * 是线 1 边缘穿越的口径；反向窗口的控制面就是流画面，必须声明流尺寸，
+   * 否则平板按虚拟屏比例映射会把落点缩错。
+   * 同一时刻只允许一个控制会话（InputController 的唯一会话规则）；
+   * 已在控制同一对端 / 已有同对端请求待确认时直接返回成功，不重发。
+   * 返回的 ok 只表示「请求已发出、等平板确认」，最终结果走 inputChanged。
+   */
+  requestInputControlWithScreen(
+    peerId: string,
+    screen: ScreenSize
+  ): { ok: true } | { ok: false; error: string } {
+    if (!this.started) return { ok: false, error: '主机未启动' }
+    if (!this.inputController) return { ok: false, error: '主机未启动' }
+    if (!this.peers.has(peerId)) return { ok: false, error: '设备不在线' }
+    if (!this.trust.isKnown(peerId)) return { ok: false, error: '设备未配对' }
+    if (!Number.isFinite(screen.w) || !Number.isFinite(screen.h) || screen.w < 1 || screen.h < 1) {
+      return { ok: false, error: '画面尺寸未知' }
+    }
+    if (this.inputController.controlling === peerId) return { ok: true }
+    if (this.inputController.controlling !== null) return { ok: false, error: '已有键鼠共享会话进行中' }
+    if (this.reverseInputRequested?.peerId === peerId) return { ok: true }
+    if (this.inputController.hasPendingRequest) return { ok: false, error: '已有控制请求等待确认' }
+    this.reverseInputRequested = { peerId, screen: { w: Math.round(screen.w), h: Math.round(screen.h) } }
+    this.reverseInputError = null
+    void this.inputController
+      .request(peerId, { w: Math.round(screen.w), h: Math.round(screen.h) }, this.displayName)
+      .then((r) => {
+        if (!r.ok && this.reverseInputRequested?.peerId === peerId) {
+          this.reverseInputRequested = null
+          this.reverseInputError = { peerId, message: r.error }
+        }
+        this.emit('inputChanged')
+      })
+    return { ok: true }
+  }
+
+  /** 最近一次反向流非用户主动结束的原因，主窗口提示用；无则为 null */
+  reverseStreamEndReason(): string | null {
+    return this.lastReverseStreamEndReason
+  }
+
+  /** 反向窗口输入映射的目标尺寸（input 会话声明的流尺寸），未建立时为 null */
+  reverseInputScreen(): ScreenSize | null {
+    return this.reverseInputRequested ? { ...this.reverseInputRequested.screen } : null
+  }
+
+  /** 反向窗口的键鼠会话状态（窗口状态行 + 重试按钮用）。
+   * 按声明/错误本身推导，不依赖流状态——无头测试不跑流也能断言。 */
+  reverseInputStatus(): {
+    state: 'none' | 'pending' | 'active' | 'failed'
+    peerId: string | null
+    screen: ScreenSize | null
+    error: string | null
+  } {
+    if (this.reverseInputRequested) {
+      const { peerId, screen } = this.reverseInputRequested
+      if (this.inputController?.controlling === peerId) {
+        return { state: 'active', peerId, screen: { ...screen }, error: null }
+      }
+      return { state: 'pending', peerId, screen: { ...screen }, error: null }
+    }
+    if (this.reverseInputError) {
+      return { state: 'failed', peerId: this.reverseInputError.peerId, screen: null, error: this.reverseInputError.message }
+    }
+    return { state: 'none', peerId: this.reverseStreamPeerId, screen: null, error: null }
+  }
+
   /** 停接收端并清反向流状态（不断连接、不重连） */
-  private stopReverseReceiver(reason: string): void {
+  private stopReverseReceiver(reason: string, userInitiated = false): void {
     this.reverseStreamReceiver.stop()
     this.reverseStreamPeerId = null
+    if (!userInitiated) this.lastReverseStreamEndReason = reason
+    // 流停了，依附它的键鼠会话也停：窗口随之关闭，无屏可控；不断连接
+    if (this.reverseInputRequested) {
+      const peerId = this.reverseInputRequested.peerId
+      this.reverseInputRequested = null
+      this.reverseInputError = null
+      if (this.inputController?.controlling === peerId) this.inputController.stop('reverse stream ended')
+    }
     log.info(`[screen-stream] 反向投屏已停：${reason}`)
     this.emit('reverseStreamChanged')
   }

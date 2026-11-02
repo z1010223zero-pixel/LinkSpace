@@ -12,6 +12,9 @@ import { ScrcpyAdapter } from './scrcpy-adapter'
 import type { StartOptions } from '../shared/types'
 import { locateBinaries } from './platform'
 import type { Host } from './host'
+import { STREAM_QUALITY_PRESETS } from './screen-stream'
+import { decodeInputEvents, mapPoint, type InputEvent } from './input/protocol'
+import type { ReverseWindowManager } from './reverse-window'
 import type { DiscoveredService } from './discovery'
 import type { PendingPairing } from './pairing'
 import type { TransferTask } from './transfer/manager'
@@ -68,6 +71,12 @@ const CHANNELS = [
   'input:terminate',
   'input:exit',
   'input:setEdge',
+  'reverse-control:start',
+  'reverse-stream:status',
+  'reverse-stream:setQuality',
+  'reverse-stream:stop',
+  'reverse-stream:retryInput',
+  'reverse-stream:input',
   'ping'
 ] as const
 
@@ -79,7 +88,13 @@ const EVENTS = [
   'transfers:changed',
   'trust:changed',
   'selfName:changed',
-  'input:changed'
+  'input:changed',
+  // 反向投屏的帧与状态是带数据的推送，由 ReverseWindowManager 直接发
+  // 给画面窗口，不走下面的 broadcast()（只发主窗口、无载荷）；
+  // reverse-stream:notice 由 index.ts 发给主窗口（流结束原因提示）
+  'reverse-stream:frame',
+  'reverse-stream:changed',
+  'reverse-stream:notice'
 ] as const
 
 /** 渲染层可见的运行时快照来源 */
@@ -96,7 +111,8 @@ export function registerIpc(
   devices: DeviceManager,
   adapter: ScrcpyAdapter,
   host: Host,
-  runtime: RuntimeSource
+  runtime: RuntimeSource,
+  reverseWindows: ReverseWindowManager
 ): void {
   const invoke = <T>(channel: string, handler: () => Promise<T> | T): void => {
     ipcMain.handle(channel, async () => {
@@ -403,6 +419,78 @@ export function registerIpc(
     return { ok: true as const }
   })
 
+  // ---------- 反向投屏：平板画面窗口（线 2 W7，2.3-2） ----------
+
+  /** 入口错误 → 用户可照做的引导（2.3-1：未授权/不在线时不静默无反应） */
+  const reverseStartGuidance = (error: string): string => {
+    switch (error) {
+      case '设备不在线':
+        return '平板不在线：请确认平板已开机、连入同一局域网并打开 LinkSpace，然后点主界面的「刷新」'
+      case '设备未配对':
+        return '该设备尚未配对：请先在「局域网内的其他设备」里完成配对，再点控制'
+      case '本机缺少 ffmpeg，无法解码':
+        return '本机缺少 ffmpeg，无法解码平板画面：请安装 ffmpeg 后重启应用'
+      case '已有反向投屏在跑':
+        return '已有平板画面窗口在跑：请先断开当前窗口，再控制这台设备'
+      default:
+        return error
+    }
+  }
+
+  ipcMain.handle('reverse-control:start', (_e, peerId: unknown, scaleWidth: unknown) => {
+    if (typeof peerId !== 'string' || !peerId) return fail('缺少对端 ID')
+    if (reverseWindows.isOpenFor(peerId)) {
+      reverseWindows.open(peerId, reverseWindows.statusSnapshot().displayName || peerId)
+      return { ok: true as const }
+    }
+    const width = typeof scaleWidth === 'number' ? scaleWidth : 1920
+    const r = host.requestReverseScreenStream(peerId, width)
+    if (!r.ok) return fail(reverseStartGuidance(r.error))
+    const trusted = host.trustedDevices().find((t) => t.deviceId === peerId)
+    reverseWindows.open(peerId, trusted?.displayName ?? peerId)
+    return { ok: true as const }
+  })
+
+  invoke('reverse-stream:status', () => reverseWindows.statusSnapshot())
+
+  ipcMain.handle('reverse-stream:setQuality', (_e, peerId: unknown, width: unknown) => {
+    if (typeof peerId !== 'string' || !peerId) return fail('缺少对端 ID')
+    if (typeof width !== 'number' || !STREAM_QUALITY_PRESETS.some((p) => p.width === width)) {
+      return fail('分辨率档位不合法')
+    }
+    const r = host.requestReverseScreenStream(peerId, width)
+    return r.ok ? { ok: true as const } : fail(r.error)
+  })
+
+  ipcMain.handle('reverse-stream:stop', (_e, peerId: unknown) => {
+    if (typeof peerId === 'string' && peerId) host.stopReverseScreenStream(peerId)
+    else host.stopReverseScreenStream()
+    reverseWindows.close()
+    return { ok: true as const }
+  })
+
+  ipcMain.handle('reverse-stream:retryInput', (_e, peerId: unknown) => {
+    if (typeof peerId !== 'string' || !peerId) return fail('缺少对端 ID')
+    const st = host.reverseStreamStatus()
+    if (!st.peerId || st.peerId !== peerId) return fail('反向投屏未在跑')
+    if (st.receiver.width < 1 || st.receiver.height < 1) return fail('画面尺寸未知：请等画面出现后再试')
+    const r = host.requestInputControlWithScreen(peerId, { w: st.receiver.width, h: st.receiver.height })
+    return r.ok ? { ok: true as const } : fail(r.error)
+  })
+
+  ipcMain.handle('reverse-stream:input', (_e, input: unknown) => {
+    // 窗口输入 → input.event：先把画布坐标映射到会话声明的流尺寸，
+    // 再过一遍与线上事件相同的解码校验（字段白名单 + 数值钳制）。
+    // 非活动会话时 sendInputEvents 是安全空操作；会话未建立时明确拒绝，
+    // 让窗口显示原因而不是让点击静默落掉。
+    const screen = host.reverseInputScreen()
+    if (!screen) return fail('键鼠控制尚未建立：请等平板确认控制后再操作')
+    const events = decodeReverseWindowInput(input, screen)
+    if (!events) return fail('输入事件不合法')
+    host.sendInputEvents(events)
+    return { ok: true as const }
+  })
+
   invoke('ping', () => 'pong')
 
   // W2 撤销级联：Host 撤销信任时算出属于该设备的 serial，停掉对应会话。
@@ -419,6 +507,67 @@ export function registerIpc(
   adapter.on('changed', () => broadcast(getWindow, 'sessions:changed'))
 
   log.info(`IPC 已注册：${CHANNELS.length} 个 channel，${EVENTS.length} 类事件`)
+}
+
+/**
+ * 反向窗口输入的收敛：画布像素 → 会话声明的流尺寸（mapPoint，与线 1
+ * 被控端同口径的比例映射），再过 decodeInputEvents 的字段白名单。
+ * 画布可能比流画面大（letterbox 黑边已由渲染层扣掉，见组件内注释）；
+ * 越界坐标钳进画布，不合法的按钮/vk 整批丢弃。
+ */
+function decodeReverseWindowInput(
+  input: unknown,
+  screen: { w: number; h: number }
+): InputEvent[] | null {
+  if (typeof input !== 'object' || input === null) return null
+  const p = input as Record<string, unknown>
+  const mapXY = (x: unknown, y: unknown, canvasW: unknown, canvasH: unknown): { x: number; y: number } | null => {
+    if (
+      typeof x !== 'number' ||
+      typeof y !== 'number' ||
+      typeof canvasW !== 'number' ||
+      typeof canvasH !== 'number'
+    ) {
+      return null
+    }
+    if (!Number.isFinite(x) || !Number.isFinite(y) || canvasW < 1 || canvasH < 1 || canvasW > 32768 || canvasH > 32768) {
+      return null
+    }
+    const cx = Math.min(canvasW, Math.max(0, x))
+    const cy = Math.min(canvasH, Math.max(0, y))
+    return mapPoint(cx, cy, { w: canvasW, h: canvasH }, screen)
+  }
+  switch (p.kind) {
+    case 'move': {
+      const pt = mapXY(p.x, p.y, p.canvasW, p.canvasH)
+      if (!pt) return null
+      return decodeInputEvents({ events: [{ t: 'move', x: pt.x, y: pt.y }] })
+    }
+    case 'down':
+    case 'up': {
+      if (p.b !== 'left' && p.b !== 'right' && p.b !== 'middle') return null
+      const pt = mapXY(p.x, p.y, p.canvasW, p.canvasH)
+      if (!pt) return null
+      // 按键必须带落点：先 move 到位置再 down/up，平板按手势落点注入
+      return decodeInputEvents({
+        events: [
+          { t: 'move', x: pt.x, y: pt.y },
+          { t: p.kind, b: p.b }
+        ]
+      })
+    }
+    case 'wheel': {
+      if (typeof p.dx !== 'number' || typeof p.dy !== 'number') return null
+      if (!Number.isFinite(p.dx) || !Number.isFinite(p.dy)) return null
+      return decodeInputEvents({ events: [{ t: 'wheel', dx: p.dx, dy: p.dy }] })
+    }
+    case 'key': {
+      if (typeof p.vk !== 'number' || typeof p.down !== 'boolean') return null
+      return decodeInputEvents({ events: [{ t: 'key', vk: p.vk, down: p.down }] })
+    }
+    default:
+      return null
+  }
 }
 
 function broadcast(getWindow: () => BrowserWindow | null, channel: string): void {

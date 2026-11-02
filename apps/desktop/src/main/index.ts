@@ -8,6 +8,7 @@ import { registerIpc } from './ipc'
 import { locateBinaries } from './platform'
 import { log } from './log'
 import { Host } from './host'
+import { ReverseWindowManager } from './reverse-window'
 import { EdgeSwitcher } from './input/edge'
 import { loadWin32 } from './input/win32/native'
 import { SendInputSink } from './input/win32/sink'
@@ -161,6 +162,22 @@ function resolvePreload(): string {
   }
   return join(base, 'index.mjs')
 }
+
+// 平板画面窗口（线 2 W7，2.3-2）：Host 事件订阅在构造时完成；
+// registerIpc 里经它开窗/关窗/取状态快照
+const reverseWindows = new ReverseWindowManager({
+  host,
+  // 流在别处结束且有明确原因（平板拒绝/超时/断连）：主窗口提示，
+  // 而不是画面窗口悄悄消失
+  onEndedWithReason: (reason) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('reverse-stream:notice', reason)
+    }
+  },
+  resolvePreload,
+  rendererUrl: () => process.env.ELECTRON_RENDERER_URL,
+  rendererFile: () => join(__dirname, '../renderer/index.html')
+})
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
@@ -332,7 +349,7 @@ app.whenReady().then(async () => {
   log.info(`LinkSpace 启动，scrcpy=${b.scrcpy}（来源 ${b.source}）`)
 
   buildAppMenu()
-  registerIpc(() => mainWindow, devices, adapter, host, runtime)
+  registerIpc(() => mainWindow, devices, adapter, host, runtime, reverseWindows)
   createWindow()
 
   // 7.4 退出快捷键：任何时候可退出控制，无需对端同意。未在控制时
@@ -414,6 +431,8 @@ app.on('before-quit', (event) => {
   stopClipboardSync()
   stopTransferSweep()
   stopInputLoop()
+  // 画面窗口先关：'closed' 里停反向流 + 键鼠会话，再走 host.stop()
+  reverseWindows.close()
   // 快捷键挂着全局钩子，退出前必须释放，否则会劫持系统组合键
   globalShortcut.unregisterAll()
   adapter

@@ -13,6 +13,9 @@ import type {
   InputStateView,
   LinkSpaceApi,
   PendingPairingView,
+  ReverseStreamFrameView,
+  ReverseStreamStatusView,
+  ReverseWindowInput,
   SessionView,
   StartOptions,
   TransferInfo,
@@ -23,6 +26,15 @@ import type {
 
 function subscribe(channel: string, cb: () => void): Unsubscribe {
   const listener = () => cb()
+  ipcRenderer.on(channel, listener)
+  return () => {
+    ipcRenderer.removeListener(channel, listener)
+  }
+}
+
+/** 带数据的推送订阅（反向投屏的帧与状态快照） */
+function subscribeData<T>(channel: string, cb: (data: T) => void): Unsubscribe {
+  const listener = (_e: unknown, data: T) => cb(data)
   ipcRenderer.on(channel, listener)
   return () => {
     ipcRenderer.removeListener(channel, listener)
@@ -110,6 +122,35 @@ const api: LinkSpaceApi = {
 
   setDeviceEdge: (deviceId: string, edge: DeviceEdge | null) =>
     ipcRenderer.invoke('input:setEdge', deviceId, edge) as Promise<IpcResult<void>>,
+
+  // ---------- 反向投屏：平板画面窗口（线 2 W7，2.3-2） ----------
+
+  requestReverseControl: (peerId: string, scaleWidth?: number) =>
+    ipcRenderer.invoke('reverse-control:start', peerId, scaleWidth) as Promise<IpcResult<void>>,
+
+  reverseStreamStatus: () =>
+    ipcRenderer.invoke('reverse-stream:status') as Promise<ReverseStreamStatusView>,
+
+  setReverseStreamQuality: (peerId: string, width: number) =>
+    ipcRenderer.invoke('reverse-stream:setQuality', peerId, width) as Promise<IpcResult<void>>,
+
+  stopReverseControl: (peerId?: string) =>
+    ipcRenderer.invoke('reverse-stream:stop', peerId) as Promise<IpcResult<void>>,
+
+  retryReverseInput: (peerId: string) =>
+    ipcRenderer.invoke('reverse-stream:retryInput', peerId) as Promise<IpcResult<void>>,
+
+  sendReverseInput: (input: ReverseWindowInput) =>
+    ipcRenderer.invoke('reverse-stream:input', input) as Promise<IpcResult<void>>,
+
+  onReverseStreamFrame: (cb: (frame: ReverseStreamFrameView) => void) =>
+    subscribeData<ReverseStreamFrameView>('reverse-stream:frame', cb),
+
+  onReverseStreamChanged: (cb: (status: ReverseStreamStatusView) => void) =>
+    subscribeData<ReverseStreamStatusView>('reverse-stream:changed', cb),
+
+  onReverseStreamNotice: (cb: (message: string) => void) =>
+    subscribeData<string>('reverse-stream:notice', cb),
 
   onDevicesChanged: (cb) => subscribe('devices:changed', cb),
   onSessionsChanged: (cb) => subscribe('sessions:changed', cb),

@@ -180,7 +180,8 @@
 > - **视频帧通道**：与线 1 完全相同——源端编码输出的字节块以 WS 二进制帧（opcode 0x2）经控制连接发出，复用平板连出的那条链路（平板→桌面方向本来就是连出方向）；控制消息（文本帧）与视频块（二进制帧）按 opcode 分流。帧无序号、无确认——丢帧表现为画面短暂停滞，等下一个 IDR 恢复（GOP 30，1s 一个 IDR）。
 > - **编码**：MediaCodec（Surface 直连 VirtualDisplay）优先，启动失败回落 JavaCV/libx264 软编（线 1 在该 ROM 上已验证软解可靠，编码侧同样留回落口）。分辨率档位与码率档位与线 1 同口径：720p/1080p/1440p/2160p（目标宽 1280/1920/2560/3840），t0 不限流/t1 6M/t2 3M/t3 1.5M；换分辨率重启编码器，换码率档 MediaCodec 走 setParameters（软编走 recorder 重启）。
 > - **背压与重连（复用线 1 口径）**：发送积压超 3MB 丢到最近关键帧（与线 1 解码端同值）；码率自适应 2s 采样，>1MB 计分 +1、<100KB 计分 -1，连续 3 次拥塞降档、连续 -8 升档；断线重连退避 5/10/20/30s×4——观看方（桌面）重发 `screen.stream.request`，4 次未成功停手；解码端关键帧恢复（丢到最近 SPS）与线 1 相同。
-> - **已知局限**：`screen.stream.stop` 没有方向位——双向流同时在跑时一方停流会把另一方也停掉；真要并发双向需给 stop 加流标识，本批不做。**未验证（无真机）**：MediaCodec 在该 ROM 上的实际编码表现、Annex-B/AVCC 形态、画面延迟、码率自适应效果；录屏在应用退后台后能否持续（targetSdk 35 下需 foregroundServiceType="mediaProjection" 承接，本批不动 AndroidManifest）；录屏授权 UI（MainActivity 的系统授权框接线）是后续 UI 批次的活，本批默认拒绝。
+> - **[PROTOCOL] 2026-11-02 登记**（线 2 W7）：录屏授权 UI 已接线——MainActivity 弹确认框，同意后弹系统录屏授权框，授权后调 `LinkSpaceService.startReverseStreamWithProjection()`；拒绝/取消回 `screen.stream.error`（理由 `denied by user` / `failed to start screen capture`），桌面窗口显示原因后关闭；30s 无人确认由 `ReverseScreenStreamer` TTL 自动拒绝。targetSdk 35 下退后台承接已补：AndroidManifest 前台服务加 `foregroundServiceType="dataSync|mediaProjection"` + `FOREGROUND_SERVICE_MEDIA_PROJECTION` 权限，授权后前台服务升级为双类型。
+> - **已知局限**：`screen.stream.stop` 没有方向位——双向流同时在跑时一方停流会把另一方也停掉；真要并发双向需给 stop 加流标识，本批不做。**仍未验证（无真机）**：MediaCodec 在该 ROM 上的实际编码表现、Annex-B/AVCC 形态、画面延迟、码率自适应效果；退后台后录屏是否持续；系统授权框的实际表现。
 
 | 类型 | 方向 | payload | 说明 |
 |---|---|---|---|

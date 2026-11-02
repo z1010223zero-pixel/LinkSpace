@@ -43,6 +43,7 @@ import cn.linkspace.client.service.DiscoveredService
 import cn.linkspace.client.service.InputController
 import cn.linkspace.client.service.LinkSpaceService
 import cn.linkspace.client.service.OutgoingFile
+import cn.linkspace.client.service.ReverseScreenStreamer
 import cn.linkspace.client.service.StreamDecoder
 import cn.linkspace.client.service.TransferTask
 import kotlinx.coroutines.launch
@@ -210,6 +211,8 @@ fun MainScreen(service: LinkSpaceService, onClipboardToggle: (Boolean) -> Unit) 
     val controlRequest by service.controlRequest.collectAsStateWithLifecycle()
     val controlledBy by service.controlledBy.collectAsStateWithLifecycle()
     val accessibilityEnabled by service.accessibilityEnabled.collectAsStateWithLifecycle()
+    val reverseRequest by service.reverseStreamRequest.collectAsStateWithLifecycle()
+    val reverseStatus by service.reverseStreamStatus.collectAsStateWithLifecycle()
     val clipboardEnabled by service.clipboardEnabled.collectAsStateWithLifecycle()
     val fingerprintText by service.fingerprintText.collectAsStateWithLifecycle()
     var notice by remember { mutableStateOf("") }
@@ -224,6 +227,34 @@ fun MainScreen(service: LinkSpaceService, onClipboardToggle: (Boolean) -> Unit) 
         ) { }
         LaunchedEffect(Unit) {
             notifPermission.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+
+    // 反向投屏：系统录屏授权框（线 2 W7）。MainActivity 发 intent，
+    // 用户在系统框点允许后拿 MediaProjection 交给服务开流；取消则明确拒绝。
+    var captureRequest by remember { mutableStateOf<ReverseScreenStreamer.ReverseStreamRequest?>(null) }
+    val screenCapture = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val req = captureRequest
+        captureRequest = null
+        if (req == null) return@rememberLauncherForActivityResult
+        val data = result.data
+        if (result.resultCode == android.app.Activity.RESULT_OK && data != null) {
+            val projectionManager =
+                context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as android.media.projection.MediaProjectionManager
+            val projection = runCatching {
+                // 官方顺序：先升前台服务类型，再 getMediaProjection
+                service.prepareReverseStreamCapture()
+                projectionManager.getMediaProjection(result.resultCode, data)
+            }.getOrNull()
+            if (projection != null) {
+                service.startReverseStreamWithProjection(projection)
+            } else {
+                service.denyReverseStream(req, "failed to start screen capture")
+            }
+        } else {
+            service.denyReverseStream(req, "denied by user")
         }
     }
 
@@ -361,6 +392,25 @@ fun MainScreen(service: LinkSpaceService, onClipboardToggle: (Boolean) -> Unit) 
                         OutlinedButton(onClick = { service.terminateControl() }) {
                             Text("终止控制")
                         }
+                    }
+                }
+            }
+        }
+
+        // ---------- 反向投屏：正在向电脑推流（线 2 W7） ----------
+        val activeReverse = reverseStatus?.active
+        if (activeReverse != null) {
+            item {
+                Card {
+                    Column(Modifier.padding(14.dp)) {
+                        Text("正在向电脑推流", fontWeight = FontWeight.Medium)
+                        Text(
+                            "${trusted.firstOrNull { it.deviceId == activeReverse.peerId }?.displayName ?: activeReverse.peerId} · ${activeReverse.width}×${activeReverse.height} · ${activeReverse.encoder}",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(Modifier.height(10.dp))
+                        OutlinedButton(onClick = { service.stopReverseStream() }) { Text("停止推流") }
                     }
                 }
             }
@@ -605,6 +655,30 @@ fun MainScreen(service: LinkSpaceService, onClipboardToggle: (Boolean) -> Unit) 
             confirmButton = {},
             dismissButton = {
                 OutlinedButton(onClick = { service.input.stop() }) { Text("取消") }
+            }
+        )
+    }
+
+    // ---------- 反向投屏请求：电脑想看本机屏幕（线 2 W7） ----------
+    // 每次请求都要过这道确认 + 系统录屏授权框；拒绝/取消都明确回绝，
+    // 桌面窗口显示原因。30 秒无人确认由服务侧 TTL 自动拒绝。
+    reverseRequest?.let { req ->
+        AlertDialog(
+            onDismissRequest = { service.denyReverseStream(req, "denied by user") },
+            title = { Text("电脑请求查看你的屏幕") },
+            text = {
+                Text("对方想在电脑上实时查看这台平板的画面。同意后会弹出系统录屏授权框，只有你点了允许才会开始录屏；随时可以在通知栏停止。")
+            },
+            confirmButton = {
+                Button(onClick = {
+                    captureRequest = req
+                    val manager =
+                        context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as android.media.projection.MediaProjectionManager
+                    screenCapture.launch(manager.createScreenCaptureIntent())
+                }) { Text("同意") }
+            },
+            dismissButton = {
+                OutlinedButton(onClick = { service.denyReverseStream(req, "denied by user") }) { Text("拒绝") }
             }
         )
     }

@@ -89,6 +89,15 @@ async function requestControl(deviceId: string): Promise<void> {
   if (!res.ok) notice.value = res.error.message
 }
 
+/** 线 2（2.3-1）：请求看 Android 平板画面并打开画面窗口（2.3-2）。入口只在
+ * 已配对设备上出现（本节只列信任清单）；未配对/不在线时主进程回明确的
+ * 授权引导，不静默无反应。控制授权是会话级：平板每次都要确认 */
+async function requestReverseControl(deviceId: string): Promise<void> {
+  notice.value = ''
+  const res = await window.linkspace.requestReverseControl(deviceId)
+  if (!res.ok) notice.value = res.error.message
+}
+
 async function approveControl(sessionId: string): Promise<void> {
   const res = await window.linkspace.approveInputControl(sessionId)
   if (!res.ok) notice.value = res.error.message
@@ -175,6 +184,7 @@ let unsubPairings: (() => void) | null = null
 let unsubTrust: (() => void) | null = null
 let unsubSelfName: (() => void) | null = null
 let unsubInput: (() => void) | null = null
+let unsubReverseNotice: (() => void) | null = null
 let pollTimer: number | null = null
 let speedTimer: number | null = null
 
@@ -469,6 +479,11 @@ onMounted(async () => {
   unsubInput = window.linkspace.onInputChanged(() => {
     void loadInputState()
   })
+  // 反向投屏在别处结束且有明确原因（平板拒绝/超时/断连）：主窗口提示，
+  // 而不是画面窗口悄悄消失
+  unsubReverseNotice = window.linkspace.onReverseStreamNotice((msg) => {
+    notice.value = msg
+  })
 
   // 事件之外的兜底轮询：设备插拔时 adb 不会主动通知
   pollTimer = window.setInterval(() => {
@@ -492,6 +507,7 @@ onBeforeUnmount(() => {
   unsubTrust?.()
   unsubSelfName?.()
   unsubInput?.()
+  unsubReverseNotice?.()
   if (pollTimer !== null) window.clearInterval(pollTimer)
   if (speedTimer !== null) window.clearInterval(speedTimer)
 })
@@ -727,7 +743,8 @@ onBeforeUnmount(() => {
             <span class="device-card__serial">授权范围：{{ t.scope.join(',') }}</span>
           </span>
           <span class="session-row__spacer" />
-          <!-- 键鼠共享仅 Windows↔Windows（阶段 3 范围），其他设备类型不显示入口 -->
+          <!-- 键鼠共享仅 Windows↔Windows（阶段 3 范围）；线 2（2.3-1）Android 设备
+               同样开放入口，文案与 Win 口径一致（「键鼠控制」） -->
           <template v-if="t.deviceType === 'win'">
             <select
               class="edge-select"
@@ -748,6 +765,18 @@ onBeforeUnmount(() => {
                   : '本机注入层不可用，无法发起键鼠控制'
               "
               @click="requestControl(t.deviceId)"
+            >
+              键鼠控制
+            </button>
+          </template>
+          <!-- 线 2（2.3-1）：Android 设备控制入口。点后打开平板画面窗口
+               （2.3-2），画面与键鼠控制各需平板确认一次；未配对/不在线时
+               主进程回明确的授权引导，按钮本身不静默无反应 -->
+          <template v-else-if="t.deviceType === 'android-phone' || t.deviceType === 'android-tablet'">
+            <button
+              class="btn btn--sm"
+              title="在电脑窗口里看平板画面并用键鼠控制（平板每次都要确认）"
+              @click="requestReverseControl(t.deviceId)"
             >
               键鼠控制
             </button>

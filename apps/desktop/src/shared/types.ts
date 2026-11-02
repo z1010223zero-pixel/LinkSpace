@@ -134,6 +134,51 @@ export type IpcResult<T> = { ok: true; value: T } | { ok: false; error: IpcError
 
 export type Unsubscribe = () => void
 
+// ---------- 反向投屏：平板画面窗口（线 2 W7，2.3-2） ----------
+
+/** 解出的一帧（渲染进程收到的是 Uint8Array，不是 Node Buffer） */
+export interface ReverseStreamFrameView {
+  width: number
+  height: number
+  /** RGBA，每像素 4 字节，行优先，长度恒为 width * height * 4 */
+  data: Uint8Array
+}
+
+export type ReverseInputState = 'none' | 'pending' | 'active' | 'failed'
+
+export interface ReverseStreamStatusView {
+  /** 正在看谁的反向投屏，null = 未请求/已结束 */
+  peerId: string | null
+  displayName: string
+  /** 当前分辨率档位（目标宽） */
+  scaleWidth: number
+  receiver: {
+    running: boolean
+    width: number
+    height: number
+    bytesReceived: number
+    framesDecoded: number
+    keyframeResyncs: number
+    droppedBytes: number
+    lastError: string | null
+  }
+  input: {
+    state: ReverseInputState
+    peerId: string | null
+    screen: { w: number; h: number } | null
+    error: string | null
+  }
+  clipboardEnabled: boolean
+}
+
+/** 反向窗口发来的单条输入（主进程映射到会话声明的流尺寸后外发） */
+export type ReverseWindowInput =
+  | { kind: 'move'; x: number; y: number; canvasW: number; canvasH: number }
+  | { kind: 'down'; b: 'left' | 'right' | 'middle'; x: number; y: number; canvasW: number; canvasH: number }
+  | { kind: 'up'; b: 'left' | 'right' | 'middle'; x: number; y: number; canvasW: number; canvasH: number }
+  | { kind: 'wheel'; dx: number; dy: number }
+  | { kind: 'key'; vk: number; down: boolean }
+
 // ---------- 键鼠共享（阶段 3） ----------
 
 /** 设备在本机的哪一侧（7.3）。null 表示未参与键鼠共享 */
@@ -206,6 +251,24 @@ export interface LinkSpaceApi {
   exitInputControl(): Promise<IpcResult<void>>
   /** 设置设备位于本机哪一侧（7.3），null 清除 */
   setDeviceEdge(deviceId: string, edge: DeviceEdge | null): Promise<IpcResult<void>>
+  /** 反向投屏（线 2 W7）：请求看对端平板画面并打开画面窗口 */
+  requestReverseControl(peerId: string, scaleWidth?: number): Promise<IpcResult<void>>
+  /** 反向投屏状态快照（画面窗口轮询/推送用） */
+  reverseStreamStatus(): Promise<ReverseStreamStatusView>
+  /** 换分辨率档位（目标宽，须是 1280/1920/2560/3840 其中一档） */
+  setReverseStreamQuality(peerId: string, width: number): Promise<IpcResult<void>>
+  /** 关闭画面窗口并结束反向投屏 + 键鼠会话 */
+  stopReverseControl(peerId?: string): Promise<IpcResult<void>>
+  /** 键鼠会话未建立时手动重试（流尺寸已知时才有效） */
+  retryReverseInput(peerId: string): Promise<IpcResult<void>>
+  /** 画面窗口的输入事件（主进程映射坐标后走 input.event 外发） */
+  sendReverseInput(input: ReverseWindowInput): Promise<IpcResult<void>>
+  /** 反向投屏解出的 RGBA 帧（画面窗口订阅） */
+  onReverseStreamFrame(cb: (frame: ReverseStreamFrameView) => void): Unsubscribe
+  /** 反向投屏状态变化（画面窗口订阅，收到的是完整快照） */
+  onReverseStreamChanged(cb: (status: ReverseStreamStatusView) => void): Unsubscribe
+  /** 反向投屏在别处结束且有明确原因（主窗口订阅，显示提示） */
+  onReverseStreamNotice(cb: (message: string) => void): Unsubscribe
   onDevicesChanged(cb: () => void): Unsubscribe
   onSessionsChanged(cb: () => void): Unsubscribe
   onTransfersChanged(cb: () => void): Unsubscribe

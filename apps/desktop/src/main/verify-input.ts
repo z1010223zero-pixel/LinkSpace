@@ -769,16 +769,66 @@ async function testE2e(): Promise<void> {
     check('被控端终止后控制端回本机', A.controllingPeer() === null)
     check('每次终止都抬起按键', releasedB === 2)
 
+    // ---------- 6.5 反向窗口的键鼠控制（线 2 W7，2.3-2） ----------
+    // 流尺寸声明的 input 会话：控制面就是流画面，session.start 里声明的
+    // 屏幕尺寸是流尺寸（1080x2400），不是本机虚拟屏（2000x1000）。
+    // 平板按声明尺寸把窗口坐标映射回本屏；断言用注入侧的落点验证。
+    console.log('\n6.5 反向窗口的键鼠控制（流尺寸声明）')
+    // 门禁：无 ffmpeg 的本机请求反向流直接失败，不发请求、不改状态
+    const noFfmpeg = A.requestReverseScreenStream(B.id)
+    check('无 ffmpeg 时反向流请求失败', !noFfmpeg.ok)
+    check('无 ffmpeg 时不进入反向流状态', A.reverseStreamStatus().peerId === null)
+    const offlineReverse = A.requestReverseScreenStream('no-such-peer')
+    check('离线设备反向流请求失败', !offlineReverse.ok)
+    const untrustedReverse = C.requestInputControlWithScreen(B.id, { w: 1080, h: 2400 })
+    check('未配对设备不能发起反向控制', !untrustedReverse.ok)
+
+    const streamScreen = { w: 1080, h: 2400 }
+    const revReq = A.requestInputControlWithScreen(B.id, streamScreen)
+    check('反向控制请求发出', revReq.ok)
+    check('请求待确认时状态为 pending', A.reverseInputStatus().state === 'pending')
+    check(
+      '声明尺寸就是流尺寸',
+      JSON.stringify(A.reverseInputScreen()) === JSON.stringify(streamScreen)
+    )
+    const reqRev = await waitFor(() => requestsB[2])
+    B.approveInputControl(reqRev.sessionId)
+    await waitFor(() => (A.controllingPeer() === B.id ? true : undefined))
+    check('反向控制会话建立', A.controllingPeer() === B.id && B.controlledByPeer() === A.id)
+    check('会话建立后状态为 active', A.reverseInputStatus().state === 'active')
+    // 同对端重复请求不重发、不报错
+    check('已控制时重复请求直接成功', A.requestInputControlWithScreen(B.id, streamScreen).ok)
+    // 流坐标 (540,1200) → 声明 1080x2400 → B 本机 1000x500：落点 (500,250)
+    const beforeRev = injectedB.length
+    A.sendInputEvents([{ t: 'move', x: 540, y: 1200 }])
+    await waitFor(() => (injectedB.length > beforeRev ? true : undefined))
+    const revMove = injectedB[injectedB.length - 1][0] as { t: string; x: number; y: number }
+    check('流坐标按声明尺寸映射到本屏', revMove.x === 500 && revMove.y === 250, JSON.stringify(revMove))
+    // 会话结束清声明（第 7 节的 releasedB 计数随之 +1，见下）
+    A.stopInputControl('reverse window closed')
+    await waitFor(() => (A.controllingPeer() === null ? true : undefined))
+    check('反向会话结束清声明', A.reverseInputScreen() === null)
+    check('反向会话结束后状态为 none', A.reverseInputStatus().state === 'none')
+
+    // 拒绝路径：平板拒绝后状态为 failed，带原因，可重试
+    const revReq2 = A.requestInputControlWithScreen(B.id, streamScreen)
+    check('第二次反向控制请求发出', revReq2.ok)
+    const reqRev2 = await waitFor(() => requestsB[3])
+    B.denyInputControl(reqRev2.sessionId)
+    await waitFor(() => (A.reverseInputStatus().state === 'failed' ? true : undefined))
+    check('平板拒绝后状态为 failed', A.reverseInputStatus().state === 'failed')
+    check('拒绝原因带回窗口', (A.reverseInputStatus().error ?? '').includes('拒绝'))
+
     // ---------- 7. 撤销信任掐断会话 ----------
     console.log('\n7. 撤销信任立即掐断')
     const req3Promise = A.requestInputControl(B.id)
-    const req3 = await waitFor(() => requestsB[2])
+    const req3 = await waitFor(() => requestsB[4])
     B.approveInputControl(req3.sessionId)
     check('第三次会话建立', (await req3Promise).ok)
     B.revokeTrust(A.id)
     await waitFor(() => (B.controlledByPeer() === null ? true : undefined))
     check('撤销后被控端会话结束', B.controlledByPeer() === null)
-    check('撤销后抬起按键', releasedB === 3)
+    check('撤销后抬起按键', releasedB === 4)
     // 撤销通知（pair.revoke）同样走网络：控制端收到后才回本机并删除信任
     await waitFor(() => (A.controllingPeer() === null ? true : undefined))
     check('撤销后控制端也回本机', A.controllingPeer() === null, `A.controlling=${A.controllingPeer()}`)

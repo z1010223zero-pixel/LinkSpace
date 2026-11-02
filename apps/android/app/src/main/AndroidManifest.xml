@@ -9,6 +9,9 @@
     <!-- 前台服务保活：杀后台后连接不再「随时消失」（任务 B-③） -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- 反向投屏退后台承接（线 2 W7，targetSdk 35）：无此权限，带
+         mediaProjection 类型的 startForeground 会抛 SecurityException -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
@@ -33,7 +36,7 @@
         <service
             android:name=".service.LinkSpaceForegroundService"
             android:exported="false"
-            android:foregroundServiceType="dataSync" />
+            android:foregroundServiceType="dataSync|mediaProjection" />
 
         <!-- 线 2 被控端注入服务（W5，选型 A）：系统级无障碍服务，
              须 exported + BIND_ACCESSIBILITY_SERVICE 才能被系统绑定 -->

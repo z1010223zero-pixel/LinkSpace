@@ -854,17 +854,30 @@ class LinkSpaceService private constructor(private val appContext: Context) {
     // ---------- 反向投屏（协议 4.7，线 2 W6：平板画面进电脑窗口） ----------
 
     /**
+     * 反向投屏的待确认请求（线 2 W7）：onReverseStreamRequested 到达时
+     * 写入，MainActivity 弹确认框；用户同意后走 MediaProjection 授权，
+     * 拒绝/超时/取消时 ReverseScreenStreamer 经 onChanged 清掉。
+     * 未确认前绝不自动开录（与 ControlledInputSession 默认拒绝同款姿势）。
+     */
+    private val _reverseStreamRequest = MutableStateFlow<ReverseScreenStreamer.ReverseStreamRequest?>(null)
+    val reverseStreamRequest: StateFlow<ReverseScreenStreamer.ReverseStreamRequest?> = _reverseStreamRequest
+
+    /** 反向推流状态（正在向谁推流 / 待确认 / 积压），MainActivity 展示用 */
+    private val _reverseStreamStatus = MutableStateFlow<ReverseScreenStreamer.StreamStatus?>(null)
+    val reverseStreamStatus: StateFlow<ReverseScreenStreamer.StreamStatus?> = _reverseStreamStatus
+
+    /**
      * 反向推流端：桌面作观看方向本机发起 screen.stream.request 时的接待
      * 逻辑。MediaProjection 抓屏 + MediaCodec 优先（失败回落 JavaCV 软编）
      * + WS 二进制帧回推，与线 1 的桌面推流复用同一套 screen.stream.*
      * 语义、同一档位口径。
      *
      * 与 input 会话解耦：反向流的启停不以活动 input 会话为前提；授权门
-     * 是平板端的 MediaProjection 系统录屏授权（见 listener 的 TODO）。
-     * 用户确认 UI 未接：onReverseStreamRequested 的默认实现先记日志并
-     * 回 screen.stream.error（理由「确认 UI 未接」），绝不自动开录——
-     * 与 W4 的 ControlledInputSession 默认拒绝同款安全姿势。
-     * 真实录屏授权流程接入后把该 TODO 桩换成 UI 回调。
+     * 是平板端的 MediaProjection 系统录屏授权（线 2 W7 已接线：请求先进
+     * reverseStreamRequest 流，MainActivity 弹确认框，同意后弹系统录屏
+     * 授权框，拿到 MediaProjection 再调 startReverseStreamWithProjection）。
+     * 未确认前绝不自动开录——与 W4 的 ControlledInputSession 默认拒绝
+     * 同款安全姿势；30s 无人确认由 ReverseScreenStreamer TTL 自动拒绝。
      */
     val reverseScreen: ReverseScreenStreamer by lazy {
         ReverseScreenStreamer(
@@ -878,17 +891,16 @@ class LinkSpaceService private constructor(private val appContext: Context) {
             sendBinary = { peerId, data -> sendBinaryTo(peerId, data) },
             listener = object : ReverseScreenStreamer.Listener {
                 override fun onReverseStreamRequested(request: ReverseScreenStreamer.ReverseStreamRequest) {
-                    // TODO(线2 UI)：接录屏授权 UI——MainActivity 用
-                    // MediaProjectionManager.createScreenCaptureIntent()
-                    // 弹系统授权框，拿到结果后调
-                    // startReverseStreamWithProjection(projection)。
-                    // 确认 UI 未接之前默认拒绝：不弹系统框、不自动开录。
-                    Log.w(TAG, "收到 ${request.peerId} 的反向投屏请求，录屏授权 UI 未接，已默认拒绝")
-                    reverseScreen.deny(request, "确认 UI 未接")
+                    // W7：交给 MainActivity 的确认框 + 系统录屏授权框。
+                    // 界面不在前台时请求只挂 30s，超时由 TTL 自动拒绝回 error，
+                    // 不会静默挂住桌面窗口。
+                    Log.i(TAG, "收到 ${request.peerId} 的反向投屏请求，等待本机录屏授权")
+                    _reverseStreamRequest.value = request
                 }
 
                 override fun onChanged() {
-                    // TODO(线2 UI)：反向投屏状态变化时刷新 UI（正在向谁推流）。
+                    _reverseStreamRequest.value = reverseScreen.pendingRequest
+                    _reverseStreamStatus.value = reverseScreen.status()
                 }
 
                 override fun onError(message: String) {
@@ -919,11 +931,39 @@ class LinkSpaceService private constructor(private val appContext: Context) {
     }
 
     /**
-     * UI（后续批次）：把系统录屏授权拿到的 MediaProjection 交给反向推流端。
+     * UI：把系统录屏授权拿到的 MediaProjection 交给反向推流端。
      * 调用方是 MainActivity 的录屏授权结果回调。
      */
     fun startReverseStreamWithProjection(projection: android.media.projection.MediaProjection) {
+        // 兜底：MainActivity 在授权结果里已调过 prepareReverseStreamCapture；
+        // 以后若有别的调用方跳过那步，这里再升一次（幂等），保证退后台不断流
+        prepareReverseStreamCapture()
         reverseScreen.startWithProjection(projection)
+    }
+
+    /**
+     * UI：用户拒绝反向投屏请求（确认框点「拒绝」或系统录屏框取消）。
+     * 回 screen.stream.error，桌面窗口显示明确原因后关闭。
+     */
+    fun denyReverseStream(request: ReverseScreenStreamer.ReverseStreamRequest, reason: String = "denied by user") {
+        reverseScreen.deny(request, reason)
+    }
+
+    /** UI：本机主动停止反向推流（正在推流的卡片点「停止」） */
+    fun stopReverseStream() {
+        reverseScreen.stop()
+    }
+
+    /**
+     * 录屏授权前的前台服务升级（线 2 W7，targetSdk 35）：
+     * Android 14 起 MediaProjection 必须由 mediaProjection 类型的前台
+     * 服务承接，否则应用退后台后录屏即停；且须先 createScreenCaptureIntent
+     * （用户已在系统框里同意）再起服务、再 getMediaProjection。
+     * MainActivity 在系统授权结果 RESULT_OK 后调这里，再调
+     * getMediaProjection()。
+     */
+    fun prepareReverseStreamCapture() {
+        LinkSpaceForegroundService.startMediaProjection(appContext)
     }
 
     /** 发送目标需要的完整设备 ID（信封 to 与桌面端按全等路由） */
