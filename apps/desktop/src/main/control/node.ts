@@ -59,6 +59,39 @@ export const RATE_LIMITS: Readonly<Record<string, number>> = {
   'clipboard.share': 5
 }
 
+/** 每连接消息 id 去重窗口（协议 §3）：最近这么多条 id 内的重复只处理一次 */
+export const MAX_SEEN_MESSAGE_IDS = 1024
+
+/**
+ * 每连接消息 id 去重（协议 §3）：同一 id 只处理一次。
+ * 纯逻辑，可单测。按插入顺序淘汰最旧的 id，窗口固定为最近
+ * MAX_SEEN_MESSAGE_IDS 条——连接生命周期内无界增长等于给对端
+ * 留一个内存耗尽口子。
+ */
+export class SeenMessageIds {
+  private readonly ids = new Set<string>()
+  private readonly order: string[] = []
+  /** 调用方看到的重复消息累计数（日志节流用） */
+  duplicateCount = 0
+
+  constructor(private readonly maxIds: number = MAX_SEEN_MESSAGE_IDS) {}
+
+  /** 已见过返回 true；首次见返回 false 并记入窗口 */
+  isDuplicate(id: string): boolean {
+    if (this.ids.has(id)) {
+      this.duplicateCount++
+      return true
+    }
+    this.ids.add(id)
+    this.order.push(id)
+    while (this.order.length > this.maxIds) {
+      const oldest = this.order.shift()
+      if (oldest !== undefined) this.ids.delete(oldest)
+    }
+    return false
+  }
+}
+
 /** 指纹统一成 64 位小写十六进制再比较，兼容冒号分隔与纯 hex 两种写法 */
 export function normalizeFingerprint(fp: string): string {
   return fp.replace(/:/g, '').toLowerCase()
@@ -246,6 +279,8 @@ export class ControlNode {
   private wrap(ws: WebSocket): Connection {
     // 限频滑窗（审查 P2-5）：per-connection 闭包，连接关闭随 conn 回收
     const rateWindow = new Map<string, number[]>()
+    // id 去重（协议 §3）：per-connection 闭包，连接关闭随 conn 回收
+    const seenIds = new SeenMessageIds()
     const conn: Connection = {
       peerId: '',
       // 底层 TCP 对端地址（ws 库挂在 _socket 上）。screen.stream 的
@@ -345,6 +380,17 @@ export class ControlNode {
         log.warn(`对端 ${conn.peerId || '(未知)'} 的 ${msg.type} 时间戳超偏 ${Date.now() - msg.ts}ms，丢弃`)
         return
       }
+      // from 绑定（协议 §3）：连接身份由 device.announce 登记在
+      // conn.peerId 上（pairing.ts），之后固定。from 为空（未声明身份）
+      // 或与登记身份不符的消息丢弃并记告警，不断连——连接本身已由 TLS
+      // 证书锚定，错标多为对端实现问题；断连会掐掉一条活着的合法会话
+      // （与 ts 超偏同款分级处置）。登记前（peerId 为空）只要求 from 非空。
+      if (msg.from === '' || (conn.peerId !== '' && msg.from !== conn.peerId)) {
+        log.warn(
+          `对端 ${conn.peerId || '(未知)'} 的 ${msg.type} from 与连接身份不符（from=${msg.from || '(空)'}），丢弃`
+        )
+        return
+      }
 
       // 高成本消息限频（审查 P2-5，威胁模型 T4）：input.event 的合法速率
       // 受采集 tick（12ms ≈ 83 条/s）约束，clipboard.share 是人类操作节奏。
@@ -361,6 +407,24 @@ export class ControlNode {
           conn.close(4008, 'rate limit exceeded')
           return
         }
+      }
+
+      // id 去重（协议 §3）：同一连接上同一 id 只处理一次；空 id 视为
+      // 畸形丢弃。放在限频之后：重放洪泛仍会计入限频、超限按 4008 断开，
+      // 不给留一条绕过限频的路。
+      if (msg.id === '') {
+        log.warn(`对端 ${conn.peerId || '(未知)'} 的 ${msg.type} id 为空，丢弃`)
+        return
+      }
+      if (seenIds.isDuplicate(msg.id)) {
+        // 重放多为重发/重连抖动，只记前 3 次、之后每 100 次记一次，
+        // 免得一条重放洪泛把日志刷爆（限频在上游已先拦过高成本类型）
+        if (seenIds.duplicateCount <= 3 || seenIds.duplicateCount % 100 === 0) {
+          log.warn(
+            `对端 ${conn.peerId || '(未知)'} 的 ${msg.type} id=${msg.id} 重复（第 ${seenIds.duplicateCount} 次），丢弃`
+          )
+        }
+        return
       }
 
       void node.dispatch(conn, msg)
