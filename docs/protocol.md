@@ -231,6 +231,8 @@
 
 **模式互斥（B1 与 B2/C 不可混用）**：同一输入框内，B1 组字中途（拼音未选词）不得插入 B2 `commitText` 或 C 粘贴——成品提交会结束当前组字，未选的拼音按各输入法行为可能丢字或乱序。控制端以显式输入模式开关保证同一时刻只走一条通道：切模式时上一段成品已提交完成（`commitText` 本身结束组字）；切出拼音模式时控制端提示“平板上未选词的拼音组字将被结束”。会话层对三条通道的到达消息按序串行处理，不并发。
 
+**实现核实（2026-11-03，android-35 android.jar）**：`AccessibilityInputConnection` 白名单只有 commitText / setSelection / getSurroundingText / deleteSurroundingText / sendKeyEvent / performEditorAction / performContextMenuAction / getCursorCapsMode / clearMetaKeyStates；`commitText` 返回 void、无成功回执，不抛异常即视为已提交；`finishComposingText` 不在白名单内，不可用（调研 §10.3 的待核对项已闭环）。
+
 **仍未验证（无真机）**：B1 能否成立取决于平板自带输入法是否响应经 `InputConnection.sendKeyEvent` 注入的按键做拼音组字、弹候选栏——这是三通道最大的不确定性，待用户在小新平板 Pro GT 上走查（清单 2.6 中文输入项）；B2/C 在各应用（微信输入框、浏览器地址栏、密码框）对 `commitText`/粘贴的接受程度同样待走查。
 
 ---

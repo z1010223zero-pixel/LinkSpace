@@ -452,7 +452,11 @@ class LinkSpaceAccessibilityService : AccessibilityService(), InputInjector {
 
     /**
      * 文本直通落点（协议 4.9，B2）：复用按键通道的同一个输入连接句柄。
-     * `commitText` 返回 false（目标输入框拒绝提交）同样算失败，不静默。
+     * 白名单核实（android-35 android.jar）：`AccessibilityInputConnection`
+     * 的 `commitText(CharSequence, int, TextAttribute)` 返回 void——没有
+     * 成功回执，不抛异常即视为已提交；目标输入框是否真接受（有 ROM /
+     * 输入法会静默忽略）只能真机验证。`finishComposingText` 不在白名单
+     * 内，不可用（`commitText` 本身会结束组字）。
      * 调用方（会话层）须在同一把锁内串行调用，与按键注入不并发。
      */
     private fun commitTextInternal(text: String): InputFailure? {
@@ -475,9 +479,8 @@ class LinkSpaceAccessibilityService : AccessibilityService(), InputInjector {
                 "当前没有获得焦点的输入框，文本只能提交到文本输入处，请先点一下输入框"
             )
         return try {
-            if (!connection.commitText(text, 1, null)) {
-                InputFailure(InputFailure.INJECT_FAILED, "输入连接拒绝提交文本（目标输入框可能不支持 commitText）")
-            } else null
+            connection.commitText(text, 1, null)
+            null
         } catch (e: Exception) {
             InputFailure(InputFailure.INJECT_FAILED, "输入连接提交失败：${e.message}")
         }
