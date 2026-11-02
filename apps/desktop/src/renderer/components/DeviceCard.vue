@@ -10,6 +10,10 @@ const props = defineProps<{
   dragging?: boolean
   /** 拖拽中的卡片正悬停在本卡片上 */
   dropHint?: boolean
+  /** 启动投屏进行中：按钮禁用 + 文案变「启动中…」 */
+  startBusy?: boolean
+  /** 停止投屏进行中 */
+  stopBusy?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -47,7 +51,8 @@ const stateBadge = computed(() => {
     case 'device':
       return { cls: 'badge--ok', text: '在线' }
     case 'offline':
-      return { cls: 'badge--warn', text: '离线' }
+      // 离线用灰 + 「离线」文字，黄色只留给进行中过渡态（ui-redesign §5）
+      return { cls: 'badge--neutral', text: '离线' }
     case 'unauthorized':
       return { cls: 'badge--danger', text: '未授权' }
     default:
@@ -99,12 +104,14 @@ const displayName = computed(() => props.device.model ?? '未知设备')
       <button
         v-if="!active"
         class="btn btn--primary"
-        :disabled="!isOnline"
+        :disabled="!isOnline || startBusy"
         @click="emit('start', device.serial, index)"
       >
-        启动投屏
+        {{ startBusy ? '启动中…' : '启动投屏' }}
       </button>
-      <button v-else class="btn btn--danger" @click="emit('stop', active.id)">停止投屏</button>
+      <button v-else class="btn btn--danger" :disabled="stopBusy" @click="emit('stop', active.id)">
+        {{ stopBusy ? '停止中…' : '停止投屏' }}
+      </button>
     </div>
   </article>
 </template>
