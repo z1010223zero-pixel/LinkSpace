@@ -10,6 +10,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -26,6 +27,10 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import cn.linkspace.client.ui.ScreenMirrorScreen
+import cn.linkspace.client.ui.ControlRequestDialog
+import cn.linkspace.client.ui.ReverseStreamRequestDialog
+import cn.linkspace.client.ui.StreamTokens
+import cn.linkspace.client.ui.WaitingControlDialog
 import cn.linkspace.client.ui.TouchpadScreen
 import cn.linkspace.client.service.ClipboardSync
 import cn.linkspace.client.service.DiscoveredService
@@ -362,23 +367,36 @@ fun MainScreen(service: LinkSpaceService, onClipboardToggle: (Boolean) -> Unit) 
         }
 
         // ---------- 正被电脑控制：常驻提示 + 随时终止 ----------
+        // B 线：状态色一眼可辨——被控 = 危险红底 + 红点（此前是 tertiaryContainer，
+        // 与推流卡、通知卡拉不开）；停止入口常驻（终止控制按钮）。
         if (controlledBy != null) {
             item {
                 Card(
                     colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.tertiaryContainer
+                        containerColor = StreamTokens.DangerContainer
                     )
                 ) {
                     Row(
                         Modifier.padding(12.dp).fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
+                        Box(
+                            Modifier
+                                .size(8.dp)
+                                .background(StreamTokens.Danger, CircleShape)
+                        )
+                        Spacer(Modifier.width(8.dp))
                         Text(
                             "正被 $controlledBy 远程控制",
                             Modifier.weight(1f),
                             fontSize = 13.sp
                         )
-                        OutlinedButton(onClick = { service.terminateControl() }) {
+                        OutlinedButton(
+                            onClick = { service.terminateControl() },
+                            colors = ButtonDefaults.outlinedButtonColors(
+                                contentColor = StreamTokens.Danger
+                            )
+                        ) {
                             Text("终止控制")
                         }
                     }
@@ -387,19 +405,41 @@ fun MainScreen(service: LinkSpaceService, onClipboardToggle: (Boolean) -> Unit) 
         }
 
         // ---------- 反向投屏：正在向电脑推流（线 2 W7） ----------
+        // B 线：状态色一眼可辨——推流中 = 成功绿底 + 绿点，与被控的红底
+        // 拉开；停止入口常驻在标题行（停止推流按钮）。
         val activeReverse = reverseStatus?.active
         if (activeReverse != null) {
             item {
-                Card {
+                Card(
+                    colors = CardDefaults.cardColors(
+                        containerColor = StreamTokens.SuccessContainer
+                    )
+                ) {
                     Column(Modifier.padding(14.dp)) {
-                        Text("正在向电脑推流", fontWeight = FontWeight.Medium)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                Modifier
+                                    .size(8.dp)
+                                    .background(StreamTokens.Success, CircleShape)
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                "正在向电脑推流",
+                                Modifier.weight(1f),
+                                fontWeight = FontWeight.Medium
+                            )
+                            OutlinedButton(
+                                onClick = { service.stopReverseStream() },
+                                colors = ButtonDefaults.outlinedButtonColors(
+                                    contentColor = StreamTokens.Danger
+                                )
+                            ) { Text("停止推流") }
+                        }
                         Text(
                             "${trusted.firstOrNull { it.deviceId == activeReverse.peerId }?.displayName ?: activeReverse.peerId} · ${activeReverse.width}×${activeReverse.height} · ${activeReverse.encoder}",
                             fontSize = 12.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
-                        Spacer(Modifier.height(10.dp))
-                        OutlinedButton(onClick = { service.stopReverseStream() }) { Text("停止推流") }
                     }
                 }
             }
@@ -634,41 +674,25 @@ fun MainScreen(service: LinkSpaceService, onClipboardToggle: (Boolean) -> Unit) 
         )
     }
 
-    // ---------- 等待对端确认控制请求 ----------
-    val inputStateForDialog = inputState
-    if (inputStateForDialog.phase == "waiting") {
-        AlertDialog(
-            onDismissRequest = { service.input.stop() },
-            title = { Text("正在请求控制对方电脑") },
-            text = { Text("请在电脑上确认 LinkSpace 弹出的授权提示。请求 30 秒内未确认会自动失效。") },
-            confirmButton = {},
-            dismissButton = {
-                OutlinedButton(onClick = { service.input.stop() }) { Text("取消") }
-            }
-        )
+    // ---------- 等待对端确认控制请求（B 线：补 30 秒倒计时展示） ----------
+    if (inputState.phase == "waiting") {
+        WaitingControlDialog(onCancel = { service.input.stop() })
     }
 
     // ---------- 反向投屏请求：电脑想看本机屏幕（线 2 W7） ----------
     // 每次请求都要过这道确认 + 系统录屏授权框；拒绝/取消都明确回绝，
     // 桌面窗口显示原因。30 秒无人确认由服务侧 TTL 自动拒绝。
+    // 反向投屏请求弹窗（B 线：补 30 秒倒计时与“单次有效”文案）
     reverseRequest?.let { req ->
-        AlertDialog(
-            onDismissRequest = { service.denyReverseStream(req, "denied by user") },
-            title = { Text("电脑请求查看你的屏幕") },
-            text = {
-                Text("对方想在电脑上实时查看这台平板的画面。同意后会弹出系统录屏授权框，只有你点了允许才会开始录屏；随时可以在通知栏停止。")
+        ReverseStreamRequestDialog(
+            req = req,
+            onApprove = {
+                captureRequest = req
+                val manager =
+                    context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as android.media.projection.MediaProjectionManager
+                screenCapture.launch(manager.createScreenCaptureIntent())
             },
-            confirmButton = {
-                Button(onClick = {
-                    captureRequest = req
-                    val manager =
-                        context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as android.media.projection.MediaProjectionManager
-                    screenCapture.launch(manager.createScreenCaptureIntent())
-                }) { Text("同意") }
-            },
-            dismissButton = {
-                OutlinedButton(onClick = { service.denyReverseStream(req, "denied by user") }) { Text("拒绝") }
-            }
+            onDeny = { service.denyReverseStream(req, "denied by user") }
         )
     }
 
@@ -713,27 +737,13 @@ fun MainScreen(service: LinkSpaceService, onClipboardToggle: (Boolean) -> Unit) 
     // ---------- 电脑请求控制本机：确认弹窗（协议 9.1） ----------
     // 30s 内未确认由会话层自动拒绝；弹窗被划掉按拒绝处理——
     // 确认 UI 未弹出时不放行任何输入。
+    // 电脑请求控制本机弹窗（B 线：补 30 秒倒计时与“单次有效”文案）
     if (controlRequest != null) {
         val req = controlRequest!!
-        AlertDialog(
-            onDismissRequest = { service.denyControl(req.sessionId) },
-            title = { Text("允许远程控制本机？") },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text("“${req.displayName.ifEmpty { req.peerId }}”请求在电脑上操作这台平板（点按、滑动、按键）。")
-                    Text(
-                        "点了“允许”，对方才能操作；会话结束前可随时在首页点“终止控制”拔掉。30 秒内未确认将自动拒绝。",
-                        fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            },
-            confirmButton = {
-                Button(onClick = { service.approveControl(req.sessionId) }) { Text("允许") }
-            },
-            dismissButton = {
-                OutlinedButton(onClick = { service.denyControl(req.sessionId) }) { Text("拒绝") }
-            }
+        ControlRequestDialog(
+            req = req,
+            onApprove = { service.approveControl(req.sessionId) },
+            onDeny = { service.denyControl(req.sessionId) }
         )
     }
 }
