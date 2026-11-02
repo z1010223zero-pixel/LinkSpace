@@ -5,6 +5,7 @@
 
 import { contextBridge, ipcRenderer } from 'electron'
 import type {
+  DeviceBindingView,
   DeviceEdge,
   DeviceView,
   DiscoveredDevice,
@@ -52,6 +53,14 @@ const api: LinkSpaceApi = {
   stopMirror: (id: string) => ipcRenderer.invoke('scrcpy:stopFor', id) as Promise<IpcResult<void>>,
 
   listSessions: () => ipcRenderer.invoke('scrcpy:sessions') as Promise<SessionView[]>,
+
+  listBindings: () => ipcRenderer.invoke('devices:bindings') as Promise<DeviceBindingView[]>,
+
+  bindDevice: (serial: string, deviceId: string) =>
+    ipcRenderer.invoke('devices:bind', serial, deviceId) as Promise<IpcResult<void>>,
+
+  unbindDevice: (serial: string) =>
+    ipcRenderer.invoke('devices:unbind', serial) as Promise<IpcResult<void>>,
 
   envInfo: () => ipcRenderer.invoke('env:info') as Promise<EnvInfo>,
 

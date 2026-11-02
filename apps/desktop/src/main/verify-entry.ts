@@ -6,6 +6,11 @@
 //   node out/verify/verify.js --scan     # 只扫描设备
 //
 // 该脚本会被 esbuild 单独打包，不引入 electron 依赖。
+//
+// 注意：本脚本直接调 adapter.start，不走 scrcpy:startFor 的配对门禁
+// （W2）——它是 Windows 开发机上的无头验证 harness，没有 Host/信任
+// store 可接，不是产品路径。产品内唯一启动入口是 ipc.ts 的
+// scrcpy:startFor，不要照抄本脚本绕过门禁。
 
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
