@@ -85,6 +85,10 @@ function ktConst(src, name) {
 // ---------- 读入各方源文件 ----------
 const kt = read(resolve(ANDROID, 'Protocol.kt'))
 const ktService = read(resolve(ANDROID, 'LinkSpaceService.kt'))
+const ktInjector = read(resolve(ANDROID, 'ControlledInputInjector.kt'))
+const ktA11y = read(resolve(ANDROID, 'LinkSpaceAccessibilityService.kt'))
+const tsSink = read(resolve(DESKTOP, 'input/win32/sink.ts'))
+const md = read(resolve(ROOT, 'docs/protocol.md'))
 const tsInput = read(resolve(DESKTOP, 'input/protocol.ts'))
 const tsNode = read(resolve(DESKTOP, 'control/node.ts'))
 const tsStream = read(resolve(DESKTOP, 'screen-stream.ts'))
@@ -241,6 +245,36 @@ check('maxClockSkewMs', C.maxClockSkewMs, evalNum(ktSkewM[1]), 'LinkSpaceService
 const ktClipM = ktService.match(/toByteArray\(Charsets\.UTF_8\)\.size\s*>\s*([\d_* ]+)/)
 if (!ktClipM) throw new Error('LinkSpaceService.kt 剪贴板上限未找到')
 check('clipboardMaxBytes', C.clipboardMaxBytes, evalNum(ktClipM[1]), 'LinkSpaceService.kt 剪贴板 512 * 1024')
+
+// ---------- 7. 左右键映射（线 2，协议 4.6 [PROTOCOL] 2026-11-03） ----------
+// wire 不变：b 字段三值在三处一致；落点语义分平台，文档与实现互相钉死。
+const mouseButtonsM = tsInput.match(/MOUSE_BUTTONS[^=]*=\s*\[([^\]]+)\]/)
+if (!mouseButtonsM) throw new Error('input/protocol.ts MOUSE_BUTTONS 未找到')
+const mouseButtonsTs = [...mouseButtonsM[1].matchAll(/'([^']+)'/g)].map(([, v]) => v)
+check('inputEvent.mouseButtons', C.inputEvent.mouseButtons, mouseButtonsTs, 'input/protocol.ts MOUSE_BUTTONS')
+
+const parseButtonM = ktInjector.match(/private fun parseButton[\s\S]*?\n    \}/)
+if (!parseButtonM) throw new Error('ControlledInputInjector.kt parseButton 未找到')
+const ktButtons = [...parseButtonM[0].matchAll(/"([^"]+)"\s*->\s*Button\./g)].map(([, v]) => v)
+check('inputEvent.mouseButtons', C.inputEvent.mouseButtons, ktButtons, 'ControlledInputInjector.kt parseButton')
+
+const sem = C.inputEvent.buttonSemantics
+if (!sem) {
+  failures.push('protocol.json 缺 buttonSemantics（协议 4.6 左右键映射）')
+  console.log('FAIL  protocol.json constraints.inputEvent 缺 buttonSemantics')
+} else {
+  check('buttonSemantics.android.left', 'tap-drag', sem.androidControlled?.left, 'protocol.json')
+  check('buttonSemantics.android.right', 'back', sem.androidControlled?.right, 'protocol.json')
+  check('buttonSemantics.android.middle', 'home', sem.androidControlled?.middle, 'protocol.json')
+  check('buttonSemantics.windows.left', 'left-button', sem.windowsControlled?.left, 'protocol.json')
+  check('buttonSemantics.windows.right', 'right-button', sem.windowsControlled?.right, 'protocol.json')
+  check('buttonSemantics.windows.middle', 'middle-button', sem.windowsControlled?.middle, 'protocol.json')
+}
+check('Android 右键落点 GLOBAL_ACTION_BACK', true, ktA11y.includes('GLOBAL_ACTION_BACK'), 'LinkSpaceAccessibilityService.kt')
+check('Android 中键落点 GLOBAL_ACTION_HOME', true, ktA11y.includes('GLOBAL_ACTION_HOME'), 'LinkSpaceAccessibilityService.kt')
+check('Windows 右键落点 MOUSEEVENTF_RIGHTDOWN', true, tsSink.includes('MOUSEEVENTF_RIGHTDOWN'), 'input/win32/sink.ts')
+check('Windows 中键落点 MOUSEEVENTF_MIDDLEDOWN', true, tsSink.includes('MOUSEEVENTF_MIDDLEDOWN'), 'input/win32/sink.ts')
+check('protocol.md 登记左右键映射', true, md.includes('右键返回') && md.includes('GLOBAL_ACTION_BACK'), 'docs/protocol.md §4.6')
 
 // ---------- 汇总 ----------
 console.log(`\n通过 ${passed} 项，失败 ${failures.length} 项，警告 ${warnings.length} 项。`)

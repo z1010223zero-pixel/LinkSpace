@@ -396,7 +396,7 @@ onBeforeUnmount(() => {
     </div>
 
     <footer class="rs-footer">
-      <span>点按 / 滑动 / 滚轮 / 键盘直接落到平板对应位置；中文输入暂不支持（2.3-3 另排）。</span>
+      <span>点按 / 滑动 / 滚轮 / 键盘直接落到平板对应位置；右键返回、中键回主页；中文输入暂不支持（2.3-3 另排）。</span>
       <span>关闭窗口即结束控制会话；全屏时按 Esc 退出全屏。</span>
     </footer>
   </div>

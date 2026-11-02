@@ -17,6 +17,8 @@ import android.view.accessibility.AccessibilityManager
 import cn.linkspace.client.service.ControlledInputInjector.DecodedEvent
 import cn.linkspace.client.service.ControlledInputInjector.InjectResult
 import cn.linkspace.client.service.ControlledInputInjector.InputInjector
+import cn.linkspace.client.service.ControlledInputInjector.MouseButtonTracker
+import cn.linkspace.client.service.ControlledInputInjector.PressAction
 
 /**
  * 线 2 被控端注入服务（线 2 W5，选型 A：AccessibilityService 为主）。
@@ -38,12 +40,17 @@ import cn.linkspace.client.service.ControlledInputInjector.InputInjector
  *
  * **手势模型**（无障碍服务没有“移动光标”API，只能发手势）：
  * - `move`（未按下）：只更新落点记录，不发手势；
- * - `down`：记下锚点（取最近一次 `move` 的落点），开始攒路径；
- * - `move`（已按下）：往路径里追加点（拖拽轨迹）；
- * - `up`：把整条路径一次发成一个手势（点按 = 1px 短划，拖拽 =
+ * - `down`（左键）：记下锚点（取最近一次 `move` 的落点），开始攒路径；
+ *   右/中键的 down 只记按住态，不攒路径（见左右键映射）；
+ * - `move`（左键已按下）：往路径里追加点（拖拽轨迹）；
+ * - `up`（左键）：把整条路径一次发成一个手势（点按 = 1px 短划，拖拽 =
  *   整条轨迹）。代价是拖拽过程对方要到松手才看到完整轨迹——
  *   换来的是不中途取消手势、不出现“手指半路抬起”的断裂，
  *   首版先求稳，真机联调时再评估是否改分段发。
+ * - `up`（右/中键）：不发手势，改发系统动作——右键返回
+ *   （`GLOBAL_ACTION_BACK`）、中键主页（`GLOBAL_ACTION_HOME`），
+ *   与键盘系统键在 ACTION_UP 时触发同口径。配对逻辑在
+ *   [ControlledInputInjector.MouseButtonTracker]（纯逻辑，可单测）。
  * - `wheel`：按滚动方向在落点处发一段短滑动（dy>0 向下滚 = 手指
  *   向上滑），是近似实现，不是系统级滚轮。
  * - `key`：无障碍服务没有“向任意前台应用发按键”的公开 API——
@@ -67,10 +74,15 @@ import cn.linkspace.client.service.ControlledInputInjector.InputInjector
  * Android < 13）时，[inject] 即回 [InjectResult.Failed] 带明确原因；
  * 会话层记日志并报给 UI。单批里首个失败即停，不继续注剩余事件。
  *
- * **已知未做（真机联调时定）**：左/右/中键目前都落成同一种点按
- * 手势——无障碍手势没有左右键之分，右键返回/中键 Home 的语义
- * 映射未做（走查清单 2.6 里的右键/中键项待真机时定）；拖拽轨迹
- * 在松手时才一次发出，拖拽过程对方看不到实时轨迹。
+ * **左右键映射（线 2，2026-11-03，已实现，未验证）**：左键点按/拖拽
+ * 不变；右键一次按下+抬起 = 系统返回，中键 = 系统主页（抬起时触发）。
+ * 右键不产生点按、不弹上下文菜单——无障碍手势本就没有左右键之分，
+ * 这是按走查清单 2.6 定死的语义映射，不是真右键。失败（全局动作被
+ * 系统拒绝）时回明确原因，不静默丢掉。
+ *
+ * **已知未做（真机联调时定）**：拖拽轨迹在松手时才一次发出，拖拽过程
+ * 对方看不到实时轨迹；右键/中键的实际表现（返回/主页是否生效、与前台
+ * 应用的冲突）待用户在小新平板 Pro GT 上走查（清单 2.6 右键/中键项）。
  *
  * **线程**：[dispatchGesture] 与输入连接调用是 Binder 调用，
  * 会话层的 WS 读线程直接调即可；内部状态用一把锁保护。
@@ -156,7 +168,9 @@ class LinkSpaceAccessibilityService : AccessibilityService(), InputInjector {
     /** 最近一次 move 的落点（本机像素）；down/up/wheel 都以它为锚点 */
     private var pointerX = 0f
     private var pointerY = 0f
-    private var pointerDown = false
+
+    /** 按键配对状态（左/右/中键语义见 MouseButtonTracker） */
+    private val buttonTracker = MouseButtonTracker()
 
     /** 按下期间攒下的拖拽轨迹（含锚点）；松手时一次发出 */
     private var dragPoints: MutableList<PointF>? = null
@@ -173,7 +187,7 @@ class LinkSpaceAccessibilityService : AccessibilityService(), InputInjector {
             val m = resources.displayMetrics
             pointerX = m.widthPixels / 2f
             pointerY = m.heightPixels / 2f
-            pointerDown = false
+            buttonTracker.reset()
             dragPoints = null
             heldKeys.clear()
         }
@@ -238,7 +252,7 @@ class LinkSpaceAccessibilityService : AccessibilityService(), InputInjector {
             is DecodedEvent.Move -> {
                 pointerX = ev.x.toFloat()
                 pointerY = ev.y.toFloat()
-                if (pointerDown) {
+                if (buttonTracker.trackMove()) {
                     val pts = dragPoints
                     if (pts != null && pts.size < MAX_DRAG_POINTS) {
                         pts += PointF(pointerX, pointerY)
@@ -247,27 +261,47 @@ class LinkSpaceAccessibilityService : AccessibilityService(), InputInjector {
                 null
             }
             is DecodedEvent.Down -> {
-                if (pointerDown) {
-                    Log.i(TAG, "重复 down（未见 up），忽略")
+                if (!buttonTracker.onDown(ev.button)) {
+                    Log.i(TAG, "重复 down（已有按键按住），忽略")
                     return null
                 }
-                pointerDown = true
-                dragPoints = mutableListOf(PointF(pointerX, pointerY))
+                // 只有左键攒拖拽轨迹；右/中键只记按住态，抬起时发系统动作
+                if (ev.button == ControlledInputInjector.Button.LEFT) {
+                    dragPoints = mutableListOf(PointF(pointerX, pointerY))
+                }
                 null
             }
             is DecodedEvent.Up -> {
-                if (!pointerDown) {
+                val action = buttonTracker.onUp(ev.button)
+                if (action == null) {
                     Log.i(TAG, "无匹配 down 的 up，忽略")
                     return null
                 }
-                val pts = dragPoints ?: mutableListOf(PointF(pointerX, pointerY))
-                pts += PointF(pointerX, pointerY)
-                pointerDown = false
-                dragPoints = null
-                val duration = dragDurationMs(pts)
-                if (!dispatchStroke(pts, duration)) {
-                    "手势分发被系统拒绝（button=${ev.button}，服务可能已断开）"
-                } else null
+                when (action) {
+                    PressAction.TAP -> {
+                        val pts = dragPoints ?: mutableListOf(PointF(pointerX, pointerY))
+                        pts += PointF(pointerX, pointerY)
+                        dragPoints = null
+                        val duration = dragDurationMs(pts)
+                        if (!dispatchStroke(pts, duration)) {
+                            "手势分发被系统拒绝（button=${ev.button}，服务可能已断开）"
+                        } else null
+                    }
+                    // 右键返回 / 中键主页：系统全局动作，抬起时触发。
+                    // 失败回明确原因（会话层上报），不静默丢掉。
+                    PressAction.BACK -> {
+                        dragPoints = null
+                        if (!performGlobalAction(GLOBAL_ACTION_BACK)) {
+                            "返回动作被系统拒绝（右键，服务可能已断开）"
+                        } else null
+                    }
+                    PressAction.HOME -> {
+                        dragPoints = null
+                        if (!performGlobalAction(GLOBAL_ACTION_HOME)) {
+                            "主页动作被系统拒绝（中键，服务可能已断开）"
+                        } else null
+                    }
+                }
             }
             is DecodedEvent.Wheel -> {
                 // 滚轮没有系统级手势：按滚动方向在落点处发一段短滑动。
@@ -425,7 +459,7 @@ class LinkSpaceAccessibilityService : AccessibilityService(), InputInjector {
     }
 
     private fun resetStateLocked() {
-        pointerDown = false
+        buttonTracker.reset()
         dragPoints = null
         heldKeys.clear()
         val m = runCatching { resources.displayMetrics }.getOrNull()

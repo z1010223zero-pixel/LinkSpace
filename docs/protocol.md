@@ -163,6 +163,12 @@
 - `{ t: 'wheel', dx, dy }` — 滚轮刻度，钳 ±1000
 - `{ t: 'key', vk, down }` — Windows 虚拟键码 0..255，布尔按下态
 
+> **[PROTOCOL] 2026-11-03 登记**（线 2 左右键映射，走查清单 2.6：右键返回 / 中键 Home）：
+> 线格式不变——`b` 字段自 W5 起已在两端编解码里存在（`left / right / middle`），本批不改 wire、不改信封、不改 `MAX_EVENTS_PER_MESSAGE`，只定被控端落点语义（分平台）：
+> - **Windows 被控端（线 1）**：`b` 原样进 Win32 SendInput——右键就是右键按下/抬起，中键就是中键按下/抬起（`input/win32/sink.ts`）。
+> - **Android 被控端（线 2）**：无障碍手势没有左右键之分。`left` 保持点按/拖拽手势；一次完整的 `right` 按下+抬起 = 系统返回（`GLOBAL_ACTION_BACK`），`middle` = 系统主页（`GLOBAL_ACTION_HOME`），动作在抬起时触发（与键盘系统键在 ACTION_UP 时触发同口径）；右键不产生点按、不弹上下文菜单，中键不做粘贴；按住时长不区分语义，按一次触发一次。配对逻辑在 `ControlledInputInjector.MouseButtonTracker`（纯逻辑，可 JVM 单测）；全局动作被系统拒绝时注入层回明确原因，不静默丢掉。
+> - **仍未验证（无真机）**：右键/中键的实际表现（返回/主页是否生效、与前台应用的冲突）待用户在小新平板 Pro GT 上走查（清单 2.6 右键/中键项）；桌面控制端到此只保证 `b` 原样到达被控端注入层（`verify:input` 的 6.5 节钉死）。
+
 **收敛规则（实现期定型）**：`input.event` 的 payload 完全来自对端，而注入层直接对接 Win32 SendInput，因此编解码集中在 `apps/desktop/src/main/input/protocol.ts` 纯模块，无头测试逐字段钉死边界：
 
 - **整批拒绝制**：一批事件中含任何非法事件（未知类型 / 非法字段 / 越界坐标 / NaN），整批丢弃而非逐条放行——「洗掉非法字段」不能变成可依赖的容错，否则攻击者可借机探测字段语义。
