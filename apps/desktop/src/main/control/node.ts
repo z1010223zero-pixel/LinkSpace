@@ -302,9 +302,22 @@ export class ControlNode {
         return // 无法解析的消息直接丢弃，不回应
       }
       if (!isEnvelope(msg)) return
-      // to 必须是本机，或为空（device.announce 之前双方还不知道彼此 ID）
+      // v 必须等于本机协议版本（W3，协议 §3/§8）：版本不兼容没有继续
+      // 会话的意义，断开连接并记告警。注意 __closed__ 的 emptyEnvelope
+      // 不走这里（直接构造，不经消息解析），不会被误伤。
+      if (msg.v !== PROTOCOL_VERSION) {
+        log.warn(`对端 ${conn.peerId || '(未知)'} 协议版本不兼容 v=${msg.v}，断开连接`)
+        conn.close(4007, 'version mismatch')
+        return
+      }
+      // to 必须是本机，或为空（device.announce 之前双方还不知道彼此 ID）。
+      // 不是发给本机的消息静默丢弃，不断连。
       if (msg.to !== '' && msg.to !== node.deviceId) return
-      if (Math.abs(Date.now() - msg.ts) > MAX_CLOCK_SKEW_MS) return
+      // ts 超偏丢弃并记告警：时钟漂移可能是误配，不断连。
+      if (Math.abs(Date.now() - msg.ts) > MAX_CLOCK_SKEW_MS) {
+        log.warn(`对端 ${conn.peerId || '(未知)'} 的 ${msg.type} 时间戳超偏 ${Date.now() - msg.ts}ms，丢弃`)
+        return
+      }
 
       // 高成本消息限频（审查 P2-5，威胁模型 T4）：input.event 的合法速率
       // 受采集 tick（12ms ≈ 83 条/s）约束，clipboard.share 是人类操作节奏。

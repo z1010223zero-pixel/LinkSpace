@@ -61,7 +61,7 @@
 
 **校验规则**：接收方必须校验 `v` 可处理、`to` 为自身、`ts` 在 ±60s 窗口内、`from` 为已知或待配对设备。任一项失败即断开连接并记录告警。
 
-> **实现现状（2026-10-30）**：`v` / `to` / `ts` 的信封级校验两端均未实现——当前防线是连接级身份门禁（announce 指纹锚定 + TLS 证书）与各消息处理器的来源核对。信封校验列为待办，不得据此声称已实现。
+> **实现现状（2026-11-02，W3）**：桌面端 `control/node.ts` 已有结构校验（`isEnvelope`）+ `to` 校验 + `ts` ±60s 校验，本批补 `v === PROTOCOL_VERSION` 等值校验；失败处理分级——`v` 不合断开连接并记告警，`to` 不合静默丢弃，`ts` 超偏丢弃并记告警（与上文“任一项失败即断开”的有意偏离：`to` 不合只是错投本机、`ts` 超偏多为时钟误配，不断连才是合理处置；`from` 不在信封层绑定——announce 之前对端身份未知，各 handler 保留现有来源核对）。Android 端 `LinkSpaceService.kt` 两处收消息入口（主读循环、传输等待循环）已有 `v` / `to` / `ts` 三项过滤（已核实，未改代码）。**已知缺口（两端均未实现，不隐瞒）**：`from` 与连接身份的绑定、`id` 去重。当前防线仍是连接级身份门禁（announce 指纹锚定 + TLS 证书）与各消息处理器的来源核对。
 
 ---
 
@@ -132,10 +132,11 @@
 | `transfer.accept` | 接收方 → 发送方 | `{ transferId, token }` | **用户确认保存路径后**发送。`token` 由接收方生成（randomUUID），是数据面唯一凭证；保存目录是本机路径，不出网 |
 | `transfer.reject` | 接收方 → 发送方 | `{ transferId, reason }` | 拒绝或路径不可写 |
 | `transfer.chunk` | 双向 | HTTP 分块体，非 WS 消息 | 见第 5 节 |
-| `transfer.progress` | 接收方 → 发送方 | `{ transferId, receivedBytes }` | **保留未用**（2026-10-30 双端会签）：两端均未实现发送与消费，进度实际来自数据面 `committedOffset` 与 409 偏移对账。消息定义冻结保留，将来接收方需要主动节流上报时启用 |
 | `transfer.complete` | 接收方 → 发送方 | `{ transferId, digests }` | 校验通过后发送。`digests` 是文件名 → 整体 SHA-256 的映射（多文件任务每文件一项） |
 | `transfer.cancel` | 双向 | `{ transferId, reason }` | 取消，已写入部分按策略处理 |
 | `transfer.error` | 双向 | `{ transferId, code, message }` | 失败，可重试的错误在 `code` 中标识 |
+
+> **已删除（2026-11-02，W3，方向已锁死）**：`transfer.progress`（接收方 → 发送方，`{ transferId, receivedBytes }`）从本节删除，不实现。删除原因：① 发送方进度早已来自数据面 `committedOffset` 与 409 偏移对账，该消息无消费方；② 将来真需要节流上报，应按节流语义新设计一条消息，而不是复用这条只有 `receivedBytes` 的形状；③ v1 未发布，无兼容成本。推翻 2026-10-30 两端会签的“保留未用、冻结定义、将来节流上报时启用”。
 
 **消息来源门禁**（实现期定型）：`transfer.accept / reject / cancel / complete` 都必须核对「连接身份 == 任务对端」，不匹配一律忽略。传输任务的 id 与 token 只对当事双方可见，其他连接（包括其他已配对设备）不得对别人的任务做任何操作。文件名由发送方经网络提供，接收方必须先收敛为基础名（剥掉任何路径成分）再拼接保存路径，含非法名（清洗后为空 / `.` / `..`）直接拒绝整个 offer。
 
@@ -212,7 +213,7 @@ GET    /linkspace/v1/transfer/:transferId/chunk?offset=N&length=M
 1. 发送方 `transfer.offer`，携带文件清单与总大小。
 2. 接收方展示确认 UI（保存路径 + 覆盖提醒），用户确认后 `transfer.accept`。
 3. 发送方按固定块大小（默认 4 MiB）顺序推送，块级校验。
-4. 接收方校验每块摘要，落盘。进度不走控制消息回报（`transfer.progress` 保留未用，见 4.5），发送方以数据面写入确认与偏移探针对账推进。
+4. 接收方校验每块摘要，落盘。进度不走控制消息回报（`transfer.progress` 已于 2026-11-02 删除，见 4.5），发送方以数据面写入确认与偏移探针对账推进。
 5. 全部完成且整体摘要匹配 → `transfer.complete`。
 6. 任一方 `transfer.cancel` 或连接中断 → 进入恢复流程。
 

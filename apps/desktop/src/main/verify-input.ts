@@ -15,6 +15,8 @@ import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { generate } from 'selfsigned'
+import { WebSocket } from 'ws'
+import { ControlNode, MAX_CLOCK_SKEW_MS, PROTOCOL_VERSION, type Envelope } from './control/node'
 import { Host } from './host'
 import { fingerprintOfCert, type DeviceCert } from './transfer/identity'
 import type { DiscoveredService } from './discovery'
@@ -912,6 +914,114 @@ async function testHeartbeatTimeout(): Promise<void> {
   }
 }
 
+// ---------- 信封校验：坏 v 断连、坏 to 丢弃、超偏 ts 丢弃 ----------
+//
+// 直接驱动 ControlNode + 原生 ws 客户端（不经 Host/配对）：
+// 坏信封在 announce 之前就能发，测的就是入口本身。
+// 断言：坏 v 断连（4007）且不到 handler；坏 to 静默丢弃且不断连；
+// 超偏 ts 丢弃且不断连；to 为空放行（announce 前必需）。
+// __closed__ 的 emptyEnvelope（v 已是 PROTOCOL_VERSION）不走消息
+// 解析，坏 v 测试同时验证该路径不断链（服务端 onClosed 正常触发）。
+
+async function testEnvelopeValidation(): Promise<void> {
+  console.log('\n=== 信封校验：v / to / ts 分级失败处理 ===\n')
+
+  const server = new ControlNode({
+    deviceId: 'dev_server',
+    tls: await makeCert()
+  })
+  const port = await server.listen(0)
+  const received: string[] = []
+  const closedPeers: string[] = []
+  server.on('device.heartbeat', (_conn, msg) => {
+    received.push(msg.id)
+  })
+  server.onClosed((conn) => {
+    closedPeers.push(conn.peerId)
+  })
+
+  const envelope = (over: Partial<Envelope> = {}): Record<string, unknown> => ({
+    v: PROTOCOL_VERSION,
+    type: 'device.heartbeat',
+    id: `env-${received.length}-${Date.now()}`,
+    from: 'dev_client',
+    to: 'dev_server',
+    ts: Date.now(),
+    payload: {},
+    ...over
+  })
+
+  async function rawClient(): Promise<WebSocket> {
+    const ws = new WebSocket(`wss://127.0.0.1:${port}/linkspace/v1/control`, {
+      rejectUnauthorized: false
+    })
+    await new Promise<void>((resolve, reject) => {
+      ws.once('open', resolve)
+      ws.once('error', reject)
+    })
+    return ws
+  }
+
+  try {
+    // 1. 合法信封通过；to 为空也放行（announce 之前对端身份未知）
+    const ws1 = await rawClient()
+    try {
+      ws1.send(JSON.stringify(envelope()))
+      await waitFor(() => (received.length >= 1 ? received[0] : undefined))
+      check('合法信封到达 handler', received.length === 1)
+      ws1.send(JSON.stringify(envelope({ to: '', id: 'empty-to' })))
+      await waitFor(() => (received.length >= 2 ? received[1] : undefined))
+      check('to 为空放行（announce 前）', received.length === 2)
+    } finally {
+      ws1.close()
+    }
+    await sleep(200)
+
+    // 2. 坏 v：断开连接（4007），不到 handler
+    const closedBefore = closedPeers.length
+    const ws2 = await rawClient()
+    const closeCode = await new Promise<number>((resolve) => {
+      ws2.once('close', (code) => resolve(code))
+      ws2.send(JSON.stringify(envelope({ v: PROTOCOL_VERSION + 1, id: 'bad-v' })))
+      setTimeout(() => resolve(-1), 5000)
+    })
+    check('坏 v 断开连接（4007）', closeCode === 4007, `code=${closeCode}`)
+    check('坏 v 不到达 handler', received.length === 2)
+    await waitFor(() => (closedPeers.length > closedBefore ? closedPeers.length : undefined))
+    check('坏 v 触发服务端 __closed__（emptyEnvelope 路径正常）', closedPeers.length > closedBefore)
+
+    // 3. 坏 to：静默丢弃，不断连
+    const ws3 = await rawClient()
+    try {
+      ws3.send(JSON.stringify(envelope({ to: 'dev_someone_else', id: 'bad-to' })))
+      await sleep(300)
+      check('坏 to 静默丢弃', received.length === 2)
+      ws3.send(JSON.stringify(envelope({ id: 'after-bad-to' })))
+      await waitFor(() => (received.length >= 3 ? received[2] : undefined))
+      check('坏 to 不断连（随后合法消息仍到达）', received.length === 3 && ws3.readyState === WebSocket.OPEN)
+    } finally {
+      ws3.close()
+    }
+
+    // 4. 超偏 ts：丢弃，不断连
+    const ws4 = await rawClient()
+    try {
+      ws4.send(
+        JSON.stringify(envelope({ ts: Date.now() - MAX_CLOCK_SKEW_MS - 60_000, id: 'stale-ts' }))
+      )
+      await sleep(300)
+      check('超偏 ts 丢弃', received.length === 3)
+      ws4.send(JSON.stringify(envelope({ id: 'after-stale-ts' })))
+      await waitFor(() => (received.length >= 4 ? received[3] : undefined))
+      check('超偏 ts 不断连（随后合法消息仍到达）', received.length === 4 && ws4.readyState === WebSocket.OPEN)
+    } finally {
+      ws4.close()
+    }
+  } finally {
+    server.stop()
+  }
+}
+
 async function main(): Promise<void> {
   console.log('\n=== LinkSpace 键鼠共享测试 ===\n')
 
@@ -930,6 +1040,7 @@ async function main(): Promise<void> {
 
   await testE2e()
   await testHeartbeatTimeout()
+  await testEnvelopeValidation()
 
   console.log(`\n=== 结果：${failures === 0 ? '全部通过' : `${failures} 项失败`} ===\n`)
   process.exit(failures === 0 ? 0 : 1)
