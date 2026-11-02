@@ -18,6 +18,7 @@
 | C4 | scrcpy / 键鼠 / 虚拟显示器经适配层接入 | 每个外部能力必须有可替换的接口 |
 | C5 | 高权限操作必须显式授权 | 配对、控制、文件接收、无线 ADB 均有独立授权点 |
 | C6 | 第一版不引入 Redis / K8s / 微服务 | 单机桌面进程 + 局域网直连 |
+| C7 | 对称互控：任一设备可控任一设备，带画面，方向无关 | 控制会话与画面通道不得以方向为特权；配对/授权门槛在 LinkSpace 内显性完成，不得把无线调试等系统门槛当作唯一路径 |
 
 ---
 
@@ -187,13 +188,15 @@ export interface AdapterError {
 |---|---|---|
 | `win2win` | Windows ↔ Windows 边缘穿越 | **已自研实现**（阶段 3）：koffi SendInput 注入 + 轮询采集 + 边缘穿越。Input Leap 已归档不复用（license-inventory 1.1） |
 | `android2win` | Android → Windows | **已实现**（协议 4.6）：Android 端作触控板控制端，桌面被控端会话状态机 |
-| `win2android` | Windows → Android | 未启动；第一阶段复用 scrcpy 窗口内输入 |
+| `win2android` | Windows → Android | **未启动（线 2 任务，见 `docs/symmetric-control-tasks.md`）**：自有协议里无被控分支，桌面 UI 不对 Android 设备开放控制入口。scrcpy 窗口只是过渡，不是产品线：只负责启停，不解析视频流、不接管输入、不走配对/会话授权，输入/中文/剪贴板/断网恢复均未人工验证 |
 
 两者不共用坐标系逻辑，避免把桌面边缘穿越的假设错误套到 Android 上。
 
 ### 6.4 虚拟显示器适配器
 
 **接口先定义，实现留空。** 在方案第九节的五个前置问题（9.4）验证通过前，此适配器返回 `UNSUPPORTED`，且不得阻塞主功能交付。实现放在 `native/virtual-display` 独立仓库/目录，主产品通过进程间接口调用。
+
+**对应线 3（见 `docs/symmetric-control-tasks.md`）**：此适配器即扩展屏的落地位置，`display-extend` 会话类型待落地。IddCx PoC 已通过（EWDK 构建 + 测试签名、虚拟显示器 + Desktop Duplication 取帧），但 PoC 代码在仓外，`native/virtual-display/` 目前只有 README；产品集成前须先把 PoC 代码收进仓、走 attestation 签名，再打通帧传输与 Android 接收端。
 
 ---
 
@@ -227,6 +230,7 @@ export interface AdapterError {
 | ADR-006 | 第一版持久化用本地 JSON 文件 | 数据量小、依赖少、便于排查 | 数据量上升或需要复杂查询时迁 SQLite |
 | ADR-007 | 第一版不引入任何云端服务与账号 | 符合 C1，降低隐私与合规负担 | 需要跨网段设备目录时复审 |
 | ADR-008 | 输入注入用 koffi 进程内 FFI，放弃 .NET 辅助进程（windows-helper） | 单 exe 部署、无 IPC 与进程生命周期开销；原生调用收敛在 `input/win32/native.ts` 单模块，加载失败整体降级不阻断启动 | 注入层缺陷拖垮主进程（崩溃隔离需求）时复审子进程方案 |
+| ADR-009 | 对称互控：任一设备可控任一设备，带画面，方向无关 | 2026-11-02 用户定，为 LinkSpace 与 TwinDesk / ToDesk / RustDesk 的差异点：TwinDesk 的 Remote 是无屏纯输入、电脑控平板需无线调试配对门槛，ToDesk / RustDesk 以远程桌面为主线；本项目不分主控/被控方向。控制会话与画面通道不得以方向为特权，配对/授权门槛在 LinkSpace 内显性完成 | 线 2 / 线 3 任一方向的画面 + 输入未打通时复审 |
 
 ---
 
@@ -240,3 +244,4 @@ export interface AdapterError {
 4. ~~**Android 端是否需要常驻前台服务**~~ → **已定：需要**。`LinkSpaceForegroundService`（dataSync 型）已实现保活 +「用户退出 = 彻底下线」语义。
 5. ~~**mDNS 实现**~~ → **已定：Node 侧**。先 bonjour-service，后因 Browser 去重与一次性查询缺陷重写为原始 mDNS 应答监听 + 周期补查（`discovery.ts`）；windows-helper 方案随 ADR-008 取消。
 6. **GPU 崩溃根因**：本机 Electron 的 GPU 子进程必然崩溃，已用 `--in-process-gpu` 规避。怀疑与 ToDesk 虚拟显示驱动有关，需在干净机器上验证后才能移除该开关。
+7. **媒体通道统一（线 2 / 线 3 前置）**：方向无关的 `session.* + screen.stream.*`——同一套会话与画面通道，方向只是角色互换，控制端与被控端复用对称实现。先定此选型再补线 2 / 线 3，否则两条线会再长出互不相通的临时实现。现状是三套平面并存：平板控电脑用自研 WS + H.264，电脑看手机用 scrcpy + adb 隧道（协议外），Win↔Win 键鼠用轮询采集 + SendInput。

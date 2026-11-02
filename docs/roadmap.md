@@ -93,7 +93,22 @@ SBOM 链路全部落地；两轮审查（desktop-review / project-review）的 P
 
 ---
 
-## 阶段 4：扩展屏幕技术验证（第 2–4 个月）
+## 阶段 3.5：电脑控平板/手机（线 2）
+
+**目标**：电脑能像平板控电脑一样，带画面控制平板/手机——在电脑窗口里看到平板画面并用键鼠操作，不分主控/被控方向。
+
+- 注入方案选型：AccessibilityService 还是 adb/scrcpy 产品化，以联想小新平板 Pro GT 真机为准
+- 协议补齐：Android 端实现与桌面 InputSessionCoordinator 对称的被控分支 + 反向 screen.stream（平板画面进电脑窗口）
+- 桌面控制端 UI：对 Android 设备开放控制入口，电脑窗口看平板画面
+- scrcpy 外挂收敛：统一设备模型、走配对/会话授权，嵌入窗口或退为过渡
+
+**门限**：`docs/symmetric-control-tasks.md` 线 2 的验收项全部通过，含人工走查清单（输入/中文/剪贴板/断网恢复）；`mvp-acceptance.md` 新增线 2 验收组（见任务清单）。
+
+**状态：未启动。** 自有协议里为零（sessionType 有 scrcpy / input / display-extend 三种，代码只处理 input），唯一路径是 scrcpy 外挂窗口且未人工验证。
+
+---
+
+## 阶段 4：平板当扩展屏（线 3）
 
 - 虚拟显示器创建 / 删除
 - 画面捕获与传输
@@ -106,6 +121,8 @@ SBOM 链路全部落地；两轮审查（desktop-review / project-review）的 P
 **停止判据**（重要）：若阶段 0 的 IddCx 验证未通过（3.2.1 / 3.2.2 失败），本阶段应降级为「高质量投屏式第二屏」，不投入驱动开发。差异化可以放到体验层，而不是把时间耗在内核态。
 
 > **2026-10-30 更新**：3.2.1 / 3.2.2 已实测通过（驱动创建/销毁、App 侧 Desktop Duplication 取帧全通，详见 `technical-validation.md` §3.2），**停止判据解除，本阶段定向 IddCx 真实第二屏路线**；发行签名倾向 attestation（3.3.1）。
+
+> **2026-11-02 更新**：本阶段正式定为线 3（见 `docs/symmetric-control-tasks.md`），与线 2 并列为对称互控的待补方向。PoC 代码仍在仓外（`native/virtual-display/` 只有 README），须先收进仓；发行签名走 attestation，替代测试签名 + 关闭 Secure Boot；`technical-validation.md` 3.2.3（帧传到平板的延迟/画质）与 3.2.4（断网/睡眠恢复）尚未开始。投屏式第二屏（screen.stream 镜像）明确标为降级方案，不是本阶段的交付物。
 
 ---
 
