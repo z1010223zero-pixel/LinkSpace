@@ -110,6 +110,8 @@
 | `session.stop` | 双向 | `{ sessionId, reason }` | 任一方均可终止 |
 | `session.state` | 被控方 → 控制方 | `{ sessionId, state }` | 状态同步，见 architecture.md 5.3 |
 
+> **[PROTOCOL] 2026-11-02 登记**（线 2 W4）：`sessionType: 'input'` 的被控方向新增 Android 端：`ControlledInputSession`（`apps/android/.../service/ControlledInputSession.kt`）与桌面端 `InputSessionCoordinator` 对称——pending/active 双态、30s 请求 TTL、approve/deny、会话匹配校验先行。**骨架状态**：未接 AccessibilityService（`input.event` 只校验不注入）、未改 AndroidManifest、用户确认 UI 未接（默认回 `session.reject`，理由「确认 UI 未接」，绝不自动批准）。桌面端控制端复用现有 `InputController`，`host.ts` 的 `requestInputControl` 只校验在线与已配对、无设备类型限制，对 Android 被控端同样生效。`display-extend` 不在本批动。
+
 ### 4.4 剪贴板
 
 | 类型 | 方向 | payload | 说明 |
@@ -143,6 +145,8 @@
 ### 4.6 键鼠共享（阶段 3，第 7 组）
 
 复用 4.3 的会话控制消息（`sessionType: 'input'`），在其上定义输入事件流：
+
+> **[PROTOCOL] 2026-11-02 登记**（线 2 W4）：被控方向的 Android 实现落地为骨架（见 4.3 登记）：门禁（仅已配对设备）、30s TTL、approve/deny、断连/撤销掐断均与桌面端 `InputSessionCoordinator` 对称；`input.event` 的会话匹配校验（`peerId` + `sessionId` 双核对）先行，注入点留空桩——未接 AccessibilityService，不注入任何事件；用户确认 UI 未接，默认拒绝。线 2 完整功能（无障碍注入 + 确认弹窗）另排，不在本批。
 
 | 类型 | 方向 | payload | 说明 |
 |---|---|---|---|

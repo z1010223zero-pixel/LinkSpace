@@ -181,6 +181,7 @@ class LinkSpaceService private constructor(private val appContext: Context) {
             }
             announcedConnections.remove(peerId)
             input.onPeerDisconnected(peerId)
+            controlledInput.onPeerDisconnected(peerId)
         }
 
         discovery.onChange { list -> _discovered.value = list }
@@ -320,6 +321,7 @@ class LinkSpaceService private constructor(private val appContext: Context) {
                 }
                 trust.revoke(from)
                 _trusted.value = trust.list()
+                controlledInput.onTrustRevoked(from)
                 Log.i(TAG, "对端撤销了信任: $from")
             }
 
@@ -433,7 +435,16 @@ class LinkSpaceService private constructor(private val appContext: Context) {
             // ---------- 安卓→电脑远控（4.6，控制端半边） ----------
             Protocol.TYPE_SESSION_ACCEPT -> input.onAccepted(from, payload)
             Protocol.TYPE_SESSION_REJECT -> input.onRejected(from, payload)
-            Protocol.TYPE_SESSION_STOP -> input.onStopped(from, payload)
+            Protocol.TYPE_SESSION_STOP -> {
+                input.onStopped(from, payload)
+                controlledInput.onStop(from, payload)
+            }
+
+            // ---------- 电脑→安卓远控（4.6，被控端半边，线 2 W4 骨架） ----------
+            // session.start / input.event 只可能发给被控端；session.stop 双向，
+            // 控制端与被控端各按 sessionId 匹配，不匹配的安全忽略。
+            Protocol.TYPE_SESSION_START -> controlledInput.onStart(from, payload)
+            Protocol.TYPE_INPUT_EVENT -> controlledInput.onEvent(from, payload)
         }
     }
 
@@ -719,27 +730,33 @@ class LinkSpaceService private constructor(private val appContext: Context) {
             Thread(r, "linkspace-outbound-write").apply { isDaemon = true }
         }
 
+    /**
+     * 控制消息出站路由（控制端 [input] 与被控端 [controlledInput] 共用）：
+     * 出站连接（本端主动连出的控制通道）优先，否则走入站服务回发。
+     * 提交到写线程执行，禁止在调用线程（可能是 UI 线程）直接写 socket。
+     */
+    private fun sendControlMessage(peerId: String, type: String, payload: JSONObject.() -> Unit) {
+        // 出站连接（本端主动连出的控制通道）优先：桌面端只把消息
+        // 投递给自己 accept 进来的连接，主动发起控制时只有这条
+        // 出站链路能把 session.start/事件送进桌面端。
+        val out = outbound
+        if (out != null && out.peerId == peerId) {
+            val text = envelope(type, peerId, payload).toString()
+            val conn = out.conn
+            Log.d(TAG, "out-> $type ${text.length}B")
+            outboundWriter.execute {
+                runCatching { client.sendText(conn, text) }
+                    .onFailure { Log.w(TAG, "out-send 失败: ${it.javaClass.simpleName}: ${it.message}") }
+            }
+        } else {
+            Log.w(TAG, "send 走入站路由（out=${out?.peerId}, peer=$peerId）")
+            server?.sendControlTo(peerId, envelope(type, peerId, payload))
+        }
+    }
+
     val input: InputController by lazy {
         InputController(
-            send = { peerId, type, payloadFn ->
-                // 出站连接（本端主动连出的控制通道）优先：桌面端只把消息
-                // 投递给自己 accept 进来的连接，主动发起控制时只有这条
-                // 出站链路能把 session.start/事件送进桌面端。
-                // 提交到写线程执行，禁止在调用线程（可能是 UI 线程）直接写
-                val out = outbound
-                if (out != null && out.peerId == peerId) {
-                    val text = envelope(type, peerId, payloadFn).toString()
-                    val conn = out.conn
-                    Log.d(TAG, "out-> $type ${text.length}B")
-                    outboundWriter.execute {
-                        runCatching { client.sendText(conn, text) }
-                            .onFailure { Log.w(TAG, "out-send 失败: ${it.javaClass.simpleName}: ${it.message}") }
-                    }
-                } else {
-                    Log.w(TAG, "send 走入站路由（out=${out?.peerId}, peer=$peerId）")
-                    server?.sendControlTo(peerId, envelope(type, peerId, payloadFn))
-                }
-            },
+            send = { peerId, type, payloadFn -> sendControlMessage(peerId, type, payloadFn) },
             listener = object : InputController.Listener {
                 override fun onSessionActive(peerId: String, sessionId: String, remoteScreen: InputController.Screen) {
                     _inputState.value = InputState("active", peerId, remoteScreen, input.declaredScreen)
@@ -754,6 +771,41 @@ class LinkSpaceService private constructor(private val appContext: Context) {
 
                 override fun onWaiting(peerId: String) {
                     _inputState.value = InputState("waiting", peerId)
+                }
+            }
+        )
+    }
+
+    // ---------- 电脑→安卓远控（协议 4.6，被控端半边，线 2 W4 骨架） ----------
+
+    /**
+     * 被控端会话骨架：桌面作控制端向本机发起 session.start 时的接待逻辑，
+     * 与桌面端 InputSessionCoordinator 对称。W4 只做骨架：
+     * pending/active 状态、30s 请求 TTL、approve/deny、会话匹配校验先行；
+     * 未接 AccessibilityService（onEvent 只校验不注入），未改 AndroidManifest。
+     *
+     * 用户确认 UI 未接：onControlRequested 的默认实现先记日志并回
+     * session.reject（理由「确认 UI 未接」），绝不自动批准——安全红线。
+     * 真实确认弹窗接入后把该 TODO 桩换成 UI 回调。
+     */
+    val controlledInput: ControlledInputSession by lazy {
+        ControlledInputSession(
+            isPeerAuthorized = { peerId -> trust.isKnown(peerId) },
+            localScreen = {
+                val m = appContext.resources.displayMetrics
+                InputController.Screen(m.widthPixels.coerceAtLeast(1), m.heightPixels.coerceAtLeast(1))
+            },
+            send = { peerId, type, payloadFn -> sendControlMessage(peerId, type, payloadFn) },
+            listener = object : ControlledInputSession.Listener {
+                override fun onControlRequested(request: ControlledInputSession.ControlRequest) {
+                    // TODO(线2实现)：接用户确认 UI（确认弹窗 → approve/deny）。
+                    // 确认 UI 未接之前默认拒绝：不弹提示、不自动批准。
+                    Log.w(TAG, "收到 ${request.peerId} 的键鼠控制请求，确认 UI 未接，已默认拒绝")
+                    controlledInput.deny(request.sessionId, "确认 UI 未接")
+                }
+
+                override fun onChanged() {
+                    // TODO(线2实现)：被控会话状态变化时刷新 UI（正被谁控制）。
                 }
             }
         )
@@ -909,7 +961,13 @@ class LinkSpaceService private constructor(private val appContext: Context) {
                 when (msg.optString("type")) {
                     Protocol.TYPE_SESSION_ACCEPT -> input.onAccepted(from, payload)
                     Protocol.TYPE_SESSION_REJECT -> input.onRejected(from, payload)
-                    Protocol.TYPE_SESSION_STOP -> input.onStopped(from, payload)
+                    Protocol.TYPE_SESSION_STOP -> {
+                        input.onStopped(from, payload)
+                        controlledInput.onStop(from, payload)
+                    }
+                    // ---------- 电脑→安卓远控（4.6，被控端半边，线 2 W4 骨架） ----------
+                    Protocol.TYPE_SESSION_START -> controlledInput.onStart(from, payload)
+                    Protocol.TYPE_INPUT_EVENT -> controlledInput.onEvent(from, payload)
                     // ---------- 屏幕投屏 ----------
                     Protocol.TYPE_SCREEN_STREAM_START -> {
                         Log.i(TAG, "收到投屏启动 w=${payload.optInt("w")} h=${payload.optInt("h")}")
@@ -972,6 +1030,7 @@ class LinkSpaceService private constructor(private val appContext: Context) {
                 outbound = null
                 val wasStreaming = _screenStream.value != null || streamDecoder != null
                 input.onPeerDisconnected(fullId)
+                controlledInput.onPeerDisconnected(fullId)
                 // 投屏中连接断开：自动重连一次（读循环死亡 = WS 帧解析失
                 // 同步等瞬态故障，重建链路常可自愈；连续失败由用户重试）
                 if (wasStreaming) scheduleStreamReconnect(fullId)
@@ -1265,6 +1324,7 @@ class LinkSpaceService private constructor(private val appContext: Context) {
      */
     fun stopAll() {
         input.stop("stopped by user")
+        controlledInput.terminate()
         stop()
         taskMap.clear()
         _transfers.value = emptyList()
