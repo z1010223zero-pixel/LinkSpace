@@ -35,6 +35,9 @@ export interface TransferInfo {
 const CHANNELS = [
   'devices:list',
   'devices:refresh',
+  'devices:bindings',
+  'devices:bind',
+  'devices:unbind',
   'scrcpy:startFor',
   'scrcpy:stopFor',
   'scrcpy:sessions',
@@ -120,8 +123,36 @@ export function registerIpc(
     return { ok: true as const, value: host.layoutStore.sort(view, (d) => d.serial) }
   })
 
+  // ---------- adb serial ↔ deviceId 显式绑定（W2） ----------
+  // USB 设备没有 IP 可 join，投屏前须由用户显式绑定到一台已配对设备一次。
+  // 绑定只认 serial 与 deviceId，不做型号/显示名模糊匹配。
+  invoke('devices:bindings', () => host.scrcpyBindings())
+
+  ipcMain.handle('devices:bind', async (_e, serial: unknown, deviceId: unknown) => {
+    if (typeof serial !== 'string' || !serial) return fail('缺少设备序列号')
+    if (typeof deviceId !== 'string' || !deviceId) return fail('缺少设备 ID')
+    if (!devices.view().some((d) => d.serial === serial)) return fail('该设备当前未连接')
+    const r = host.bindScrcpyDevice(serial, deviceId)
+    return r.ok ? { ok: true as const } : fail(r.error ?? '绑定失败')
+  })
+
+  ipcMain.handle('devices:unbind', async (_e, serial: unknown) => {
+    if (typeof serial !== 'string' || !serial) return fail('缺少设备序列号')
+    host.unbindScrcpyDevice(serial)
+    return { ok: true as const }
+  })
+
   ipcMain.handle('scrcpy:startFor', async (_e, serial: unknown, opts: unknown) => {
     if (typeof serial !== 'string' || !serial) return fail('缺少设备序列号')
+    // W2 门禁（main 进程）：serial 必须解析到一台已配对设备，否则拒绝。
+    // 未配对返回 AUTH_REQUIRED，不静默放行。
+    const gate = host.resolveScrcpyDevice(serial)
+    if (!gate.ok) {
+      return {
+        ok: false as const,
+        error: { code: 'AUTH_REQUIRED', message: gate.error, retryable: false }
+      }
+    }
     const options = (opts ?? {}) as StartOptions
     const result = await adapter.start(serial, options)
     broadcast(getWindow, 'sessions:changed')
@@ -373,6 +404,15 @@ export function registerIpc(
   })
 
   invoke('ping', () => 'pong')
+
+  // W2 撤销级联：Host 撤销信任时算出属于该设备的 serial，停掉对应会话。
+  // 判定在 Host 内，停会话的动作在这里（adapter 侧）。
+  host.setScrcpyRevokedHandler(async (_deviceId, matches) => {
+    const targets = adapter
+      .list()
+      .filter((s) => (s.state === 'starting' || s.state === 'running') && matches(s.serial))
+    await Promise.all(targets.map((s) => adapter.stop(s.id)))
+  })
 
   // 事件转发
   devices.on('changed', () => broadcast(getWindow, 'devices:changed'))

@@ -12,6 +12,13 @@ import type { Server } from 'node:https'
 import { app, clipboard } from 'electron'
 import { getDeviceCert, setIdentityDir, deviceIdOfCert, type DeviceCert } from './transfer/identity'
 import { TrustStore, type TrustEntry, type TrustScope } from './transfer/trust'
+import {
+  DeviceBindingStore,
+  resolveScrcpyDeviceId,
+  serialBelongsToDevice,
+  type DeviceBinding,
+  type ScrcpyResolveResult
+} from './device-binding'
 import { TransferManager, type TransferFile, type TransferTask } from './transfer/manager'
 import { startTransferServer, type StartedServer } from './transfer/server'
 import { ControlNode, type Connection } from './control/node'
@@ -118,6 +125,12 @@ export class Host {
    */
   private deviceId = ''
   private readonly trust: TrustStore
+  /** serial↔deviceId 绑定（W2）：与信任清单同处一个 dataDir */
+  private readonly bindings: DeviceBindingStore
+  /** scrcpy 撤销级联出口：由 registerIpc 注入 adapter 侧实现 */
+  private scrcpyRevokedHandler:
+    | ((deviceId: string, matches: (serial: string) => boolean) => void | Promise<void>)
+    | null = null
   private readonly layout: LayoutStore
   private readonly profile: ProfileStore
   /**
@@ -166,6 +179,7 @@ export class Host {
       dir: dataDir,
       defaultScope: opts.defaultScope ?? ['file', 'clipboard']
     })
+    this.bindings = new DeviceBindingStore({ dir: dataDir })
     this.layout = new LayoutStore({ dir: dataDir })
     this.profile = new ProfileStore({ dir: dataDir })
     this.inputLayout = new InputLayoutStore({ dir: dataDir })
@@ -218,6 +232,17 @@ export class Host {
 
   get trustStore(): TrustStore {
     return this.trust
+  }
+
+  /**
+   * 注入 scrcpy 撤销出口（W2）。撤销信任时 Host 回调此函数，告知调用方
+   * 哪些 adb serial 属于被撤销设备；调用方负责停掉这些 serial 上的会话。
+   * 判定逻辑在 Host 内，停会话的动作在外，Host 不直接依赖 ScrcpyAdapter。
+   */
+  setScrcpyRevokedHandler(
+    cb: (deviceId: string, matches: (serial: string) => boolean) => void | Promise<void>
+  ): void {
+    this.scrcpyRevokedHandler = cb
   }
 
   get layoutStore(): LayoutStore {
@@ -381,6 +406,20 @@ export class Host {
         this.emit('paired', entry)
       })
       .onRevoked((deviceId) => {
+        // W2 撤销级联（P0）：撤销前先算出属于该设备的 adb serial——显式
+        // 绑定快照 + 无线 IP-join。peers 表删掉后 remoteAddress 就拿不到了，
+        // 绑定删掉后快照也失效，所以必须在删除之前捕获。
+        const conn = this.peers.get(deviceId)
+        const remoteIp = conn?.remoteAddress ?? null
+        const boundSerials = this.bindings.serialsFor(deviceId)
+        const matches = (serial: string): boolean =>
+          serialBelongsToDevice(serial, { boundSerials, remoteIp })
+        this.bindings.removeForDevice(deviceId)
+        // 停会话的动作由 registerIpc 注入的 adapter 回调执行；回调异常
+        // 不影响撤销继续推进
+        void Promise.resolve(this.scrcpyRevokedHandler?.(deviceId, matches)).catch((err) => {
+          log.warn(`撤销级联停止 scrcpy 会话失败: ${err instanceof Error ? err.message : String(err)}`)
+        })
         this.peers.delete(deviceId)
         // 撤销必须级联（审查 2.2 P1）：不清任务的话，被撤销方持原证书
         // 重连即可收到挂起任务的 offer 并完成 accept/token 交换。
@@ -451,6 +490,47 @@ export class Host {
 
   revokeTrust(deviceId: string): boolean {
     return this.pairing!.revoke(deviceId)
+  }
+
+  // ---------- scrcpy 授权门禁（W2 安全修复） ----------
+
+  /**
+   * scrcpy 启动门禁：serial → 已配对 deviceId。
+   * 未配对 / 未绑定的设备一律拒绝，调用方（ipc.ts）据此返回 AUTH_REQUIRED。
+   */
+  resolveScrcpyDevice(serial: string): ScrcpyResolveResult {
+    return resolveScrcpyDeviceId(serial, {
+      bindings: this.bindings,
+      isTrusted: (id) => this.trust.isKnown(id),
+      deviceIdByIp: (ip) => {
+        for (const [deviceId, conn] of this.peers) {
+          if (conn.remoteAddress === ip) return deviceId
+        }
+        return null
+      }
+    })
+  }
+
+  /**
+   * 用户显式建立一条 serial↔deviceId 绑定（USB 设备投屏的前置条件）。
+   * deviceId 必须已配对；serial 已绑到别的设备时会被覆盖（用户纠错）。
+   */
+  bindScrcpyDevice(serial: string, deviceId: string): { ok: boolean; error?: string } {
+    if (!serial) return { ok: false, error: '缺少设备序列号' }
+    if (!deviceId) return { ok: false, error: '缺少设备 ID' }
+    if (!this.trust.isKnown(deviceId)) return { ok: false, error: '该设备未配对，无法绑定' }
+    this.bindings.bind(serial, deviceId)
+    return { ok: true }
+  }
+
+  /** 删除一条显式绑定 */
+  unbindScrcpyDevice(serial: string): boolean {
+    return this.bindings.unbind(serial)
+  }
+
+  /** 当前全部显式绑定（供 UI 展示） */
+  scrcpyBindings(): DeviceBinding[] {
+    return this.bindings.list()
   }
 
   trustedDevices(): TrustEntry[] {
