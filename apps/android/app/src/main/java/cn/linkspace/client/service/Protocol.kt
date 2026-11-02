@@ -60,6 +60,41 @@ object Protocol {
     const val TYPE_SCREEN_STREAM_DISPLAYS = "screen.stream.displays"
     const val TYPE_SCREEN_CURSOR = "screen.cursor"
 
+    /**
+     * screen.stream.stop 的方向位（协议 4.7）：标识停的是哪一路流。
+     * forward = 线 1（桌面 → 平板）；reverse = 反向（平板 → 桌面）。
+     * 与桌面端 screen-stream.ts 的 STREAM_DIRECTION_* 同值，
+     * 约束见 protocol.json constraints.streamDirections。
+     */
+    const val STREAM_DIRECTION_FORWARD = "forward"
+    const val STREAM_DIRECTION_REVERSE = "reverse"
+
+    /**
+     * 解析 screen.stream.stop 的停流方向（与桌面端 screen-stream.ts 的
+     * resolveStreamStopDirection 同规则，两端必须一致）：
+     * - direction 明确给出 forward/reverse：直接采用；
+     * - direction 缺失或为 null（旧版本对端）：单路在跑时停那一路；
+     *   双向都在跑时只停 forward（本消息最初的语义），绝不顺手停掉
+     *   另一路；两路都没跑返回 null（忽略，不回声）；
+     * - direction 非法：返回 null，调用方忽略本消息并记日志。
+     * forwardLive / reverseLive 由调用方按发消息的对端取数（只认属于
+     * 该对端的流），不要传全局状态。
+     */
+    fun resolveStreamStopDirection(direction: String?, forwardLive: Boolean, reverseLive: Boolean): String? {
+        if (direction == null) {
+            return when {
+                forwardLive && !reverseLive -> STREAM_DIRECTION_FORWARD
+                reverseLive && !forwardLive -> STREAM_DIRECTION_REVERSE
+                forwardLive && reverseLive -> STREAM_DIRECTION_FORWARD
+                else -> null
+            }
+        }
+        return when (direction) {
+            STREAM_DIRECTION_FORWARD, STREAM_DIRECTION_REVERSE -> direction
+            else -> null
+        }
+    }
+
     /** 投屏粘贴（协议 4.8）：写被控端剪贴板并注入 Ctrl+V，寄生 input 会话 */
     const val TYPE_SCREEN_PASTE = "screen.paste"
 

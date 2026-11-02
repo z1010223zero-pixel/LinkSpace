@@ -60,6 +60,44 @@ export const STREAM_QUALITY_PRESETS: Array<{ label: string; width: number; fps: 
  */
 export const STREAM_RECONNECT_BACKOFFS_MS: readonly number[] = [5000, 10000, 20000, 30000]
 
+/**
+ * screen.stream.stop 的方向位（协议 4.7）：标识停的是哪一路流。
+ * forward = 线 1（桌面 → 平板，桌面是源）；reverse = 反向（平板 →
+ * 桌面，平板是源）。与 Android 端 Protocol.kt 的 STREAM_DIRECTION_*
+ * 同值，约束见 protocol.json constraints.streamDirections。
+ */
+export const STREAM_DIRECTION_FORWARD = 'forward'
+export const STREAM_DIRECTION_REVERSE = 'reverse'
+/** screen.stream.stop payload.direction 的取值 */
+export type ScreenStreamDirection = 'forward' | 'reverse'
+
+/**
+ * 解析 screen.stream.stop 的停流方向（与 Android 端 Protocol.kt 的
+ * resolveStreamStopDirection 同规则，两端必须一致）：
+ * - direction 明确给出 forward/reverse：直接采用；
+ * - direction 缺失或为 null（旧版本对端）：单路在跑时停那一路；
+ *   双向都在跑时只停 forward（本消息最初的语义），绝不顺手停掉
+ *   另一路；两路都没跑返回 null（忽略，不回声）；
+ * - direction 非法：返回 null，调用方忽略本消息并记日志。
+ * forwardLive / reverseLive 由调用方按发消息的对端取数（只认属于
+ * 该对端的流），不要传全局状态。
+ */
+export function resolveStreamStopDirection(
+  payload: unknown,
+  forwardLive: boolean,
+  reverseLive: boolean
+): ScreenStreamDirection | null {
+  const direction = (payload as { direction?: unknown } | null)?.direction
+  if (direction === undefined || direction === null) {
+    if (forwardLive && !reverseLive) return STREAM_DIRECTION_FORWARD
+    if (reverseLive && !forwardLive) return STREAM_DIRECTION_REVERSE
+    if (forwardLive && reverseLive) return STREAM_DIRECTION_FORWARD
+    return null
+  }
+  if (direction === STREAM_DIRECTION_FORWARD || direction === STREAM_DIRECTION_REVERSE) return direction
+  return null
+}
+
 export class ScreenStreamService {
   private proc: ChildProcessWithoutNullStreams | null = null
   private stderrTail: string[] = []

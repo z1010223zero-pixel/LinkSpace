@@ -187,7 +187,7 @@
 > - **编码**：MediaCodec（Surface 直连 VirtualDisplay）优先，启动失败回落 JavaCV/libx264 软编（线 1 在该 ROM 上已验证软解可靠，编码侧同样留回落口）。分辨率档位与码率档位与线 1 同口径：720p/1080p/1440p/2160p（目标宽 1280/1920/2560/3840），t0 不限流/t1 6M/t2 3M/t3 1.5M；换分辨率重启编码器，换码率档 MediaCodec 走 setParameters（软编走 recorder 重启）。
 > - **背压与重连（复用线 1 口径）**：发送积压超 3MB 丢到最近关键帧（与线 1 解码端同值）；码率自适应 2s 采样，>1MB 计分 +1、<100KB 计分 -1，连续 3 次拥塞降档、连续 -8 升档；断线重连退避 5/10/20/30s×4——观看方（桌面）重发 `screen.stream.request`，4 次未成功停手；解码端关键帧恢复（丢到最近 SPS）与线 1 相同。
 > - **[PROTOCOL] 2026-11-02 登记**（线 2 W7）：录屏授权 UI 已接线——MainActivity 弹确认框，同意后弹系统录屏授权框，授权后调 `LinkSpaceService.startReverseStreamWithProjection()`；拒绝/取消回 `screen.stream.error`（理由 `denied by user` / `failed to start screen capture`），桌面窗口显示原因后关闭；30s 无人确认由 `ReverseScreenStreamer` TTL 自动拒绝。targetSdk 35 下退后台承接已补：AndroidManifest 前台服务加 `foregroundServiceType="dataSync|mediaProjection"` + `FOREGROUND_SERVICE_MEDIA_PROJECTION` 权限，授权后前台服务升级为双类型。
-> - **已知局限**：`screen.stream.stop` 没有方向位——双向流同时在跑时一方停流会把另一方也停掉；真要并发双向需给 stop 加流标识，本批不做。**仍未验证（无真机）**：MediaCodec 在该 ROM 上的实际编码表现、Annex-B/AVCC 形态、画面延迟、码率自适应效果；退后台后录屏是否持续；系统授权框的实际表现。
+> - **[PROTOCOL] 2026-11-03 登记**（线 2 未阻塞项 2）：`screen.stream.stop` 的方向位已落地（见下表 `direction`），双向并发时各停各的；混用版本时按上表矩阵退化（旧端仍会双停，须两端都升级才完整）。**仍未验证（无真机）**：并发双向流的停流行为待用户在小新平板 Pro GT 上走查；MediaCodec 在该 ROM 上的实际编码表现、Annex-B/AVCC 形态、画面延迟、码率自适应效果；退后台后录屏是否持续；系统授权框的实际表现。
 
 | 类型 | 方向 | payload | 说明 |
 |---|---|---|---|
@@ -195,7 +195,7 @@
 | `screen.stream.displays` | 被控端 → 控制端 | `{ displays: [{ x, y, w, h }] }` | 多显示器清单（虚拟屏坐标），控制端弹选择器。**[PROTOCOL] 2026-10-31 登记**（ToDesk 式多屏选择，用户提出） |
 | `screen.cursor` | 被控端 → 控制端 | `{ x, y, w, h }` | 物理光标坐标广播（region-local 像素 + 区域尺寸，33ms 限流），控制端本地绘制光标覆盖层（采集 draw_mouse=0 不含光标）。**[PROTOCOL] 2026-10-31 登记**（开源方案同款：光标本地画，与采集解耦） |
 | `screen.stream.start` | 被控端 → 控制端 | `{ w, h, scaleWidth }` | 推流开始。`w/h` 是被控端虚拟屏全景尺寸（触控换算基准之一；实际流分辨率以流内 SPS 为准，平板按其 letterbox 等比渲染）；`scaleWidth` 是当前档位。**[PROTOCOL] 2026-11-01 登记**。**[PROTOCOL] 2026-11-02 登记**（线 2 W6，反向）：平板作源端时同一条消息反向使用——`w/h` 是平板编码后的实际流尺寸（桌面接收端据此切 RGBA 帧），`scaleWidth` 是当前档位。 |
-| `screen.stream.stop` | 双向 | `{}` | 停止投屏（控制端取消 / 被控端 ffmpeg 意外退出时通知对端清 UI）。会话结束（session.stop/断连）隐式终止投流，不发本消息 |
+| `screen.stream.stop` | 双向 | `{ direction?: "forward" \| "reverse" }` | 停止投屏（控制端取消 / 被控端 ffmpeg 意外退出时通知对端清 UI）。`direction` 标识停的是哪一路流：`forward` = 线 1（桌面 → 平板），`reverse` = 反向（平板 → 桌面）。会话结束（session.stop/断连）隐式终止投流，不发本消息。**[PROTOCOL] 2026-11-03 登记**（线 2 未阻塞项 2）：`direction` 缺失 = 旧版本对端——接收方按本端状态解析：单路在跑时停那一路；双向都在跑时只停 `forward`（本消息最初的语义），绝不顺手停掉另一路；两路都没跑则忽略。`direction` 非法值忽略，不回声。回声规则：接收方只在确实停掉一路流时才回发带同 `direction` 的 stop 确认，避免来回 ping-pong。混用版本矩阵：新+新精确分流；新接收+旧发送时单路场景正确、双向并发时反向流会继续跑直到平板侧停流/断连/撤销；旧接收+新发送时旧端忽略该字段、仍会双停——完整修复需两端都升级。`request`/`start` 不带 `direction`：`start` 的发送方角色本身已区分方向（源端发、观看方收），无歧义。 |
 | `screen.stream.error` | 被控端 → 控制端 | `{ message }` | 投屏失败回告（无会话 / 缺 ffmpeg / 启动失败） |
 
 **视频帧通道**：被控端 ffmpeg（gdigrab 抓屏 → libx264 baseline → Annex-B stdout）的字节块以 WS 二进制帧（opcode 0x2）经控制连接发出；控制端逐块喂硬件解码器。帧无序号、无确认——丢帧表现为画面短暂停滞，等下一个 IDR 恢复（`-g 30` 即 1s 一个 IDR）。

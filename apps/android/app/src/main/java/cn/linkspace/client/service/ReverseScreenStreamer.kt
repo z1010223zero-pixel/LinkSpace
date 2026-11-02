@@ -242,9 +242,17 @@ class ReverseScreenStreamer(
         startEncoderFor(req, projection)
     }
 
-    /** 处理对端发来的 screen.stream.stop（反向） */
+    /**
+     * 处理对端发来的 screen.stream.stop（反向）。direction 由调用方
+     * （LinkSpaceService）按协议 4.7 解析后传入——本类只负责反向流，
+     * forward 的 stop 与本类无关，直接忽略。
+     */
     @Synchronized
-    fun onStop(peerId: String, payload: JSONObject) {
+    fun onStop(peerId: String, direction: String) {
+        if (direction == Protocol.STREAM_DIRECTION_FORWARD) {
+            Log.i(TAG, "screen.stream.stop 是 forward 流，与反向推流无关，忽略")
+            return
+        }
         val a = active
         if (a != null && a.peerId == peerId) {
             // 对端主动停：停推流并回 stop 确认（与桌面端 screen.stream.stop
@@ -503,7 +511,9 @@ class ReverseScreenStreamer(
         queuedBytes.set(0)
         dropping = false
         if (a != null && notifyPeer) {
-            send(a.peerId, Protocol.TYPE_SCREEN_STREAM_STOP) {}
+            send(a.peerId, Protocol.TYPE_SCREEN_STREAM_STOP) {
+                put("direction", Protocol.STREAM_DIRECTION_REVERSE)
+            }
         }
         Log.i(TAG, "反向投屏停止：$reason")
         listener?.onChanged()
