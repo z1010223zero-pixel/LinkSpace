@@ -112,6 +112,8 @@ export interface HostEvents {
   reverseStreamFrame: [ReverseStreamFrame]
   /** 反向投屏状态变化（开始/结束/失败/重连），UI 刷新 */
   reverseStreamChanged: []
+  /** 平板回的输入失败（协议 4.9 input.error）：画面窗口订阅后提示用户 */
+  reverseInputError: [{ peerId: string; code: string; reason: string }]
 }
 
 /** 对端 device.rename 的最小受理间隔（审查 P3）：每次受理都伴随落盘与 UI 事件 */
@@ -1329,6 +1331,21 @@ export class Host {
       })
     })
 
+    // ---------- 输入失败回告（协议 4.9，input.error）----------
+    // 平板侧 input.event / input.text / screen.paste 注入失败时回告：
+    // 只认当前反向控制会话的对端与会话，旁观连接的回告忽略；原因原样
+    // 透传到画面窗口（无焦点时提示点输入框，不自动点按聚焦）。
+    control.on('input.error', (conn, msg) => {
+      const peerId = conn.peerId
+      if (!peerId || this.inputController?.controlling !== peerId) return
+      const p = msg.payload as { sessionId?: unknown; code?: unknown; reason?: unknown }
+      if (typeof p.sessionId !== 'string' || p.sessionId !== this.inputController.activeSession?.sessionId) return
+      const code = typeof p.code === 'string' ? p.code : 'inject-failed'
+      const reason = typeof p.reason === 'string' && p.reason ? p.reason : '远程输入失败'
+      log.warn(`[input.error] ${peerId} ${code}：${reason}`)
+      this.emit('reverseInputError', { peerId, code, reason })
+    })
+
     // 断连清理收口在 handleConnClosed（startControl 注册，带幸存者
     // 检查）。这里曾再注册一份 onClosed 推 onPeerDisconnected——双连接
     // 并存时旧连接迟到的 close 会经这份冗余注册误杀幸存连接上的会话
@@ -1589,6 +1606,27 @@ export class Host {
   /** 控制端事件外发（采集层调用）。非活动会话时是安全空操作 */
   sendInputEvents(events: InputEvent[]): void {
     this.inputController?.sendEvents(events)
+  }
+
+  /** 文本直通（协议 4.9，B2）：成品文本分段发给平板。只在反向控制会话中发送 */
+  sendInputText(peerId: string, text: string): { ok: true } | { ok: false; error: string } {
+    if (!this.inputController || this.inputController.controlling !== peerId) {
+      return { ok: false, error: '键鼠控制尚未建立：请等平板确认控制后再操作' }
+    }
+    this.inputController.sendText(text)
+    return { ok: true }
+  }
+
+  /** 粘贴回退（协议 4.8，C）：桌面→平板方向，发送前调用方须提示将覆盖平板剪贴板 */
+  sendScreenPasteToTablet(peerId: string, text: string): { ok: true } | { ok: false; error: string } {
+    if (!this.inputController || this.inputController.controlling !== peerId) {
+      return { ok: false, error: '键鼠控制尚未建立：请等平板确认控制后再操作' }
+    }
+    if (Buffer.byteLength(text, 'utf8') > 512 * 1024) {
+      return { ok: false, error: '粘贴内容超过 512 KiB 上限' }
+    }
+    this.inputController.sendPaste(text)
+    return { ok: true }
   }
 
   async stop(): Promise<void> {

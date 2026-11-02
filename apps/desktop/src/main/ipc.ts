@@ -77,6 +77,8 @@ const CHANNELS = [
   'reverse-stream:stop',
   'reverse-stream:retryInput',
   'reverse-stream:input',
+  'reverse-stream:text',
+  'reverse-stream:paste',
   'ping'
 ] as const
 
@@ -489,6 +491,22 @@ export function registerIpc(
     if (!events) return fail('输入事件不合法')
     host.sendInputEvents(events)
     return { ok: true as const }
+  })
+
+  ipcMain.handle('reverse-stream:text', (_e, peerId: unknown, text: unknown) => {
+    // 成品输入（协议 4.9，B2）：控制端已组字好的文本分段发 input.text
+    if (typeof peerId !== 'string' || !peerId) return fail('缺少对端 ID')
+    if (typeof text !== 'string' || !text) return fail('请输入要发送的文本')
+    const r = host.sendInputText(peerId, text)
+    return r.ok ? { ok: true as const } : fail(r.error)
+  })
+
+  ipcMain.handle('reverse-stream:paste', (_e, peerId: unknown, text: unknown) => {
+    // 粘贴回退（协议 4.8，C）：渲染层发送前已两步确认“将覆盖平板剪贴板”
+    if (typeof peerId !== 'string' || !peerId) return fail('缺少对端 ID')
+    if (typeof text !== 'string' || !text) return fail('请输入要粘贴的文本')
+    const r = host.sendScreenPasteToTablet(peerId, text)
+    return r.ok ? { ok: true as const } : fail(r.error)
   })
 
   invoke('ping', () => 'pong')
