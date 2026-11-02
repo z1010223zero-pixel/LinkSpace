@@ -42,6 +42,61 @@ object ControlledInputInjector {
 
     enum class Button { LEFT, RIGHT, MIDDLE }
 
+    /**
+     * 鼠标按键一次按下+抬起的落点语义（线 2 左右键映射，走查清单 2.6：
+     * 右键返回 / 中键 Home；左键保持点按/拖拽）。
+     *
+     * 无障碍手势没有左右键之分：右键落不成一次“右键点按”（不弹上下文
+     * 菜单），中键也做不了粘贴——语义只能落在系统动作上。动作在抬起
+     * （up）时决议，与键盘系统键（KEYCODE_BACK / KEYCODE_HOME 在
+     * ACTION_UP 时发全局动作）同口径；按住时长不区分语义，按一次触发一次。
+     */
+    enum class PressAction { TAP, BACK, HOME }
+
+    /**
+     * 鼠标按键配对状态机（纯逻辑，不碰 Android 框架，可 JVM 单测）。
+     * 一次只允许一个按键处于按下态：已按住时再 down 直接忽略（与旧的
+     * “重复 down 忽略”一致）；up 与按下的键不匹配时忽略，不破坏正在
+     * 进行的左键拖拽；右键按住期间的 move 不进拖拽轨迹。
+     */
+    class MouseButtonTracker {
+        private var downButton: Button? = null
+
+        /** 当前按住的键；null = 未按下 */
+        val heldButton: Button? get() = downButton
+
+        /** 左键拖拽进行中 */
+        val isLeftDown: Boolean get() = downButton == Button.LEFT
+
+        /** 按下：true = 接受为当前按住的键；false = 已有按键按住，本次忽略 */
+        fun onDown(button: Button): Boolean {
+            if (downButton != null) return false
+            downButton = button
+            return true
+        }
+
+        /**
+         * 抬起：返回本次按下+抬起的落点语义；无匹配 down（或键不匹配）
+         * 时返回 null，调用方忽略、不破坏现有按下态。
+         */
+        fun onUp(button: Button): PressAction? {
+            if (downButton != button) return null
+            downButton = null
+            return when (button) {
+                Button.LEFT -> PressAction.TAP
+                Button.RIGHT -> PressAction.BACK
+                Button.MIDDLE -> PressAction.HOME
+            }
+        }
+
+        /** move 是否应追加进拖拽轨迹：只在左键按住时 */
+        fun trackMove(): Boolean = isLeftDown
+
+        fun reset() {
+            downButton = null
+        }
+    }
+
     /** 注入结果：成功，或带明确原因的失败（调用方必须上报，不许吞掉） */
     sealed class InjectResult {
         object Ok : InjectResult()

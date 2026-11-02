@@ -63,6 +63,29 @@ class ControlledInputInjectorTest {
     }
 
     @Test
+    fun `decode right and middle buttons`() {
+        // 线格式早有 b 字段（left/right/middle）；本批只定被控端落点语义，
+        // 解码层须把右/中键原样解成对应 Button，不许塌成左键。
+        val decoded = ControlledInputInjector.decodeInputEvents(
+            batch(
+                down("right"),
+                JSONObject().apply { put("t", "up"); put("b", "right") },
+                down("middle"),
+                JSONObject().apply { put("t", "up"); put("b", "middle") }
+            )
+        )
+        assertEquals(
+            listOf(
+                ControlledInputInjector.DecodedEvent.Down(ControlledInputInjector.Button.RIGHT),
+                ControlledInputInjector.DecodedEvent.Up(ControlledInputInjector.Button.RIGHT),
+                ControlledInputInjector.DecodedEvent.Down(ControlledInputInjector.Button.MIDDLE),
+                ControlledInputInjector.DecodedEvent.Up(ControlledInputInjector.Button.MIDDLE)
+            ),
+            decoded
+        )
+    }
+
+    @Test
     fun `empty batch rejected`() {
         assertNull(ControlledInputInjector.decodeInputEvents(batch()))
     }
