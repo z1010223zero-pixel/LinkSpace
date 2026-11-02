@@ -716,6 +716,20 @@ class LinkSpaceService private constructor(private val appContext: Context) {
     private val _inputMessage = MutableStateFlow("")
     val inputMessage: StateFlow<String> = _inputMessage
 
+    // ---------- 电脑→安卓远控（协议 4.6，被控端半边，线 2 W5） ----------
+
+    /** 待用户确认的控制请求：非空时 MainActivity 弹确认弹窗 */
+    private val _controlRequest = MutableStateFlow<ControlledInputSession.ControlRequest?>(null)
+    val controlRequest: StateFlow<ControlledInputSession.ControlRequest?> = _controlRequest
+
+    /** 正控制本机的对端 peerId，未被控制时为 null */
+    private val _controlledBy = MutableStateFlow<String?>(null)
+    val controlledBy: StateFlow<String?> = _controlledBy
+
+    /** 无障碍服务是否已开启（授权状态在 App 内可见，任务 2.4-1） */
+    private val _accessibilityEnabled = MutableStateFlow(false)
+    val accessibilityEnabled: StateFlow<Boolean> = _accessibilityEnabled
+
     /**
      * 出站控制连接的串行写执行器。键鼠事件从 Compose 触摸处理器（主线程）
      * 进来，直接写 TLS socket 会 NetworkOnMainThreadException 崩掉整个
@@ -779,14 +793,16 @@ class LinkSpaceService private constructor(private val appContext: Context) {
     // ---------- 电脑→安卓远控（协议 4.6，被控端半边，线 2 W4 骨架） ----------
 
     /**
-     * 被控端会话骨架：桌面作控制端向本机发起 session.start 时的接待逻辑，
-     * 与桌面端 InputSessionCoordinator 对称。W4 只做骨架：
+     * 被控端会话：桌面作控制端向本机发起 session.start 时的接待逻辑，
+     * 与桌面端 InputSessionCoordinator 对称（线 2 W5 已接完）：
      * pending/active 状态、30s 请求 TTL、approve/deny、会话匹配校验先行；
-     * 未接 AccessibilityService（onEvent 只校验不注入），未改 AndroidManifest。
+     * input.event 经 ControlledInputInjector 解码映射后交
+     * LinkSpaceAccessibilityService 注入；无障碍服务未开启时控制请求
+     * 直接回 session.reject（reason `accessibility disabled`）并引导授权。
      *
-     * 用户确认 UI 未接：onControlRequested 的默认实现先记日志并回
-     * session.reject（理由「确认 UI 未接」），绝不自动批准——安全红线。
-     * 真实确认弹窗接入后把该 TODO 桩换成 UI 回调。
+     * 用户确认 UI 在 MainActivity：onControlRequested 到达即弹确认弹窗，
+     * 确认后才放行 input.event；拒绝回 session.reject；30s 超时自动拒绝。
+     * 绝不自动批准——安全红线。
      */
     val controlledInput: ControlledInputSession by lazy {
         ControlledInputSession(
@@ -796,16 +812,29 @@ class LinkSpaceService private constructor(private val appContext: Context) {
                 InputController.Screen(m.widthPixels.coerceAtLeast(1), m.heightPixels.coerceAtLeast(1))
             },
             send = { peerId, type, payloadFn -> sendControlMessage(peerId, type, payloadFn) },
+            isAccessibilityReady = { LinkSpaceAccessibilityService.isEnabled(appContext) },
+            inject = { events, _ -> LinkSpaceAccessibilityService.inject(events) },
+            releaseAll = { LinkSpaceAccessibilityService.releaseAll() },
             listener = object : ControlledInputSession.Listener {
                 override fun onControlRequested(request: ControlledInputSession.ControlRequest) {
-                    // TODO(线2实现)：接用户确认 UI（确认弹窗 → approve/deny）。
-                    // 确认 UI 未接之前默认拒绝：不弹提示、不自动批准。
-                    Log.w(TAG, "收到 ${request.peerId} 的键鼠控制请求，确认 UI 未接，已默认拒绝")
-                    controlledInput.deny(request.sessionId, "确认 UI 未接")
+                    _controlRequest.value = request
                 }
 
                 override fun onChanged() {
-                    // TODO(线2实现)：被控会话状态变化时刷新 UI（正被谁控制）。
+                    _controlRequest.value = controlledInput.pendingRequest
+                    _controlledBy.value = controlledInput.controlledBy
+                    _accessibilityEnabled.value =
+                        LinkSpaceAccessibilityService.isEnabled(appContext)
+                }
+
+                override fun onAccessibilityNotEnabled() {
+                    _accessibilityEnabled.value = false
+                    _inputMessage.value =
+                        "电脑请求控制本机，但无障碍服务未开启，已拒绝。请在下方“被控设置”里开启。"
+                }
+
+                override fun onInjectError(sessionId: String, reason: String) {
+                    _inputMessage.value = "远程输入注入失败：$reason"
                 }
             }
         )
@@ -821,6 +850,32 @@ class LinkSpaceService private constructor(private val appContext: Context) {
     fun clearInputMessage() {
         _inputMessage.value = ""
     }
+
+    // ---------- 电脑→安卓远控：确认 UI 与授权状态（线 2 W5） ----------
+
+    /** 确认弹窗“允许”：只有会话层放行后才进入 active，注入随即开始 */
+    fun approveControl(sessionId: String) {
+        controlledInput.approve(sessionId)
+    }
+
+    /** 确认弹窗“拒绝”/弹窗被划掉：回 session.reject */
+    fun denyControl(sessionId: String) {
+        controlledInput.deny(sessionId)
+    }
+
+    /** 被控端随时终止：正被控制时拔掉控制权 */
+    fun terminateControl() {
+        controlledInput.terminate()
+    }
+
+    /** 刷新无障碍授权状态（界面回到前台时调用；开关在系统设置里改） */
+    fun refreshAccessibilityState() {
+        _accessibilityEnabled.value = LinkSpaceAccessibilityService.isEnabled(appContext)
+    }
+
+    /** 跳系统无障碍设置页开服务 */
+    fun accessibilitySettingsIntent(): android.content.Intent =
+        android.content.Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)
 
     // ---------- 平板主动连出的控制通道（T7 真机走查 Bug3） ----------
 

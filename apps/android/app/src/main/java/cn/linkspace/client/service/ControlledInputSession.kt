@@ -4,25 +4,27 @@ import android.util.Log
 import org.json.JSONObject
 
 /**
- * 键鼠共享的被控端状态机骨架（协议 4.6，线 2 W4）。
+ * 键鼠共享的被控端状态机（协议 4.6，线 2 W4 骨架、W5 接完注入与确认 UI）。
  *
  * 与桌面端 `input/session.ts` 的 InputSessionCoordinator 对称：别人请求
  * 来控制本机时的接待逻辑——授权门禁、30s 请求 TTL、用户确认、事件分发、
  * 随时可被掐断。桌面端是被控端实现，Android 端此前只有控制端
  * [InputController]（向桌面发起控制），没有任何被控分支。
  *
- * **骨架状态（W4 只做骨架，不做完整功能）：**
+ * **状态（W5 已接完注入与确认 UI）：**
  * - pending/active 双态 + 30s 请求 TTL（与桌面端一致），过期自动拒绝；
  * - approve/deny：用户确认后才发 session.accept，拒绝发 session.reject；
- * - onEvent 会话匹配校验先行（peerId + sessionId 双核对），注入点留空桩。
+ * - onEvent 会话匹配校验先行（peerId + sessionId 双核对），再经
+ *   [ControlledInputInjector] 解码 + 坐标映射，交 AccessibilityService
+ *   注入手势/按键；注入失败带明确原因上报，不静默丢掉。
+ * - 门禁三：无障碍服务未开启时控制请求直接回 session.reject
+ *   （reason `accessibility disabled`），不进 pending、不弹 UI，
+ *   并由 [Listener.onAccessibilityNotEnabled] 通知界面引导用户去开。
  *
- * **未接线（明确 TODO，不可当作已实现）：**
- * - 未接 AccessibilityService：[onEvent] 收到合法事件后只记日志，不注入
- *   任何手势/按键（见该方法的 Log.w 与 TODO）；无障碍服务也未在
- *   AndroidManifest 里声明；
- * - 用户确认 UI 未接：[Listener.onControlRequested] 的默认实现在
- *   LinkSpaceService 里先记日志并回 session.reject（理由「确认 UI 未接」），
- *   绝不自动批准（安全红线，见协议 9.1「每次控制请求都有明确提示」）。
+ * 用户确认 UI 在 MainActivity：[Listener.onControlRequested] 到达即弹
+ * 确认弹窗，确认后才放行 input.event；拒绝回 session.reject；
+ * 30s 超时自动回落拒绝；确认 UI 未弹出或服务未启用时不放行任何输入
+ * （安全红线，见协议 9.1「每次控制请求都有明确提示」）。
  *
  * control 授权语义与桌面端一致：会话级内存态，不进 TrustStore 持久化。
  */
@@ -30,6 +32,20 @@ class ControlledInputSession(
     private val isPeerAuthorized: (String) -> Boolean,
     private val localScreen: () -> InputController.Screen,
     private val send: (peerId: String, type: String, payload: JSONObject.() -> Unit) -> Unit,
+    /**
+     * 无障碍服务是否已开启（系统设置级开关）。门禁三与 approve 复核
+     * 都以它为准；默认 false——注入层没接线时控制请求一律拒绝，
+     * 绝不放行（安全默认值）。
+     */
+    private val isAccessibilityReady: () -> Boolean = { false },
+    /**
+     * 事件注入出口。到达时已完成解码与坐标映射；返回失败时会话层
+     * 记日志并报给 UI。默认拒绝注入（未接线时不注入任何事件）。
+     */
+    private val inject: (List<ControlledInputInjector.DecodedEvent>, ActiveSession) -> ControlledInputInjector.InjectResult =
+        { _, _ -> ControlledInputInjector.InjectResult.Failed("accessibility service not wired") },
+    /** 会话结束时抬起全部按住的键与鼠标键（防卡键）。 */
+    private val releaseAll: () -> Unit = {},
     private val listener: Listener? = null
 ) {
 
@@ -39,6 +55,12 @@ class ControlledInputSession(
 
         /** 会话状态变化（进入/离开 pending、active），UI 刷新用 */
         fun onChanged()
+
+        /** 控制请求因无障碍服务未开启被拒绝：UI 应展示授权引导 */
+        fun onAccessibilityNotEnabled()
+
+        /** 某批 input.event 注入失败：UI 应展示明确原因，不静默 */
+        fun onInjectError(sessionId: String, reason: String)
     }
 
     /** 需要用户确认的控制请求（被控端 UI 展示用） */
@@ -137,6 +159,18 @@ class ControlledInputSession(
             return
         }
 
+        // 门禁三：无障碍服务未开启时直接拒绝，**不进 pending、不弹 UI**。
+        // 未授权的控制请求必须有明确回执与引导，不静默落掉（任务 2.4-1）。
+        if (!isAccessibilityReady()) {
+            Log.i(TAG, "拒绝 $peerId 的键鼠控制请求：无障碍服务未开启")
+            send(peerId, Protocol.TYPE_SESSION_REJECT) {
+                put("sessionId", sessionId)
+                put("reason", "accessibility disabled")
+            }
+            listener?.onAccessibilityNotEnabled()
+            return
+        }
+
         val req = ControlRequest(
             sessionId = sessionId,
             peerId = peerId,
@@ -167,6 +201,12 @@ class ControlledInputSession(
             expirePending()
             return false
         }
+        // 用户点“允许”前服务被关掉：不放行，改回拒绝（堵门禁三的竞态）。
+        if (!isAccessibilityReady()) {
+            deny(sessionId, "accessibility disabled")
+            listener?.onAccessibilityNotEnabled()
+            return false
+        }
         clearTimer()
         pending = null
         active = ActiveSession(req.sessionId, req.peerId, req.screen, System.currentTimeMillis())
@@ -192,10 +232,11 @@ class ControlledInputSession(
     }
 
     /**
-     * 处理 input.event。会话匹配校验先行；注入点留空桩。
+     * 处理 input.event。会话匹配校验先行；解码与坐标映射按桌面端
+     * 同口径（[ControlledInputInjector]）；注入失败带明确原因上报。
      *
-     * TODO(线2实现)：接 AccessibilityService 做手势/按键注入。当前骨架
-     * 只做校验与日志，**不注入任何事件**——无障碍服务未接（见类注释）。
+     * 注入只在活动会话里发生：确认 UI 未弹出（pending）或服务未启用
+     * 时到不了这里；非法批次整批丢弃，不逐条放行。
      */
     @Synchronized
     fun onEvent(peerId: String, payload: JSONObject) {
@@ -206,8 +247,25 @@ class ControlledInputSession(
             return
         }
         if (payload.optString("sessionId") != a.sessionId) return
-        // TODO(线2实现)：事件解码 + AccessibilityService 注入。
-        Log.w(TAG, "收到 ${a.peerId} 的 input.event（会话 ${a.sessionId}），未接无障碍服务，事件已丢弃")
+        val decoded = ControlledInputInjector.decodeInputEvents(payload)
+        if (decoded == null) {
+            Log.w(TAG, "丢弃非法的 input.event 批次（会话 ${a.sessionId}）")
+            return
+        }
+        val local = localScreen()
+        val mapped = decoded.map { ev ->
+            if (ev is ControlledInputInjector.DecodedEvent.Move) {
+                val (x, y) = ControlledInputInjector.mapPoint(ev.x, ev.y, a.screen, local)
+                ControlledInputInjector.DecodedEvent.Move(x, y)
+            } else ev
+        }
+        when (val result = inject(mapped, a)) {
+            is ControlledInputInjector.InjectResult.Ok -> Unit
+            is ControlledInputInjector.InjectResult.Failed -> {
+                Log.e(TAG, "input.event 注入失败（会话 ${a.sessionId}）：${result.reason}")
+                listener?.onInjectError(a.sessionId, result.reason)
+            }
+        }
     }
 
     /** 处理 session.stop（对端主动结束） */
@@ -270,8 +328,9 @@ class ControlledInputSession(
     private fun endSession(reason: String) {
         val ended = active ?: return
         active = null
-        // TODO(线2实现)：接无障碍服务后，此处抬起全部按住的键与鼠标键
-        // （防卡键，与桌面端 releaseAll 对应）。当前无注入层，无需释放。
+        // 会话结束即抬起全部按住的键与鼠标键（防卡键，与桌面端
+        // releaseAll 对应）；断连/撤销/本机终止都走这里。
+        releaseAll()
         Log.i(TAG, "键鼠控制会话结束：$reason")
         send(ended.peerId, Protocol.TYPE_SESSION_STOP) {
             put("sessionId", ended.sessionId)

@@ -121,6 +121,8 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         val service = serviceOf() ?: return
+        // 无障碍授权状态在系统设置里改：每次回前台刷新一次
+        service.refreshAccessibilityState()
         // 剪贴板同步只在开关开启且界面前台时运行（开关默认关：
         // 剪贴板会经过密码与令牌，默认静默同步有泄露面）
         if (service.clipboardEnabled.value) {
@@ -205,6 +207,9 @@ fun MainScreen(service: LinkSpaceService, onClipboardToggle: (Boolean) -> Unit) 
     val selfName by service.selfName.collectAsStateWithLifecycle()
     val inputState by service.inputState.collectAsStateWithLifecycle()
     val inputMessage by service.inputMessage.collectAsStateWithLifecycle()
+    val controlRequest by service.controlRequest.collectAsStateWithLifecycle()
+    val controlledBy by service.controlledBy.collectAsStateWithLifecycle()
+    val accessibilityEnabled by service.accessibilityEnabled.collectAsStateWithLifecycle()
     val clipboardEnabled by service.clipboardEnabled.collectAsStateWithLifecycle()
     val fingerprintText by service.fingerprintText.collectAsStateWithLifecycle()
     var notice by remember { mutableStateOf("") }
@@ -300,6 +305,27 @@ fun MainScreen(service: LinkSpaceService, onClipboardToggle: (Boolean) -> Unit) 
                 }
                 Switch(checked = clipboardEnabled, onCheckedChange = onClipboardToggle)
             }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("被控设置（电脑控平板）", fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                    Text(
+                        if (accessibilityEnabled) "无障碍服务已开启：已配对的电脑请求控制时，本机会弹确认框，点了“允许”才放行。"
+                        else "无障碍服务未开启：电脑的控制请求会被直接拒绝，不会弹确认框。",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    if (!accessibilityEnabled) {
+                        Text(
+                            "开启路径：点右边的按钮进「设置 → 无障碍」，找到 LinkSpace 远程输入并打开。如在列表里找不到、或开关是灰的：Android 13 起侧载安装的应用会被系统加上“受限设置”，请先到「设置 → 应用 → LinkSpace → 右上角 ⋮ 菜单 → 允许受限设置」，再回无障碍里开启。",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+                OutlinedButton(onClick = {
+                    context.startActivity(service.accessibilitySettingsIntent())
+                }) { Text(if (accessibilityEnabled) "查看设置" else "去开启") }
+            }
             Spacer(Modifier.height(4.dp))
         }
 
@@ -311,6 +337,31 @@ fun MainScreen(service: LinkSpaceService, onClipboardToggle: (Boolean) -> Unit) 
                     )
                 ) {
                     Text(notice, modifier = Modifier.padding(12.dp), fontSize = 13.sp)
+                }
+            }
+        }
+
+        // ---------- 正被电脑控制：常驻提示 + 随时终止 ----------
+        if (controlledBy != null) {
+            item {
+                Card(
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.tertiaryContainer
+                    )
+                ) {
+                    Row(
+                        Modifier.padding(12.dp).fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "正被 $controlledBy 远程控制",
+                            Modifier.weight(1f),
+                            fontSize = 13.sp
+                        )
+                        OutlinedButton(onClick = { service.terminateControl() }) {
+                            Text("终止控制")
+                        }
+                    }
                 }
             }
         }
@@ -592,6 +643,33 @@ fun MainScreen(service: LinkSpaceService, onClipboardToggle: (Boolean) -> Unit) 
             },
             dismissButton = {
                 OutlinedButton(onClick = { showRenameDialog = false }) { Text("取消") }
+            }
+        )
+    }
+
+    // ---------- 电脑请求控制本机：确认弹窗（协议 9.1） ----------
+    // 30s 内未确认由会话层自动拒绝；弹窗被划掉按拒绝处理——
+    // 确认 UI 未弹出时不放行任何输入。
+    if (controlRequest != null) {
+        val req = controlRequest!!
+        AlertDialog(
+            onDismissRequest = { service.denyControl(req.sessionId) },
+            title = { Text("允许远程控制本机？") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("“${req.displayName.ifEmpty { req.peerId }}”请求在电脑上操作这台平板（点按、滑动、按键）。")
+                    Text(
+                        "点了“允许”，对方才能操作；会话结束前可随时在首页点“终止控制”拔掉。30 秒内未确认将自动拒绝。",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            },
+            confirmButton = {
+                Button(onClick = { service.approveControl(req.sessionId) }) { Text("允许") }
+            },
+            dismissButton = {
+                OutlinedButton(onClick = { service.denyControl(req.sessionId) }) { Text("拒绝") }
             }
         )
     }

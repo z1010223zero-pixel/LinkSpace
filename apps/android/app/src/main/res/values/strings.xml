@@ -2,4 +2,6 @@
 <resources>
     <string name="app_name">LinkSpace</string>
     <string name="service_type">_linkspace._tcp</string>
+    <string name="accessibility_service_label">LinkSpace 远程输入</string>
+    <string name="accessibility_service_description">允许已配对的电脑在你确认后远程操作本机（点按、滑动、按键）。每次控制都要你先点“允许”，不开启不注入任何输入。</string>
 </resources>

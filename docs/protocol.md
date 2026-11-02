@@ -110,7 +110,7 @@
 | `session.stop` | 双向 | `{ sessionId, reason }` | 任一方均可终止 |
 | `session.state` | 被控方 → 控制方 | `{ sessionId, state }` | 状态同步，见 architecture.md 5.3 |
 
-> **[PROTOCOL] 2026-11-02 登记**（线 2 W4）：`sessionType: 'input'` 的被控方向新增 Android 端：`ControlledInputSession`（`apps/android/.../service/ControlledInputSession.kt`）与桌面端 `InputSessionCoordinator` 对称——pending/active 双态、30s 请求 TTL、approve/deny、会话匹配校验先行。**骨架状态**：未接 AccessibilityService（`input.event` 只校验不注入）、未改 AndroidManifest、用户确认 UI 未接（默认回 `session.reject`，理由「确认 UI 未接」，绝不自动批准）。桌面端控制端复用现有 `InputController`，`host.ts` 的 `requestInputControl` 只校验在线与已配对、无设备类型限制，对 Android 被控端同样生效。`display-extend` 不在本批动。
+> **[PROTOCOL] 2026-11-02 登记**（线 2 W4）：`sessionType: 'input'` 的被控方向新增 Android 端：`ControlledInputSession`（`apps/android/.../service/ControlledInputSession.kt`）与桌面端 `InputSessionCoordinator` 对称——pending/active 双态、30s 请求 TTL、approve/deny、会话匹配校验先行。**W5 已接完**：AccessibilityService 注入（`LinkSpaceAccessibilityService`，`dispatchGesture`/`dispatchKeyEvent`，`AndroidManifest` 已声明）+ 确认 UI（MainActivity 确认弹窗，30s 超时自动拒绝）+ 无障碍服务未开启时控制请求直接回 `session.reject`（reason `accessibility disabled`）并引导授权；注入失败带明确原因上报，不静默丢掉。`input.event` 解码与坐标映射与桌面端同口径（非法批次整批拒绝，move 按两端屏幕比例映射）。桌面端控制端复用现有 `InputController`，`host.ts` 的 `requestInputControl` 只校验在线与已配对、无设备类型限制，对 Android 被控端同样生效。`display-extend` 不在本批动。
 
 ### 4.4 剪贴板
 
@@ -146,7 +146,7 @@
 
 复用 4.3 的会话控制消息（`sessionType: 'input'`），在其上定义输入事件流：
 
-> **[PROTOCOL] 2026-11-02 登记**（线 2 W4）：被控方向的 Android 实现落地为骨架（见 4.3 登记）：门禁（仅已配对设备）、30s TTL、approve/deny、断连/撤销掐断均与桌面端 `InputSessionCoordinator` 对称；`input.event` 的会话匹配校验（`peerId` + `sessionId` 双核对）先行，注入点留空桩——未接 AccessibilityService，不注入任何事件；用户确认 UI 未接，默认拒绝。线 2 完整功能（无障碍注入 + 确认弹窗）另排，不在本批。
+> **[PROTOCOL] 2026-11-02 登记**（线 2 W5，接完 W4 的骨架）：被控方向的 Android 实现已接完无障碍注入 + 确认弹窗（见 4.3 登记）：门禁（仅已配对设备）、30s TTL、approve/deny、断连/撤销掐断均与桌面端 `InputSessionCoordinator` 对称；`input.event` 的会话匹配校验（`peerId` + `sessionId` 双核对）先行，解码后按两端屏幕比例映射坐标，经 `LinkSpaceAccessibilityService` 注入；无障碍服务未开启时请求直接拒绝并引导授权；注入失败带明确原因上报。按键注入的平台口径（W5 核实）：无障碍服务无通用按键注入 API（查过 android-35 android.jar 与 RustDesk InputService 源码）；系统键走全局动作，其余按键走 API 33+ 输入连接，只在有焦点输入框时可达，无连接时明确报错——A 路线下非文本场景按键是已知短板。
 
 | 类型 | 方向 | payload | 说明 |
 |---|---|---|---|

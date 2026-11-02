@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 线 2 被控端无障碍服务配置（W5，选型 A：AccessibilityService 为主）。
+     只做输入注入：手势（dispatchGesture）+ 按键（系统全局动作 /
+     API 33+ 输入连接 sendKeyEvent）。
+     flagInputMethodEditor：让系统调 onCreateInputMethod()，服务才能拿到
+     getInputMethod()，按键经当前输入连接发出（只在有焦点输入框时可达）。
+     不读窗口内容、不监听无障碍事件。 -->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:description="@string/accessibility_service_description"
+    android:accessibilityEventTypes="typeAllMask"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagDefault|flagInputMethodEditor"
+    android:canRetrieveWindowContent="false"
+    android:canPerformGestures="true"
+    android:settingsActivity="cn.linkspace.client.MainActivity" />
