@@ -52,6 +52,8 @@
 阶段 3 真机人工走查清单见 [`docs/manual-walkthrough-stage3.md`](docs/manual-walkthrough-stage3.md)。
 待用户亲手操作的事项（IddCx 安装验证、真机触控走查等）汇总在 [`docs/user-ops-2026-10-30.md`](docs/user-ops-2026-10-30.md)。
 
+> **线 2 开发在决策分支 `decision/line2-accessibility-first` 上进行（不在 master）**：对称互控差异点与任务清单见 [`docs/symmetric-control-tasks.md`](docs/symmetric-control-tasks.md)，方向文档见 [`docs/line2-line3-direction.md`](docs/line2-line3-direction.md)，**本地接手请先读 [`docs/line2-handover.md`](docs/line2-handover.md)**。
+
 ---
 
 ## 目录结构
@@ -87,6 +89,9 @@ docs/                   设计文档
 | [`docs/threat-model.md`](docs/threat-model.md) | 资产、信任边界、威胁与缓解 |
 | [`docs/license-inventory.md`](docs/license-inventory.md) | 依赖许可证核实结论与合规检查表 |
 | [`docs/roadmap.md`](docs/roadmap.md) | 阶段划分、门限与转向判据 |
+| [`docs/symmetric-control-tasks.md`](docs/symmetric-control-tasks.md) | 对称互控任务清单：线 2（电脑控平板）与线 3（平板当扩展屏），含入口/门槛/验收标准 |
+| [`docs/line2-line3-direction.md`](docs/line2-line3-direction.md) | 线 2 / 线 3 方向文档：Q7 媒体通道选型、P0 共享层做法、修复优先级 |
+| [`docs/line2-handover.md`](docs/line2-handover.md) | 线 2 决策分支交接文档：接手起点、W1–W7 完成清单、下一步任务、构建与验证手册 |
 | [`docs/technical-validation.md`](docs/technical-validation.md) | 第 1 周验证清单与记录模板 |
 | [`docs/desktop-review-2026-10-29.md`](docs/desktop-review-2026-10-29.md) | 桌面端代码审查与修复报告（安全缺口 / 修复方式 / 验证结论） |
 | [`docs/project-review-2026-10-29.md`](docs/project-review-2026-10-29.md) | 第二次全项目审查报告（桌面 / Android 首审 / 文档一致性 / 修复优先级） |

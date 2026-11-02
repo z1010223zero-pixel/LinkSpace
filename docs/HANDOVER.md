@@ -8,6 +8,8 @@
 > 无头脚本已扩到十套（本文 1.2 为七项，漏 `verify:clipboard`，其后新增
 > `verify:heartbeat` / `verify:input`）。**现状以根 README「当前状态」与
 > `docs/README.md` 为准**；本文的持久价值在第 1、5 节（环境坑与排查顺序）。
+> 
+> **线 2 交接不在本文**：电脑控平板的开发在决策分支 `decision/line2-accessibility-first` 上，见 [`docs/line2-handover.md`](line2-handover.md)。
 
 ---
 
