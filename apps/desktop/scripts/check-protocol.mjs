@@ -313,6 +313,20 @@ mustContain('id 去重（桌面）', tsNode, 'seenIds.isDuplicate(msg.id)', 'con
 mustContain('id 去重（Android 入站）', ktServer, 'seen.isDuplicate(id)', 'TransferServer.kt')
 mustContain('id 去重（Android 出站主读循环）', ktService, 'seenIds.isDuplicate(id)', 'LinkSpaceService.kt')
 
+// ---------- 8. 文本直通 input.text / input.error（协议 4.9，线 2 中文输入） ----------
+const inputTextEntry = protocol.messageTypes.find((m) => m.type === 'input.text')
+check('input.text payload', ['sessionId', 'text'], inputTextEntry?.payload ?? null, 'protocol.json messageTypes')
+const inputErrorEntry = protocol.messageTypes.find((m) => m.type === 'input.error')
+check('input.error payload', ['sessionId', 'code', 'reason'], inputErrorEntry?.payload ?? null, 'protocol.json messageTypes')
+check('inputTextMaxBytes', C.inputTextMaxBytes, evalNum(ktConst(kt, 'MAX_INPUT_TEXT_BYTES')), 'Protocol.kt MAX_INPUT_TEXT_BYTES')
+check('inputTextMaxBytes', C.inputTextMaxBytes, evalNum(tsConst(tsInput, 'MAX_INPUT_TEXT_BYTES')), 'input/protocol.ts MAX_INPUT_TEXT_BYTES')
+check('protocol.md 登记 input.text', true, md.includes('input.text') && md.includes('commitText'), 'docs/protocol.md §4.9')
+check('protocol.md 登记 input.error', true, md.includes('input.error') && md.includes('no-focus'), 'docs/protocol.md §4.9')
+check('Android commitText 入口', true, ktA11y.includes('commitText'), 'LinkSpaceAccessibilityService.kt')
+mustContain('桌面 input.text 发送', tsHost, "'input.text'", 'host.ts')
+mustContain('桌面 input.error 接收', tsHost, "'input.error'", 'host.ts')
+mustContain('桌面 screen.paste 发送', tsHost, "'screen.paste'", 'host.ts')
+
 // ---------- 汇总 ----------
 console.log(`\n通过 ${passed} 项，失败 ${failures.length} 项，警告 ${warnings.length} 项。`)
 if (failures.length > 0) {
