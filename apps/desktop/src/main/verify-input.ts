@@ -22,6 +22,7 @@ import { fingerprintOfCert, type DeviceCert } from './transfer/identity'
 import type { DiscoveredService } from './discovery'
 import type { PendingPairing } from './pairing'
 import { decodeInputEvents, decodeScreenSize, mapPoint, type InputEvent, type MouseButton } from './input/protocol'
+import { resolveStreamStopDirection } from './screen-stream'
 import { InputSessionCoordinator, InputController } from './input/session'
 import { EdgeSwitcher, type EdgeLayout } from './input/edge'
 import { InputLayoutStore } from './input/layout'
@@ -117,6 +118,44 @@ function testProtocol(): void {
   check('边界钳制不越界', p3.x === 999 && p3.y === 499, JSON.stringify(p3))
   const p4 = mapPoint(5000, 5000, from, to)
   check('越界输入被钳制', p4.x === 999 && p4.y === 499, JSON.stringify(p4))
+}
+
+// ---------- 纯逻辑：screen.stream.stop 方向解析（协议 4.7） ----------
+// 显式 direction 直接采用；缺失时按属于发消息对端的活动流解析——
+// 单路在跑停那路、双向在跑只停 forward、两路都没跑忽略；非法值忽略。
+function testStreamStopDirection(): void {
+  console.log('\n=== 纯逻辑：screen.stream.stop 方向解析 ===\n')
+
+  // 显式方向：与在跑状态无关，直接采用
+  check('显式 forward 直接采用', resolveStreamStopDirection({ direction: 'forward' }, false, false) === 'forward')
+  check('显式 reverse 直接采用', resolveStreamStopDirection({ direction: 'reverse' }, false, false) === 'reverse')
+  check(
+    '显式 forward 不受反向流在跑影响',
+    resolveStreamStopDirection({ direction: 'forward' }, false, true) === 'forward'
+  )
+  check(
+    '显式 reverse 不受正向流在跑影响',
+    resolveStreamStopDirection({ direction: 'reverse' }, true, false) === 'reverse'
+  )
+
+  // 缺失 direction（旧版本对端）：单路在跑停那一路
+  check('缺失时只跑 forward 停 forward', resolveStreamStopDirection({}, true, false) === 'forward')
+  check('缺失时只跑 reverse 停 reverse', resolveStreamStopDirection({}, false, true) === 'reverse')
+  // 缺失 direction：双向都在跑只停 forward，绝不顺手停掉另一路
+  check('缺失时双向在跑只停 forward', resolveStreamStopDirection({}, true, true) === 'forward')
+  // 缺失 direction：两路都没跑则忽略（不回声）
+  check('缺失且无流在跑时忽略', resolveStreamStopDirection({}, false, false) === null)
+
+  // 缺失的等价形态：payload 为 null / 非对象时同样按缺失处理
+  check('payload 为 null 时按缺失处理', resolveStreamStopDirection(null, false, true) === 'reverse')
+  check('payload 非对象时按缺失处理', resolveStreamStopDirection('nope', true, true) === 'forward')
+  // direction 显式为 null 时按缺失处理（JSON null 与缺失同义）
+  check('direction 为 null 时按缺失处理', resolveStreamStopDirection({ direction: null }, false, true) === 'reverse')
+
+  // 非法 direction：一律忽略，不猜
+  check('非法 direction 忽略', resolveStreamStopDirection({ direction: 'sideways' }, true, true) === null)
+  check('空字符串 direction 忽略', resolveStreamStopDirection({ direction: '' }, true, false) === null)
+  check('数字 direction 忽略', resolveStreamStopDirection({ direction: 123 }, false, true) === null)
 }
 
 // ---------- 纯逻辑：被控端状态机 ----------
@@ -1076,6 +1115,7 @@ async function main(): Promise<void> {
   console.log('\n=== LinkSpace 键鼠共享测试 ===\n')
 
   testProtocol()
+  testStreamStopDirection()
   testCoordinator()
   await testController()
   testEdge()

@@ -208,6 +208,18 @@ const presetsTs = [...presetsBlock[1].matchAll(/\{\s*label:\s*'([^']+)',\s*width
   .map(([, label, width, fps, bps]) => ({ label, width: evalNum(width), fps: evalNum(fps), bps: evalNum(bps) }))
 check('streamQualityPresets', C.streamQualityPresets, presetsTs, 'screen-stream.ts STREAM_QUALITY_PRESETS')
 
+// screen.stream.stop 方向位（协议 4.7）：TS screen-stream.ts 与
+// Kotlin Protocol.kt 的 STREAM_DIRECTION_* 必须与 protocol.json
+// constraints.streamDirections 一字不差；stop 的 payload 必须是 [direction?]
+const dirTs = ['STREAM_DIRECTION_FORWARD', 'STREAM_DIRECTION_REVERSE']
+  .map((n) => tsConst(tsStream, n).replace(/^['"]|['"]$/g, ''))
+check('streamDirections', C.streamDirections, dirTs, 'screen-stream.ts STREAM_DIRECTION_*')
+const dirKt = ['STREAM_DIRECTION_FORWARD', 'STREAM_DIRECTION_REVERSE']
+  .map((n) => ktConst(kt, n).replace(/^"|"$/g, ''))
+check('streamDirections', C.streamDirections, dirKt, 'Protocol.kt STREAM_DIRECTION_*')
+const stopEntry = protocol.messageTypes.find((m) => m.type === 'screen.stream.stop')
+check('screen.stream.stop payload', ['direction?'], stopEntry?.payload ?? null, 'protocol.json messageTypes')
+
 // ---------- 5. TS pairing.ts / clipboard.ts / transfer / host.ts ----------
 check('pairingCode.ttlMs', C.pairingCode.ttlMs, evalNum(tsConst(tsPairing, 'CODE_TTL_MS')), 'pairing.ts CODE_TTL_MS')
 check('pairingCode.maxAttempts', C.pairingCode.maxAttempts, evalNum(tsConst(tsPairing, 'MAX_ATTEMPTS')), 'pairing.ts MAX_ATTEMPTS')
