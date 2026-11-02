@@ -73,4 +73,40 @@ class ProtocolTest {
         assertEquals(32 * 1024 * 1024, Protocol.MAX_CHUNK_BODY)
         assertEquals(listOf("file", "clipboard"), Protocol.DEFAULT_GRANT_SCOPE)
     }
+
+    @Test
+    fun `screen stream stop 方向常量与桌面端一致`() {
+        assertEquals("forward", Protocol.STREAM_DIRECTION_FORWARD)
+        assertEquals("reverse", Protocol.STREAM_DIRECTION_REVERSE)
+    }
+
+    @Test
+    fun `stop 方向解析 - 显式方向直接采用`() {
+        assertEquals("forward", Protocol.resolveStreamStopDirection("forward", false, false))
+        assertEquals("reverse", Protocol.resolveStreamStopDirection("reverse", false, false))
+        assertEquals("forward", Protocol.resolveStreamStopDirection("forward", false, true))
+        assertEquals("reverse", Protocol.resolveStreamStopDirection("reverse", true, false))
+    }
+
+    @Test
+    fun `stop 方向解析 - 缺失时单路在跑停那一路`() {
+        assertEquals("forward", Protocol.resolveStreamStopDirection(null, true, false))
+        assertEquals("reverse", Protocol.resolveStreamStopDirection(null, false, true))
+    }
+
+    @Test
+    fun `stop 方向解析 - 缺失时双向在跑只停 forward`() {
+        assertEquals("forward", Protocol.resolveStreamStopDirection(null, true, true))
+    }
+
+    @Test
+    fun `stop 方向解析 - 缺失且无流在跑时忽略`() {
+        assertEquals(null, Protocol.resolveStreamStopDirection(null, false, false))
+    }
+
+    @Test
+    fun `stop 方向解析 - 非法值忽略`() {
+        assertEquals(null, Protocol.resolveStreamStopDirection("sideways", true, true))
+        assertEquals(null, Protocol.resolveStreamStopDirection("", true, false))
+    }
 }
