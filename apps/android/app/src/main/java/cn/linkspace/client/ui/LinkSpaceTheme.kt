@@ -101,7 +101,7 @@ private val LinkSpaceTypography = Typography(
 )
 
 /** 圆角 token：6 / 8 / 10 / 12 / 999dp（卡片 12dp、菜单项 8dp、胶囊 999dp）。 */
-private val LinkSpaceShapes = Shapes(
+val LinkSpaceShapes = Shapes(
     small = RoundedCornerShape(6.dp),
     medium = RoundedCornerShape(8.dp),
     large = RoundedCornerShape(12.dp),

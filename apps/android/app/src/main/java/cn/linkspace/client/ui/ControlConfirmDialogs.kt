@@ -12,13 +12,14 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import cn.linkspace.client.service.ControlledInputSession
 import cn.linkspace.client.service.ReverseScreenStreamer
 import kotlinx.coroutines.delay
@@ -56,7 +57,7 @@ private fun TtlCountdownRow(seconds: Int, totalSeconds: Int, timeoutText: String
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Text(
             "还剩 $seconds 秒，$timeoutText",
-            fontSize = StreamTokens.SmallSize,
+            fontSize = 12.sp,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
         LinearProgressIndicator(
@@ -88,7 +89,7 @@ fun ControlRequestDialog(
                 Text(
                     "此次授权单次有效：点了“允许”只放行本次会话，会话结束需重新确认；" +
                         "会话结束前可随时在首页点“终止控制”拔掉。",
-                    fontSize = StreamTokens.SmallSize,
+                    fontSize = 12.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Spacer(Modifier.height(4.dp))
@@ -129,7 +130,7 @@ fun ReverseStreamRequestDialog(
                 Text("对方想在电脑上实时查看这台平板的画面。同意后会弹出系统录屏授权框，只有你点了允许才会开始录屏；随时可以在通知栏停止。")
                 Text(
                     "此次授权单次有效：同意只开通本次推流，下次需重新确认。",
-                    fontSize = StreamTokens.SmallSize,
+                    fontSize = 12.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Spacer(Modifier.height(4.dp))

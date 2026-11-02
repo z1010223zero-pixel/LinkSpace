@@ -6,8 +6,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -91,7 +91,7 @@ fun ScreenMirrorScreen(
         }
     }
 
-    MaterialTheme(colorScheme = StreamTokens.DarkStreamScheme) {
+    MaterialTheme(colorScheme = DarkStreamScheme) {
         Box(
             Modifier
                 .fillMaxSize()

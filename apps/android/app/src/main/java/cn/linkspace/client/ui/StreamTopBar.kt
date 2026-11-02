@@ -7,7 +7,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -31,6 +30,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 
 /** 投屏分辨率四档（与 FloatingControlPill 的菜单同值：宽 1280/1920/2560/3840） */
 internal val STREAM_RESOLUTION_OPTIONS = listOf(
@@ -85,25 +85,25 @@ fun StreamTopBar(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = StreamTokens.SpaceSm, vertical = StreamTokens.SpaceXs)
+                    .padding(horizontal = LinkSpaceSpacing.sm, vertical = LinkSpaceSpacing.xs)
             ) {
                 Text(
                     deviceName,
-                    fontSize = StreamTokens.TitleSize,
+                    fontSize = 16.sp,
                     fontWeight = FontWeight.SemiBold,
                     color = MaterialTheme.colorScheme.onSurface,
                     maxLines = 1,
                     modifier = Modifier.weight(1f, fill = false)
                 )
-                Spacer(Modifier.width(StreamTokens.SpaceSm))
+                Spacer(Modifier.width(LinkSpaceSpacing.sm))
                 // 画质徽章
                 Surface(
-                    color = StreamTokens.Accent,
-                    shape = RoundedCornerShape(StreamTokens.CornerPill)
+                    color = LinkSpaceColors.Brand,
+                    shape = PillShape
                 ) {
                     Text(
                         streamQualityLabel(scaleWidth),
-                        fontSize = StreamTokens.SmallSize,
+                        fontSize = 12.sp,
                         fontWeight = FontWeight.Medium,
                         color = androidx.compose.ui.graphics.Color.White,
                         modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
@@ -111,10 +111,10 @@ fun StreamTopBar(
                 }
                 // 延迟：服务层字段到位前不渲染（见本文件头注释）
                 if (latencyText != null) {
-                    Spacer(Modifier.width(StreamTokens.SpaceSm))
+                    Spacer(Modifier.width(LinkSpaceSpacing.sm))
                     Text(
                         latencyText,
-                        fontSize = StreamTokens.SmallSize,
+                        fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
@@ -140,18 +140,18 @@ fun StreamTopBar(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(
-                            horizontal = StreamTokens.SpaceMd,
-                            vertical = StreamTokens.SpaceSm
+                            horizontal = LinkSpaceSpacing.md,
+                            vertical = LinkSpaceSpacing.sm
                         ),
-                    verticalArrangement = Arrangement.spacedBy(StreamTokens.SpaceSm)
+                    verticalArrangement = Arrangement.spacedBy(LinkSpaceSpacing.sm)
                 ) {
                     // 显示：分辨率四档 + 触控模式
                     Text(
                         "显示",
-                        fontSize = StreamTokens.SmallSize,
+                        fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    Row(horizontalArrangement = Arrangement.spacedBy(StreamTokens.SpaceSm)) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(LinkSpaceSpacing.sm)) {
                         STREAM_RESOLUTION_OPTIONS.forEach { (label, width) ->
                             FilterChip(
                                 selected = width == scaleWidth,
@@ -159,24 +159,24 @@ fun StreamTopBar(
                                     onSelectScaleWidth(width)
                                     expanded = false
                                 },
-                                label = { Text(label, fontSize = StreamTokens.SmallSize) },
+                                label = { Text(label, fontSize = 12.sp) },
                                 colors = FilterChipDefaults.filterChipColors(
-                                    selectedContainerColor = StreamTokens.Accent,
+                                    selectedContainerColor = LinkSpaceColors.Brand,
                                     selectedLabelColor = androidx.compose.ui.graphics.Color.White
                                 )
                             )
                         }
                     }
-                    Row(horizontalArrangement = Arrangement.spacedBy(StreamTokens.SpaceSm)) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(LinkSpaceSpacing.sm)) {
                         FilterChip(
                             selected = !relativeMode,
                             onClick = {
                                 if (relativeMode) onToggleMode()
                                 expanded = false
                             },
-                            label = { Text("点哪指哪", fontSize = StreamTokens.SmallSize) },
+                            label = { Text("点哪指哪", fontSize = 12.sp) },
                             colors = FilterChipDefaults.filterChipColors(
-                                selectedContainerColor = StreamTokens.Accent,
+                                selectedContainerColor = LinkSpaceColors.Brand,
                                 selectedLabelColor = androidx.compose.ui.graphics.Color.White
                             )
                         )
@@ -186,9 +186,9 @@ fun StreamTopBar(
                                 if (!relativeMode) onToggleMode()
                                 expanded = false
                             },
-                            label = { Text("滑动跟随", fontSize = StreamTokens.SmallSize) },
+                            label = { Text("滑动跟随", fontSize = 12.sp) },
                             colors = FilterChipDefaults.filterChipColors(
-                                selectedContainerColor = StreamTokens.Accent,
+                                selectedContainerColor = LinkSpaceColors.Brand,
                                 selectedLabelColor = androidx.compose.ui.graphics.Color.White
                             )
                         )
@@ -199,12 +199,12 @@ fun StreamTopBar(
                         Column(Modifier.weight(1f)) {
                             Text(
                                 "剪贴板同步",
-                                fontSize = StreamTokens.BodySize,
+                                fontSize = 14.sp,
                                 color = MaterialTheme.colorScheme.onSurface
                             )
                             Text(
                                 "与这台电脑互相同步剪贴板文本",
-                                fontSize = StreamTokens.SmallSize,
+                                fontSize = 12.sp,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
@@ -218,7 +218,7 @@ fun StreamTopBar(
                             onClose()
                         },
                         colors = ButtonDefaults.outlinedButtonColors(
-                            contentColor = StreamTokens.Danger
+                            contentColor = LinkSpaceStatusColors.Danger
                         ),
                         modifier = Modifier.fillMaxWidth()
                     ) { Text("断开投屏") }
