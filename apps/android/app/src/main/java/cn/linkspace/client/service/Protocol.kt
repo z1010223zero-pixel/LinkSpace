@@ -69,6 +69,12 @@ object Protocol {
     /** 单条 input.event 消息的事件数上限，与桌面端 MAX_EVENTS_PER_MESSAGE 一致 */
     const val MAX_EVENTS_PER_MESSAGE = 64
 
+    /**
+     * 每连接消息 id 去重窗口（协议 §3）：最近这么多条 id 内的重复只
+     * 处理一次，与桌面端 MAX_SEEN_MESSAGE_IDS 一致。
+     */
+    const val MAX_SEEN_MESSAGE_IDS = 1024
+
     /** move 事件坐标上限（控制端屏幕绝对坐标），与桌面端 MAX_COORD 一致 */
     const val MAX_COORD = 32768
 

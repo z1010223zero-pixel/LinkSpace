@@ -56,6 +56,8 @@ class TransferServer(
     private val controlPeerIds = java.util.Collections.synchronizedMap(mutableMapOf<WebSocketConnection, String>())
     /** 连接 → 连入方 TLS 客户端证书指纹（未出示证书为 null），指纹锚定用 */
     private val controlFingerprints = java.util.Collections.synchronizedMap(mutableMapOf<WebSocketConnection, String?>())
+    /** 连接 → 已见消息 id（去重窗口，协议 §3；随连接关闭清理） */
+    private val controlSeenIds = java.util.Collections.synchronizedMap(mutableMapOf<WebSocketConnection, SeenMessageIds>())
 
     /** 已交接给 WebSocket 的连接，finally 不得再关闭 */
     private val handedOff: MutableSet<Socket> =
@@ -129,6 +131,7 @@ class TransferServer(
         }
         controlPeerIds.clear()
         controlFingerprints.clear()
+        controlSeenIds.clear()
     }
 
     /** 周期向所有控制连接发心跳。to 留空：保活包是广播性质，桌面端允许空 to */
@@ -347,6 +350,7 @@ class TransferServer(
                     // 永远展示在界面上、提交也不会成功的僵尸条目
                     val peer = controlPeerIds.remove(conn)
                     controlFingerprints.remove(conn)
+                    controlSeenIds.remove(conn)
                     if (peer != null) controlClosedHandler?.invoke(peer)
                 }
             }
@@ -587,15 +591,33 @@ class TransferServer(
             return
         }
         val registered = controlPeerIds[conn]
+        val ctx: ControlContext
         if (registered == null) {
             controlPeerIds[conn] = from
             controlFingerprints[conn] = tlsFp
-            controlHandler?.invoke(ControlContext(from, tlsFp, conn), obj)
+            ctx = ControlContext(from, tlsFp, conn)
         } else if (registered != from) {
             Log.w(TAG, "连接身份漂移（$registered → $from），丢弃消息")
+            return
         } else {
-            controlHandler?.invoke(ControlContext(registered, controlFingerprints[conn], conn), obj)
+            ctx = ControlContext(registered, controlFingerprints[conn], conn)
         }
+        // id 去重（协议 §3）：同一连接上同一 id 只处理一次；空 id 视为畸形。
+        val id = obj.optString("id")
+        if (id.isEmpty()) {
+            Log.w(TAG, "信封 id 为空，丢弃消息 type=${obj.optString("type")}")
+            return
+        }
+        val seen = controlSeenIds.getOrPut(conn) { SeenMessageIds() }
+        if (seen.isDuplicate(id)) {
+            // 重放多为重发/重连抖动，只记前 3 次、之后每 100 次记一次，
+            // 免得一条重放洪泛把日志刷爆
+            if (seen.duplicateCount <= 3 || seen.duplicateCount % 100 == 0) {
+                Log.w(TAG, "重复消息 id=$id type=${obj.optString("type")}（第 ${seen.duplicateCount} 次），丢弃")
+            }
+            return
+        }
+        controlHandler?.invoke(ctx, obj)
     }
 
     /** 控制连接断开回调，参数为对端设备 ID */
