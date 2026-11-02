@@ -1,7 +1,10 @@
 package cn.linkspace.client.service
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.util.Log
+import android.view.KeyEvent
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -447,6 +450,8 @@ class LinkSpaceService private constructor(private val appContext: Context) {
             // 控制端与被控端各按 sessionId 匹配，不匹配的安全忽略。
             Protocol.TYPE_SESSION_START -> controlledInput.onStart(from, payload)
             Protocol.TYPE_INPUT_EVENT -> controlledInput.onEvent(from, payload)
+            Protocol.TYPE_INPUT_TEXT -> controlledInput.onText(from, payload)
+            Protocol.TYPE_SCREEN_PASTE -> controlledInput.onScreenPaste(from, payload)
 
             // ---------- 反向投屏（4.7，线 2 W6）：桌面看平板画面 ----------
             // 与 input 会话解耦：反向流的启停不以活动 input 会话为前提，
@@ -823,6 +828,8 @@ class LinkSpaceService private constructor(private val appContext: Context) {
             isAccessibilityReady = { LinkSpaceAccessibilityService.isEnabled(appContext) },
             inject = { events, _ -> LinkSpaceAccessibilityService.inject(events) },
             releaseAll = { LinkSpaceAccessibilityService.releaseAll() },
+            commitText = { text -> LinkSpaceAccessibilityService.commitText(text) },
+            paste = { text -> handleScreenPaste(text) },
             listener = object : ControlledInputSession.Listener {
                 override fun onControlRequested(request: ControlledInputSession.ControlRequest) {
                     _controlRequest.value = request
@@ -1167,6 +1174,8 @@ class LinkSpaceService private constructor(private val appContext: Context) {
                     // ---------- 电脑→安卓远控（4.6，被控端半边，线 2 W4 骨架） ----------
                     Protocol.TYPE_SESSION_START -> controlledInput.onStart(from, payload)
                     Protocol.TYPE_INPUT_EVENT -> controlledInput.onEvent(from, payload)
+                    Protocol.TYPE_INPUT_TEXT -> controlledInput.onText(from, payload)
+                    Protocol.TYPE_SCREEN_PASTE -> controlledInput.onScreenPaste(from, payload)
                     // ---------- 反向投屏（4.7，线 2 W6）：桌面看平板画面 ----------
                     // 与 input 会话解耦：不查活动 input 会话，只认已配对连接
                     Protocol.TYPE_SCREEN_STREAM_REQUEST -> reverseScreen.onRequest(from, payload)
@@ -1397,6 +1406,44 @@ class LinkSpaceService private constructor(private val appContext: Context) {
         }.toString()
         outboundWriter.execute { runCatching { client.sendText(out.conn, text) } }
         Log.i(TAG, "投屏请求已发（display=$resolvedDisplayIndex, scaleWidth=$scaleWidth）")
+    }
+
+    /**
+     * screen.paste 接收侧（协议 4.8，C 回退：桌面→平板）。会话层已校验
+     * 活动会话与 512 KiB 上限，这里只做三件事：
+     * ① 写本机剪贴板；② 标记来源、抑制剪贴板同步回推（2.4-3 防回环）；
+     * ③ 注入 Ctrl+V（走 B1 按键通道，须焦点输入框）。
+     * 返回 null 表示完成，否则是失败（code + 原因），会话层回 input.error。
+     */
+    private fun handleScreenPaste(text: String): ControlledInputInjector.InputFailure? {
+        val cm = appContext.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+            ?: return ControlledInputInjector.InputFailure(
+                ControlledInputInjector.InputFailure.INJECT_FAILED,
+                "本机剪贴板服务不可用，粘贴未执行"
+            )
+        runCatching {
+            cm.setPrimaryClip(ClipData.newPlainText("LinkSpace", text))
+        }.onFailure { e ->
+            return ControlledInputInjector.InputFailure(
+                ControlledInputInjector.InputFailure.INJECT_FAILED,
+                "写平板剪贴板失败：${e.message}"
+            )
+        }
+        // 回环抑制：刚写入的内容不触发本机剪贴板同步回推（2.4-3）。
+        // 同步未开启时 clipboard 为空，无事可做；开启后基线在 start() 里
+        // 重读，这里只在运行中标记。
+        clipboard?.markRemoteWrite(text)
+        val ctrlV = listOf(
+            ControlledInputInjector.DecodedEvent.Key(KeyEvent.KEYCODE_CTRL_LEFT, true),
+            ControlledInputInjector.DecodedEvent.Key(KeyEvent.KEYCODE_V, true),
+            ControlledInputInjector.DecodedEvent.Key(KeyEvent.KEYCODE_V, false),
+            ControlledInputInjector.DecodedEvent.Key(KeyEvent.KEYCODE_CTRL_LEFT, false)
+        )
+        return when (val r = LinkSpaceAccessibilityService.inject(ctrlV)) {
+            is ControlledInputInjector.InjectResult.Ok -> null
+            is ControlledInputInjector.InjectResult.Failed ->
+                ControlledInputInjector.InputFailure(r.code, "粘贴注入 Ctrl+V 失败：${r.reason}")
+        }
     }
 
     /**
