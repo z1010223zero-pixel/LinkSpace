@@ -567,6 +567,20 @@ export class Host {
   }
 
   /**
+   * 某 adb serial 是否属于某台已配对设备（2.5 反向流衔接用）：显式绑定
+   * 快照 + 该设备当前 LinkSpace 连接的 remoteAddress（无线 IP-join）。
+   * 与撤销级联用的是同一判定（serialBelongsToDevice），只差快照是 live 取
+   * 还是撤销前捕获——这里调用时连接还在，live 取即可。
+   */
+  scrcpySerialBelongsTo(deviceId: string, serial: string): boolean {
+    const conn = this.peers.get(deviceId)
+    return serialBelongsToDevice(serial, {
+      boundSerials: this.bindings.serialsFor(deviceId),
+      remoteIp: conn?.remoteAddress ?? null
+    })
+  }
+
+  /**
    * 用户显式建立一条 serial↔deviceId 绑定（USB 设备投屏的前置条件）。
    * deviceId 必须已配对；serial 已绑到别的设备时会被覆盖（用户纠错）。
    */

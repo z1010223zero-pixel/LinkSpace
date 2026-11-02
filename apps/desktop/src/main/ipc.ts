@@ -169,6 +169,22 @@ export function registerIpc(
         error: { code: 'AUTH_REQUIRED', message: gate.error, retryable: false }
       }
     }
+    // 2.5 反向流优先：已在反向流窗口里看这台设备的画面时，不再另开 scrcpy。
+    // scrcpy 是过渡方案，反向流是正路；两路同看同一块屏只会重复耗电耗带宽。
+    // 只拦「流已在跑」：反向流仅发起未确认时仍允许 scrcpy，免得平板拒绝后
+    // 两边都没有；反向流一旦跑起来，接管逻辑（reverse-control:start）会停
+    // 掉 scrcpy，本处是第二道防线。
+    const reverse = host.reverseStreamStatus()
+    if (reverse.peerId === gate.deviceId && reverse.receiver.running) {
+      return {
+        ok: false as const,
+        error: {
+          code: 'RESOURCE_BUSY',
+          message: '已在反向流窗口里看这台设备的画面（反向流优先，scrcpy 是过渡方案），请先断开反向流再用 scrcpy',
+          retryable: false
+        }
+      }
+    }
     const options = (opts ?? {}) as StartOptions
     const result = await adapter.start(serial, options)
     broadcast(getWindow, 'sessions:changed')
@@ -437,7 +453,7 @@ export function registerIpc(
     }
   }
 
-  ipcMain.handle('reverse-control:start', (_e, peerId: unknown, scaleWidth: unknown) => {
+  ipcMain.handle('reverse-control:start', async (_e, peerId: unknown, scaleWidth: unknown) => {
     if (typeof peerId !== 'string' || !peerId) return fail('缺少对端 ID')
     if (reverseWindows.isOpenFor(peerId)) {
       reverseWindows.open(peerId, reverseWindows.statusSnapshot().displayName || peerId)
@@ -448,6 +464,21 @@ export function registerIpc(
     if (!r.ok) return fail(reverseStartGuidance(r.error))
     const trusted = host.trustedDevices().find((t) => t.deviceId === peerId)
     reverseWindows.open(peerId, trusted?.displayName ?? peerId)
+    // 2.5 反向流优先：反向流接管后，同一设备的 scrcpy 会话即退役——停掉，
+    // 不留两路同看一块屏。停失败不影响已打开的反向窗口；平板若拒绝确认，
+    // 用户可再点 scrcpy 启动（反向流未在跑，startFor 不拦）。
+    const superseded = adapter
+      .list()
+      .filter(
+        (s) =>
+          (s.state === 'starting' || s.state === 'running') &&
+          host.scrcpySerialBelongsTo(peerId, s.serial)
+      )
+    if (superseded.length > 0) {
+      log.info(`反向流已接管 ${peerId}，停掉 ${superseded.length} 个 scrcpy 会话`)
+      await Promise.all(superseded.map((s) => adapter.stop(s.id)))
+      broadcast(getWindow, 'sessions:changed')
+    }
     return { ok: true as const }
   })
 

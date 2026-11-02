@@ -242,6 +242,31 @@ async function testE2e(workDir: string): Promise<void> {
     const g3 = B.resolveScrcpyDevice("127.0.0.1:5555")
     check("反向 IP-join 同样放行", g3.ok && g3.deviceId === A.id, JSON.stringify(g3))
 
+    // ---------- 1b. 身份快照（2.5-1）与归属判定（2.5 反向流衔接） ----------
+    console.log("\n1b. 身份快照与归属判定")
+    const idWireless = A.scrcpyIdentityOf("127.0.0.1:5555")
+    check(
+      "无线已配对身份快照",
+      idWireless.deviceId === B.id && idWireless.paired && !idWireless.bound && idWireless.allowed,
+      JSON.stringify(idWireless)
+    )
+    const idUsb = A.scrcpyIdentityOf("USBDEV001")
+    check(
+      "绑定 USB 身份快照",
+      idUsb.deviceId === B.id && idUsb.paired && idUsb.bound && idUsb.allowed,
+      JSON.stringify(idUsb)
+    )
+    const idUnknown = A.scrcpyIdentityOf("192.168.99.99:5555")
+    check(
+      "未知设备身份全空",
+      idUnknown.deviceId === null && !idUnknown.paired && !idUnknown.bound && !idUnknown.allowed,
+      JSON.stringify(idUnknown)
+    )
+    check("归属：无线 IP-join serial 属于该设备", A.scrcpySerialBelongsTo(B.id, "127.0.0.1:5555"))
+    check("归属：绑定 USB serial 属于该设备", A.scrcpySerialBelongsTo(B.id, "USBDEV001"))
+    check("归属：无关 serial 不属于", !A.scrcpySerialBelongsTo(B.id, "10.0.0.9:5555"))
+    check("归属：未知设备一律不属于", !A.scrcpySerialBelongsTo("no-such-device", "127.0.0.1:5555"))
+
     // ---------- 2. 撤销级联 ----------
     console.log("\n2. 撤销信任级联断开 scrcpy")
     interface FakeSession {
