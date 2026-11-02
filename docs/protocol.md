@@ -174,13 +174,20 @@
 ### 4.7 屏幕投屏（阶段 4 前置，`screen.stream.*`）
 
 > **[PROTOCOL] 2026-10-30 登记**（B-6）：桌面画面 → 平板的单向推流，**寄生在键鼠会话内**——没有活动 `input` 会话时一切投屏消息都被拒绝。视频数据不走本节消息，走键鼠控制连接（4.6）上的 **WS 二进制帧**（裸 H.264 Annex-B 字节流，复用平板连出的控制链路——实测平板对入站 TCP 全拒，唯有平板连出的链路可双向）。
+>
+> **[PROTOCOL] 2026-11-02 登记**（线 2 W6）：`screen.stream.*` 的**反向**——平板画面 → 电脑窗口。同一套消息、同一套语义，方向只是角色互换：请求方是桌面（观看方），源端是平板（`ReverseScreenStreamer`）。与线 1 的寄生关系**解耦**：反向流的启停**不以活动 `input` 会话为前提**（3.2-2 的 display-extend 解耦同款，只做到“流可独立于 input 会话存在”这一层）。
+> - **授权门**：平板端的 MediaProjection 系统录屏授权——用户在系统弹框里点同意才开录；每次请求都要过这道门（无人值守先不做，与线 2 选型一致）。未配对设备直接拒；断连/撤销信任立即掐断。`screen.stream.request` 本身不新增授权位。
+> - **视频帧通道**：与线 1 完全相同——源端编码输出的字节块以 WS 二进制帧（opcode 0x2）经控制连接发出，复用平板连出的那条链路（平板→桌面方向本来就是连出方向）；控制消息（文本帧）与视频块（二进制帧）按 opcode 分流。帧无序号、无确认——丢帧表现为画面短暂停滞，等下一个 IDR 恢复（GOP 30，1s 一个 IDR）。
+> - **编码**：MediaCodec（Surface 直连 VirtualDisplay）优先，启动失败回落 JavaCV/libx264 软编（线 1 在该 ROM 上已验证软解可靠，编码侧同样留回落口）。分辨率档位与码率档位与线 1 同口径：720p/1080p/1440p/2160p（目标宽 1280/1920/2560/3840），t0 不限流/t1 6M/t2 3M/t3 1.5M；换分辨率重启编码器，换码率档 MediaCodec 走 setParameters（软编走 recorder 重启）。
+> - **背压与重连（复用线 1 口径）**：发送积压超 3MB 丢到最近关键帧（与线 1 解码端同值）；码率自适应 2s 采样，>1MB 计分 +1、<100KB 计分 -1，连续 3 次拥塞降档、连续 -8 升档；断线重连退避 5/10/20/30s×4——观看方（桌面）重发 `screen.stream.request`，4 次未成功停手；解码端关键帧恢复（丢到最近 SPS）与线 1 相同。
+> - **已知局限**：`screen.stream.stop` 没有方向位——双向流同时在跑时一方停流会把另一方也停掉；真要并发双向需给 stop 加流标识，本批不做。**未验证（无真机）**：MediaCodec 在该 ROM 上的实际编码表现、Annex-B/AVCC 形态、画面延迟、码率自适应效果；录屏在应用退后台后能否持续（targetSdk 35 下需 foregroundServiceType="mediaProjection" 承接，本批不动 AndroidManifest）；录屏授权 UI（MainActivity 的系统授权框接线）是后续 UI 批次的活，本批默认拒绝。
 
 | 类型 | 方向 | payload | 说明 |
 |---|---|---|---|
-| `screen.stream.request` | 控制端 → 被控端 | `{ display?: number, scaleWidth?: number }` | 请求开始投屏。前置：活动键鼠会话存在且 peerId 匹配、被控端 ffmpeg 可用，否则回 `error`。**`display` 省略时**：被控端单显示器直接按 0 号屏开流（免选择器）；多显示器回 `screen.stream.displays` 清单，由用户挑选后再带 `display` 重发本消息（自动重连带记住的索引时同样直连）。**`scaleWidth`**：目标视频宽度档位（1280/1920/2560/3840），省略时默认 1920；换分辨率会重启推流。**[PROTOCOL] 2026-11-01 登记**（用户要求画质/延迟可切换） |
+| `screen.stream.request` | 控制端 → 被控端 | `{ display?: number, scaleWidth?: number }` | 请求开始投屏。前置：活动键鼠会话存在且 peerId 匹配、被控端 ffmpeg 可用，否则回 `error`。**`display` 省略时**：被控端单显示器直接按 0 号屏开流（免选择器）；多显示器回 `screen.stream.displays` 清单，由用户挑选后再带 `display` 重发本消息（自动重连带记住的索引时同样直连）。**`scaleWidth`**：目标视频宽度档位（1280/1920/2560/3840），省略时默认 1920；换分辨率会重启推流。**[PROTOCOL] 2026-11-01 登记**（用户要求画质/延迟可切换）。**[PROTOCOL] 2026-11-02 登记**（线 2 W6，反向）：桌面看平板时同一条消息反向使用——请求方是桌面、源端是平板；此时**不要求活动 input 会话**（与 input 会话解耦），前置改为：对端已配对 + 平板端 MediaProjection 系统录屏授权；`display` 参数反向时无意义（平板单屏），忽略。 |
 | `screen.stream.displays` | 被控端 → 控制端 | `{ displays: [{ x, y, w, h }] }` | 多显示器清单（虚拟屏坐标），控制端弹选择器。**[PROTOCOL] 2026-10-31 登记**（ToDesk 式多屏选择，用户提出） |
 | `screen.cursor` | 被控端 → 控制端 | `{ x, y, w, h }` | 物理光标坐标广播（region-local 像素 + 区域尺寸，33ms 限流），控制端本地绘制光标覆盖层（采集 draw_mouse=0 不含光标）。**[PROTOCOL] 2026-10-31 登记**（开源方案同款：光标本地画，与采集解耦） |
-| `screen.stream.start` | 被控端 → 控制端 | `{ w, h, scaleWidth }` | 推流开始。`w/h` 是被控端虚拟屏全景尺寸（触控换算基准之一；实际流分辨率以流内 SPS 为准，平板按其 letterbox 等比渲染）；`scaleWidth` 是当前档位。**[PROTOCOL] 2026-11-01 登记** |
+| `screen.stream.start` | 被控端 → 控制端 | `{ w, h, scaleWidth }` | 推流开始。`w/h` 是被控端虚拟屏全景尺寸（触控换算基准之一；实际流分辨率以流内 SPS 为准，平板按其 letterbox 等比渲染）；`scaleWidth` 是当前档位。**[PROTOCOL] 2026-11-01 登记**。**[PROTOCOL] 2026-11-02 登记**（线 2 W6，反向）：平板作源端时同一条消息反向使用——`w/h` 是平板编码后的实际流尺寸（桌面接收端据此切 RGBA 帧），`scaleWidth` 是当前档位。 |
 | `screen.stream.stop` | 双向 | `{}` | 停止投屏（控制端取消 / 被控端 ffmpeg 意外退出时通知对端清 UI）。会话结束（session.stop/断连）隐式终止投流，不发本消息 |
 | `screen.stream.error` | 被控端 → 控制端 | `{ message }` | 投屏失败回告（无会话 / 缺 ffmpeg / 启动失败） |
 

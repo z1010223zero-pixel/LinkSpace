@@ -35,7 +35,7 @@ import {
 } from './input/session'
 import type { InputEvent, ScreenSize } from './input/protocol'
 import { InputLayoutStore } from './input/layout'
-import { ScreenStreamService, STREAM_QUALITY_PRESETS } from './screen-stream'
+import { ScreenStreamService, ScreenStreamReceiver, STREAM_QUALITY_PRESETS, STREAM_RECONNECT_BACKOFFS_MS, type ReverseStreamFrame, type ReverseStreamStatus } from './screen-stream'
 import { log } from './log'
 
 export interface HostOptions {
@@ -108,6 +108,10 @@ export interface HostEvents {
   inputRequested: [InputControlRequest]
   /** 键鼠共享状态变化（请求到达/确认/结束），UI 刷新 */
   inputChanged: []
+  /** 反向投屏（平板画面）解出一帧：W7 的平板画面窗口订阅此事件渲染 */
+  reverseStreamFrame: [ReverseStreamFrame]
+  /** 反向投屏状态变化（开始/结束/失败/重连），UI 刷新 */
+  reverseStreamChanged: []
 }
 
 /** 对端 device.rename 的最小受理间隔（审查 P3）：每次受理都伴随落盘与 UI 事件 */
@@ -154,6 +158,14 @@ export class Host {
    *  负数=连续空闲采样（恢复升档）；探测清零换挡 */
   private streamCongestionScore = 0
   private screenStreamCurrentTier = 0
+  /** 反向投屏接收端（线 2 W6：平板画面进电脑窗口） */
+  private readonly reverseStreamReceiver = new ScreenStreamReceiver()
+  /** 正在看谁的反向投屏（peerId）；null = 未请求/已结束 */
+  private reverseStreamPeerId: string | null = null
+  private reverseStreamScaleWidth = 1920
+  /** 反向投屏断线重连计时器（退避 5/10/20/30s×4，与线 1 同口径） */
+  private reverseStreamReconnectTimer: NodeJS.Timeout | null = null
+  private reverseStreamReconnectAttempt = 0
   /** 本次投屏选中的显示器区域（虚拟屏坐标）；null = 未选/全桌面 */
   private streamRegion: { x: number; y: number; w: number; h: number } | null = null
   private readonly inputLayout: InputLayoutStore
@@ -365,6 +377,12 @@ export class Host {
       // 挡死下一次 start）——这里直接兜底，stop 幂等
       this.screenStream.stop()
       this.streamRegion = null
+      // 反向投屏跟着连接走：接收端先停（再喂帧无处去），再按
+      // 5/10/20/30s×4 排期重发请求（线 1 同口径）；peerId 保留供重连用
+      if (this.reverseStreamPeerId === pid) {
+        this.reverseStreamReceiver.stop()
+        this.scheduleReverseStreamReconnect(pid, this.reverseStreamScaleWidth)
+      }
       for (const task of this.transfers.list()) {
         if (task.peerId !== pid) continue
         if (task.direction !== 'send' || task.state !== 'offered') continue
@@ -1179,6 +1197,10 @@ export class Host {
     control.on('screen.stream.stop', (conn, _msg) => {
       if (!conn.peerId) return
       this.screenStream.stop()
+      // 同一条消息也可能是平板停反向流：两边各按自己的活动流匹配。
+      // 注意：双向流同时在跑时 stop 没有方向位，两边会一起停——
+      // 已知局限（见 protocol.md §4.7），真要并发双向需给 stop 加流标识。
+      if (conn.peerId === this.reverseStreamPeerId) this.stopReverseReceiver('对端停止反向投屏')
       sendTo(conn.peerId, 'screen.stream.stop', {})
     })
     // ffmpeg 意外退出（平板断开/编码器崩溃）：通知对端清 UI
@@ -1186,6 +1208,54 @@ export class Host {
       const peer = this.inputCoordinator?.activeSession?.peerId
       if (peer) sendTo(peer, 'screen.stream.stop', {})
     }
+
+    // ---------- 反向投屏（线 2 W6：平板画面进电脑窗口，协议 4.7 反向） ----------
+    // 与线 1 的寄生关系不同：反向流不以活动 input 会话为前提——
+    // 平板端的授权门是 MediaProjection 系统录屏授权，不是 input 会话。
+    // 观看方（本机）只负责请求 + 收帧 + 解码；W7 的平板画面窗口消费
+    // reverseStreamFrame 事件渲染，控制入口与窗口本身不在本批。
+    control.onBinary((conn, data) => {
+      if (!conn.peerId || conn.peerId !== this.reverseStreamPeerId) return
+      if (!this.reverseStreamReceiver.running) return
+      this.reverseStreamReceiver.feed(data)
+    })
+    control.on('screen.stream.start', (conn, msg) => {
+      const peerId = conn.peerId
+      if (!peerId || peerId !== this.reverseStreamPeerId) return
+      const p = msg.payload as { w?: unknown; h?: unknown; scaleWidth?: unknown }
+      const w = typeof p?.w === 'number' ? p.w : 0
+      const h = typeof p?.h === 'number' ? p.h : 0
+      const scaleWidth = typeof p?.scaleWidth === 'number' ? p.scaleWidth : this.reverseStreamScaleWidth
+      if (!this.opts.screenFfmpegPath) {
+        log.warn('[screen-stream] 反向投屏无法解码：本机缺少 ffmpeg')
+        sendTo(peerId, 'screen.stream.stop', {})
+        this.stopReverseReceiver('本机缺少 ffmpeg，无法解码')
+        return
+      }
+      if (w > 0 && h > 0) this.reverseStreamReceiver.setExpectedSize(w, h)
+      this.reverseStreamScaleWidth = scaleWidth
+      this.reverseStreamReconnectAttempt = 0
+      this.clearReverseStreamReconnectTimer()
+      this.reverseStreamReceiver.onEnded = () => {
+        // 解码器意外退出（对端编码器崩溃/流损坏）：清状态，等用户重发请求
+        if (this.reverseStreamPeerId === peerId) {
+          log.warn('[screen-stream] 反向接收端解码器意外退出')
+          this.stopReverseReceiver('解码器意外退出')
+        }
+      }
+      this.reverseStreamReceiver.start(this.opts.screenFfmpegPath, (frame) => {
+        this.emit('reverseStreamFrame', frame)
+      })
+      log.info(`[screen-stream] 反向投屏已开始（${peerId}，${w}x${h} @ ${scaleWidth}p）`)
+      this.emit('reverseStreamChanged')
+    })
+    control.on('screen.stream.error', (conn, msg) => {
+      const peerId = conn.peerId
+      if (!peerId || peerId !== this.reverseStreamPeerId) return
+      const message = String((msg.payload as { message?: unknown })?.message ?? '投屏失败')
+      log.warn(`[screen-stream] 反向投屏失败：${message}`)
+      this.stopReverseReceiver(message)
+    })
 
     // ---------- 投屏粘贴（协议 4.8，B-7）----------
     // 键盘通道按 vk 注入，IME 组合输入（中文）无法表达；粘贴通道把文本
@@ -1228,8 +1298,106 @@ export class Host {
     this.on('revoked', (deviceId) => {
       this.inputCoordinator?.onTrustRevoked(deviceId)
       this.inputController?.onPeerDisconnected(deviceId)
+      if (this.reverseStreamPeerId === deviceId) this.stopReverseReceiver('信任已被撤销')
       this.emit('inputChanged')
     })
+  }
+
+  // ---------- 反向投屏（线 2 W6）：宿主侧状态机 ----------
+
+  /**
+   * UI（W7 的平板画面窗口）：请求看对端平板的画面。
+   * 门禁：对端必须已连接且已配对；同一时刻只看一路反向流。
+   * 反向流不以活动 input 会话为前提（协议 4.7 反向）；平板端的授权门
+   * 是 MediaProjection 系统录屏授权，由平板用户在系统弹框里确认。
+   */
+  requestReverseScreenStream(
+    peerId: string,
+    scaleWidth = 1920
+  ): { ok: true } | { ok: false; error: string } {
+    if (!this.started) return { ok: false, error: '主机未启动' }
+    if (!this.peers.has(peerId)) return { ok: false, error: '设备不在线' }
+    if (!this.trust.isKnown(peerId)) return { ok: false, error: '设备未配对' }
+    if (!this.opts.screenFfmpegPath) return { ok: false, error: '本机缺少 ffmpeg，无法解码' }
+    if (this.reverseStreamPeerId && this.reverseStreamPeerId !== peerId) {
+      return { ok: false, error: '已有反向投屏在跑' }
+    }
+    const width = STREAM_QUALITY_PRESETS.some((p) => p.width === scaleWidth) ? scaleWidth : 1920
+    // 同对端同分辨率重复请求：直接重发（对端幂等回 start）
+    this.reverseStreamPeerId = peerId
+    this.reverseStreamScaleWidth = width
+    this.reverseStreamReconnectAttempt = 0
+    this.clearReverseStreamReconnectTimer()
+    this.peers.get(peerId)?.send('screen.stream.request', { scaleWidth: width })
+    log.info(`[screen-stream] 反向投屏请求已发 → ${peerId}（${width}p）`)
+    this.emit('reverseStreamChanged')
+    return { ok: true }
+  }
+
+  /** UI（W7）：停止看反向投屏（关窗口即调这里）。幂等 */
+  stopReverseScreenStream(peerId?: string): void {
+    const target = peerId ?? this.reverseStreamPeerId
+    if (!target) return
+    this.clearReverseStreamReconnectTimer()
+    this.peers.get(target)?.send('screen.stream.stop', {})
+    if (this.reverseStreamPeerId === target) this.stopReverseReceiver('本机停止反向投屏')
+  }
+
+  /** UI（W7）：反向投屏当前状态（对端、分辨率、接收端统计） */
+  reverseStreamStatus(): { peerId: string | null; scaleWidth: number; receiver: ReverseStreamStatus } {
+    return {
+      peerId: this.reverseStreamPeerId,
+      scaleWidth: this.reverseStreamScaleWidth,
+      receiver: this.reverseStreamReceiver.status()
+    }
+  }
+
+  /** 停接收端并清反向流状态（不断连接、不重连） */
+  private stopReverseReceiver(reason: string): void {
+    this.reverseStreamReceiver.stop()
+    this.reverseStreamPeerId = null
+    log.info(`[screen-stream] 反向投屏已停：${reason}`)
+    this.emit('reverseStreamChanged')
+  }
+
+  private clearReverseStreamReconnectTimer(): void {
+    if (this.reverseStreamReconnectTimer) clearTimeout(this.reverseStreamReconnectTimer)
+    this.reverseStreamReconnectTimer = null
+  }
+
+  /**
+   * 反向投屏断线重连：退避 5/10/20/30s×4（线 1 同口径），每次等对端
+   * 重新连入（peers 表里出现）后再重发 screen.stream.request；4 次
+   * 未成功即停手，清状态交给用户手动重试。重发后若对端回 start，
+   * start 处理里清 attempt 计数；若对端回 error，error 处理停流。
+   * 若重发后既无 start 又无 error（平板用户 30s 未确认），平板侧
+   * pending 超时后会回 error，桌面随之停流——等待是有界的。
+   */
+  private scheduleReverseStreamReconnect(peerId: string, scaleWidth: number): void {
+    this.clearReverseStreamReconnectTimer()
+    this.reverseStreamReconnectAttempt = 0
+    const attempt = (): void => {
+      if (this.reverseStreamPeerId !== peerId) return
+      if (this.reverseStreamReconnectAttempt >= STREAM_RECONNECT_BACKOFFS_MS.length) {
+        log.warn('[screen-stream] 反向投屏自动重连放弃（4 次未成功），等待用户手动重试')
+        this.stopReverseReceiver('自动重连 4 次未成功')
+        return
+      }
+      const backoff = STREAM_RECONNECT_BACKOFFS_MS[this.reverseStreamReconnectAttempt] ?? 5000
+      this.reverseStreamReconnectAttempt++
+      this.reverseStreamReconnectTimer = setTimeout(() => {
+        if (this.reverseStreamPeerId !== peerId) return
+        if (!this.peers.has(peerId)) {
+          log.warn(`[screen-stream] 反向投屏重连第 ${this.reverseStreamReconnectAttempt} 次：对端未重新连入，稍后再试`)
+          attempt()
+          return
+        }
+        log.info(`[screen-stream] 反向投屏重连第 ${this.reverseStreamReconnectAttempt} 次：重发请求`)
+        this.peers.get(peerId)?.send('screen.stream.request', { scaleWidth })
+      }, backoff)
+    }
+    log.info('[screen-stream] 反向投屏连接断开，5s 后开始自动重连（最多 4 次）')
+    attempt()
   }
 
   /** Electron main 里的本机屏幕尺寸。无头环境回退到常见默认值 */
@@ -1310,6 +1478,9 @@ export class Host {
     // 而不是等心跳超时，本机的按住状态也一并抬起
     this.inputController?.stop('app shutdown')
     this.inputCoordinator?.terminate()
+    this.clearReverseStreamReconnectTimer()
+    this.reverseStreamReceiver.stop()
+    this.reverseStreamPeerId = null
     this.clipboardSync?.stop()
     this.discovery?.stop()
     this.control?.stop()

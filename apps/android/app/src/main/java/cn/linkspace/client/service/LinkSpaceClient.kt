@@ -199,6 +199,11 @@ class LinkSpaceClient(private val identity: Identity) {
         conn.sendText(text)
     }
 
+    /** 发一帧二进制（客户端→服务端必须掩码；反向投屏的视频块用） */
+    fun sendBinary(conn: ClientConnection, data: ByteArray) {
+        conn.sendBinary(data)
+    }
+
     /** 阻塞读一帧文本。返回 null 表示连接关闭 */
     fun readText(conn: ClientConnection): String? = conn.readText()
 
@@ -237,6 +242,37 @@ class LinkSpaceClient(private val identity: Identity) {
                 out.write(maskKey)
                 val masked = ByteArray(payload.size)
                 for (i in payload.indices) masked[i] = (payload[i].toInt() xor maskKey[i % 4].toInt()).toByte()
+                out.write(masked)
+                out.flush()
+            }
+        }
+
+        /**
+         * 发一帧二进制（反向投屏的视频块）。与 sendText 同款掩码帧格式，
+         * 只是 opcode 换成 0x82；同样在 out 上同步，保证与文本帧不交错。
+         * 调用方负责把编码输出切成 ≤64KB 的块（见 ReverseScreenStreamer）。
+         */
+        fun sendBinary(data: ByteArray) {
+            val out = socket.getOutputStream()
+            // 0x82 = FIN | 二进制帧
+            val header = when {
+                data.size < 126 -> byteArrayOf(0x82.toByte(), (0x80 or data.size).toByte())
+                data.size < 65536 -> byteArrayOf(
+                    0x82.toByte(), (0x80 or 126).toByte(),
+                    (data.size shr 8).toByte(), data.size.toByte()
+                )
+                else -> byteArrayOf(
+                    0x82.toByte(), (0x80 or 127).toByte(),
+                    0, 0, 0, 0,
+                    (data.size shr 24).toByte(), (data.size shr 16).toByte(),
+                    (data.size shr 8).toByte(), data.size.toByte()
+                )
+            }
+            synchronized(out) {
+                out.write(header)
+                out.write(maskKey)
+                val masked = ByteArray(data.size)
+                for (i in data.indices) masked[i] = (data[i].toInt() xor maskKey[i % 4].toInt()).toByte()
                 out.write(masked)
                 out.flush()
             }

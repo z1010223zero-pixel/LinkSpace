@@ -52,6 +52,14 @@ export const STREAM_QUALITY_PRESETS: Array<{ label: string; width: number; fps: 
   { label: '2160p', width: 3840, fps: 30, bps: 24_000_000 }
 ]
 
+/**
+ * 断线重连退避（线 1 口径）：5/10/20/30s，各一次，共 4 次，之后停手
+ * 交给用户。线 1 的实现在 Android 端（LinkSpaceService
+ * scheduleStreamReconnect）；反向流的观看方是桌面端，由 host.ts 的
+ * 反向重连复用同一组数字，不另写一套。
+ */
+export const STREAM_RECONNECT_BACKOFFS_MS: readonly number[] = [5000, 10000, 20000, 30000]
+
 export class ScreenStreamService {
   private proc: ChildProcessWithoutNullStreams | null = null
   private stderrTail: string[] = []
@@ -220,4 +228,237 @@ export class ScreenStreamService {
   lastErrors(): string[] {
     return [...this.stderrTail]
   }
+}
+
+// ---------------------------------------------------------------------------
+// 反向 screen.stream 接收端（线 2 W6，协议 4.7 反向）
+// ---------------------------------------------------------------------------
+
+/** 解出的一帧：RGBA 原始像素 + 尺寸。渲染层（W7 的平板画面窗口）按帧绘制。 */
+export interface ReverseStreamFrame {
+  width: number
+  height: number
+  /** RGBA，每像素 4 字节，行优先，长度恒为 width * height * 4 */
+  data: Buffer
+}
+
+export interface ReverseStreamStatus {
+  running: boolean
+  width: number
+  height: number
+  bytesReceived: number
+  framesDecoded: number
+  /** 背压丢到关键帧重同步的次数 */
+  keyframeResyncs: number
+  /** 背压丢弃的字节数 */
+  droppedBytes: number
+  lastError: string | null
+}
+
+/**
+ * 反向投屏接收端：收 WS 二进制帧（平板推来的裸 H.264 Annex-B）→
+ * ffmpeg 解码 → RGBA 帧交给渲染层。
+ *
+ * 传输不另起一套：帧走已有的控制连接（平板连出的那条），由宿主经
+ * ControlNode.onBinary 喂进来；解码复用现有 ffmpeg 链路（与推流端
+ * 同一个 ffmpeg 可执行文件，只是反过来：stdin 进 Annex-B，
+ * stdout 出 rawvideo）。接口给 W7 的桌面控制端窗口直接消费：
+ * start/stop/status + 帧回调。
+ *
+ * 帧尺寸：以 screen.stream.start 里的 w/h 为准（平板按 scaleWidth
+ * 等比缩放后的编码尺寸）；若 start 没给尺寸，退到解析 ffmpeg 的
+ * stderr（`Stream #0:0: Video: h264 ... 1920x1080`）。尺寸中途变化
+ * （换分辨率）时宿主应先 stop 再 start——平板换分辨率会发新的
+ * screen.stream.start，见 host.ts。
+ *
+ * 背压（复用线 1 解码端口径）：ffmpeg stdin 积压超 3MB 即丢到最近
+ * 关键帧（SPS）重同步，与 Android 端 StreamDecoder 的 BACKLOG_CAP
+ * 同值同语义；丢帧的正确位置是网络缓冲（整 GOP 丢弃），不是解码器
+ * 的字节流内部。
+ */
+export class ScreenStreamReceiver {
+  private proc: ChildProcessWithoutNullStreams | null = null
+  private expectedWidth = 0
+  private expectedHeight = 0
+  private frameBuf = Buffer.alloc(0)
+  private droppingToKeyframe = false
+  private bytesReceived = 0
+  private framesDecoded = 0
+  private keyframeResyncs = 0
+  private droppedBytes = 0
+  private lastError: string | null = null
+  private stderrTail: string[] = []
+  private onFrameRef: ((frame: ReverseStreamFrame) => void) | null = null
+
+  get running(): boolean {
+    return this.proc != null
+  }
+
+  /** 解码器意外退出的回调（host 据此清 UI / 触发重连） */
+  onEnded: (() => void) | null = null
+
+  /** 帧尺寸确认的回调（start 消息尺寸或 stderr 解析，二者一致时只发一次） */
+  onSize: ((width: number, height: number) => void) | null = null
+
+  /**
+   * 启动解码：ffmpeg 从 stdin 读 Annex-B，stdout 出 RGBA rawvideo。
+   * 帧尺寸由 setExpectedSize 事先给定，或等 stderr 解析到再出帧。
+   */
+  start(ffmpegPath: string, onFrame: (frame: ReverseStreamFrame) => void): void {
+    if (this.proc) this.stop()
+    this.onFrameRef = onFrame
+    this.frameBuf = Buffer.alloc(0)
+    this.droppingToKeyframe = false
+    this.stderrTail = []
+    const args = [
+      '-hide_banner', '-loglevel', 'error',
+      '-fflags', 'nobuffer',
+      '-flags', 'low_delay',
+      '-i', 'pipe:0',
+      '-f', 'rawvideo',
+      '-pix_fmt', 'rgba',
+      'pipe:1'
+    ]
+    const proc = spawn(ffmpegPath, args, { windowsHide: true })
+    log.info('[screen-stream] 反向接收端解码已启动（WS 二进制帧 → ffmpeg → RGBA）')
+    proc.stderr.on('data', (chunk: Buffer) => {
+      const line = chunk.toString().trim()
+      if (!line) return
+      this.stderrTail.push(line)
+      if (this.stderrTail.length > 20) this.stderrTail.shift()
+      // 尺寸兜底：start 消息没给尺寸时，从流信息里解析
+      if (this.expectedWidth === 0 || this.expectedHeight === 0) {
+        const m = /Video:.*?(\d+)x(\d+)/.exec(line)
+        if (m) this.setExpectedSize(Number(m[1]), Number(m[2]))
+      }
+      log.warn(`[screen-stream] 接收端 ffmpeg: ${line}`)
+    })
+    proc.stdout.on('data', (chunk: Buffer) => {
+      if (this.proc !== proc) return
+      this.frameBuf = Buffer.concat([this.frameBuf, chunk])
+      this.splitFrames()
+    })
+    proc.on('exit', (code) => {
+      log.info(`[screen-stream] 接收端 ffmpeg 退出（code=${code}）`)
+      if (this.proc === proc) {
+        this.proc = null
+        this.onEnded?.()
+      }
+    })
+    proc.on('error', (err) => {
+      this.lastError = String(err)
+      log.warn(`[screen-stream] 接收端 ffmpeg 启动失败: ${String(err)}`)
+    })
+    this.proc = proc
+  }
+
+  /**
+   * 喂入一个 WS 二进制帧负载（Annex-B 字节块，边界不重要，流内自带
+   * 起始码）。背压时丢到最近 SPS 再恢复。
+   */
+  feed(data: Buffer): void {
+    const proc = this.proc
+    if (!proc || proc.stdin.destroyed) return
+    this.bytesReceived += data.length
+    if (this.droppingToKeyframe) {
+      const spsAt = findSps(data)
+      if (spsAt < 0) {
+        this.droppedBytes += data.length
+        return
+      }
+      this.droppingToKeyframe = false
+      this.keyframeResyncs++
+      log.warn('[screen-stream] 接收端背压丢帧恢复：等到关键帧，恢复解码')
+      this.writeChunk(proc, data.subarray(spsAt))
+      return
+    }
+    this.writeChunk(proc, data)
+    // stdin 积压超 3MB：ffmpeg 消费跟不上，再喂只会让延迟发散——
+    // 进丢帧模式，等下一个 SPS 重同步（线 1 解码端同口径）
+    if (proc.stdin.writableLength > RECEIVER_BACKLOG_CAP) {
+      this.droppingToKeyframe = true
+      log.warn(`[screen-stream] 接收端 stdin 积压超 3MB，丢到最近关键帧（积压 ${proc.stdin.writableLength}B）`)
+    }
+  }
+
+  private writeChunk(proc: ChildProcessWithoutNullStreams, data: Buffer): void {
+    if (data.length === 0) return
+    try {
+      proc.stdin.write(data)
+    } catch {
+      // ffmpeg 已死（exit 事件随后到）：本块丢弃，不抛
+    }
+  }
+
+  /** screen.stream.start 到达时设定编码尺寸；尺寸变化时重置帧缓冲 */
+  setExpectedSize(width: number, height: number): void {
+    if (width <= 0 || height <= 0) return
+    if (width === this.expectedWidth && height === this.expectedHeight) return
+    const changed = this.expectedWidth !== 0 && this.expectedHeight !== 0
+    this.expectedWidth = width
+    this.expectedHeight = height
+    this.frameBuf = Buffer.alloc(0)
+    if (changed) log.info(`[screen-stream] 接收端帧尺寸变化 → ${width}x${height}（帧缓冲已重置）`)
+    this.onSize?.(width, height)
+  }
+
+  /** 按已知尺寸从 stdout 缓冲里切帧；尺寸未知时攒着等（上限 16MB） */
+  private splitFrames(): void {
+    const onFrame = this.onFrameRef
+    if (!onFrame) return
+    if (this.expectedWidth === 0 || this.expectedHeight === 0) {
+      if (this.frameBuf.length > 16 * 1024 * 1024) {
+        log.warn('[screen-stream] 接收端尺寸未知且缓冲超 16MB，丢弃缓冲等 start 消息')
+        this.frameBuf = Buffer.alloc(0)
+      }
+      return
+    }
+    const frameSize = this.expectedWidth * this.expectedHeight * 4
+    if (frameSize <= 0) return
+    while (this.frameBuf.length >= frameSize) {
+      const frame = this.frameBuf.subarray(0, frameSize)
+      this.frameBuf = this.frameBuf.subarray(frameSize)
+      this.framesDecoded++
+      onFrame({ width: this.expectedWidth, height: this.expectedHeight, data: Buffer.from(frame) })
+    }
+  }
+
+  stop(): void {
+    if (!this.proc) return
+    const p = this.proc
+    this.proc = null
+    p.kill()
+  }
+
+  status(): ReverseStreamStatus {
+    return {
+      running: this.proc != null,
+      width: this.expectedWidth,
+      height: this.expectedHeight,
+      bytesReceived: this.bytesReceived,
+      framesDecoded: this.framesDecoded,
+      keyframeResyncs: this.keyframeResyncs,
+      droppedBytes: this.droppedBytes,
+      lastError: this.lastError
+    }
+  }
+
+  /** 最近的 stderr 尾巴，错误分类用 */
+  lastErrors(): string[] {
+    return [...this.stderrTail]
+  }
+}
+
+/** 接收端 stdin 背压上限（与 Android StreamDecoder BACKLOG_CAP 同值） */
+const RECEIVER_BACKLOG_CAP = 3 * 1024 * 1024
+
+/** 在 Annex-B 字节块里找 SPS 起始码（00 00 00 01 + NAL type 7），找不到返回 -1 */
+function findSps(data: Buffer): number {
+  for (let i = 0; i + 4 < data.length; i++) {
+    if (data[i] === 0 && data[i + 1] === 0 && data[i + 2] === 0 && data[i + 3] === 1) {
+      if ((data[i + 4]! & 0x1f) === 7) return i
+      i += 4
+    }
+  }
+  return -1
 }

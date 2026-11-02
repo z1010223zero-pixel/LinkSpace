@@ -182,6 +182,7 @@ class LinkSpaceService private constructor(private val appContext: Context) {
             announcedConnections.remove(peerId)
             input.onPeerDisconnected(peerId)
             controlledInput.onPeerDisconnected(peerId)
+            reverseScreen.onPeerDisconnected(peerId)
         }
 
         discovery.onChange { list -> _discovered.value = list }
@@ -322,6 +323,7 @@ class LinkSpaceService private constructor(private val appContext: Context) {
                 trust.revoke(from)
                 _trusted.value = trust.list()
                 controlledInput.onTrustRevoked(from)
+                reverseScreen.onTrustRevoked(from)
                 Log.i(TAG, "对端撤销了信任: $from")
             }
 
@@ -445,6 +447,12 @@ class LinkSpaceService private constructor(private val appContext: Context) {
             // 控制端与被控端各按 sessionId 匹配，不匹配的安全忽略。
             Protocol.TYPE_SESSION_START -> controlledInput.onStart(from, payload)
             Protocol.TYPE_INPUT_EVENT -> controlledInput.onEvent(from, payload)
+
+            // ---------- 反向投屏（4.7，线 2 W6）：桌面看平板画面 ----------
+            // 与 input 会话解耦：反向流的启停不以活动 input 会话为前提，
+            // 授权门是平板端的 MediaProjection 系统录屏授权。
+            Protocol.TYPE_SCREEN_STREAM_REQUEST -> reverseScreen.onRequest(from, payload)
+            Protocol.TYPE_SCREEN_STREAM_STOP -> reverseScreen.onStop(from, payload)
         }
     }
 
@@ -843,6 +851,81 @@ class LinkSpaceService private constructor(private val appContext: Context) {
     /** 本机屏幕尺寸：控制请求里声明，桌面端据此把本机事件映射过去 */
     fun localScreen(w: Int, h: Int): InputController.Screen = InputController.Screen(w, h)
 
+    // ---------- 反向投屏（协议 4.7，线 2 W6：平板画面进电脑窗口） ----------
+
+    /**
+     * 反向推流端：桌面作观看方向本机发起 screen.stream.request 时的接待
+     * 逻辑。MediaProjection 抓屏 + MediaCodec 优先（失败回落 JavaCV 软编）
+     * + WS 二进制帧回推，与线 1 的桌面推流复用同一套 screen.stream.*
+     * 语义、同一档位口径。
+     *
+     * 与 input 会话解耦：反向流的启停不以活动 input 会话为前提；授权门
+     * 是平板端的 MediaProjection 系统录屏授权（见 listener 的 TODO）。
+     * 用户确认 UI 未接：onReverseStreamRequested 的默认实现先记日志并
+     * 回 screen.stream.error（理由「确认 UI 未接」），绝不自动开录——
+     * 与 W4 的 ControlledInputSession 默认拒绝同款安全姿势。
+     * 真实录屏授权流程接入后把该 TODO 桩换成 UI 回调。
+     */
+    val reverseScreen: ReverseScreenStreamer by lazy {
+        ReverseScreenStreamer(
+            appContext = appContext,
+            isPeerAuthorized = { peerId -> trust.isKnown(peerId) },
+            localScreen = {
+                val m = appContext.resources.displayMetrics
+                InputController.Screen(m.widthPixels.coerceAtLeast(1), m.heightPixels.coerceAtLeast(1))
+            },
+            send = { peerId, type, payloadFn -> sendControlMessage(peerId, type, payloadFn) },
+            sendBinary = { peerId, data -> sendBinaryTo(peerId, data) },
+            listener = object : ReverseScreenStreamer.Listener {
+                override fun onReverseStreamRequested(request: ReverseScreenStreamer.ReverseStreamRequest) {
+                    // TODO(线2 UI)：接录屏授权 UI——MainActivity 用
+                    // MediaProjectionManager.createScreenCaptureIntent()
+                    // 弹系统授权框，拿到结果后调
+                    // startReverseStreamWithProjection(projection)。
+                    // 确认 UI 未接之前默认拒绝：不弹系统框、不自动开录。
+                    Log.w(TAG, "收到 ${request.peerId} 的反向投屏请求，录屏授权 UI 未接，已默认拒绝")
+                    reverseScreen.deny(request, "确认 UI 未接")
+                }
+
+                override fun onChanged() {
+                    // TODO(线2 UI)：反向投屏状态变化时刷新 UI（正在向谁推流）。
+                }
+
+                override fun onError(message: String) {
+                    _inputMessage.value = message
+                }
+            }
+        )
+    }
+
+    /**
+     * 反向投屏的视频块出站路由：只走平板主动连出的控制连接（二进制帧）。
+     * 入站服务（WebSocketConnection）没有 sendBinary，桌面也只认这条
+     * 连出的链路——无出站连接时丢弃并回填背压计数，不静默积压。
+     */
+    private fun sendBinaryTo(peerId: String, data: ByteArray) {
+        val out = outbound
+        if (out == null || out.peerId != peerId) {
+            Log.w(TAG, "反向投屏视频块无出站连接可发（peer=$peerId），丢弃 ${data.size}B")
+            reverseScreen.onBytesDropped(data.size)
+            return
+        }
+        val conn = out.conn
+        outboundWriter.execute {
+            runCatching { client.sendBinary(conn, data) }
+                .onFailure { Log.w(TAG, "反向投屏发送失败: ${it.javaClass.simpleName}: ${it.message}") }
+            reverseScreen.onBytesFlushed(data.size)
+        }
+    }
+
+    /**
+     * UI（后续批次）：把系统录屏授权拿到的 MediaProjection 交给反向推流端。
+     * 调用方是 MainActivity 的录屏授权结果回调。
+     */
+    fun startReverseStreamWithProjection(projection: android.media.projection.MediaProjection) {
+        reverseScreen.startWithProjection(projection)
+    }
+
     /** 发送目标需要的完整设备 ID（信封 to 与桌面端按全等路由） */
     fun fullPeerIdOf(idPrefix: String): String = trust.fullDeviceIdOf(idPrefix) ?: idPrefix
 
@@ -1023,6 +1106,9 @@ class LinkSpaceService private constructor(private val appContext: Context) {
                     // ---------- 电脑→安卓远控（4.6，被控端半边，线 2 W4 骨架） ----------
                     Protocol.TYPE_SESSION_START -> controlledInput.onStart(from, payload)
                     Protocol.TYPE_INPUT_EVENT -> controlledInput.onEvent(from, payload)
+                    // ---------- 反向投屏（4.7，线 2 W6）：桌面看平板画面 ----------
+                    // 与 input 会话解耦：不查活动 input 会话，只认已配对连接
+                    Protocol.TYPE_SCREEN_STREAM_REQUEST -> reverseScreen.onRequest(from, payload)
                     // ---------- 屏幕投屏 ----------
                     Protocol.TYPE_SCREEN_STREAM_START -> {
                         Log.i(TAG, "收到投屏启动 w=${payload.optInt("w")} h=${payload.optInt("h")}")
@@ -1044,6 +1130,9 @@ class LinkSpaceService private constructor(private val appContext: Context) {
                         streamDecoder?.shutdown()
                         streamDecoder = null
                         _screenStream.value = null
+                        // 同一条消息也可能是桌面停反向流：两边各按自己的
+                        // 活动流匹配，不匹配的安全忽略（与 session.stop 同款）
+                        reverseScreen.onStop(from, payload)
                     }
                     Protocol.TYPE_SCREEN_STREAM_ERROR -> {
                         streamDecoder?.shutdown()
@@ -1086,6 +1175,7 @@ class LinkSpaceService private constructor(private val appContext: Context) {
                 val wasStreaming = _screenStream.value != null || streamDecoder != null
                 input.onPeerDisconnected(fullId)
                 controlledInput.onPeerDisconnected(fullId)
+                reverseScreen.onPeerDisconnected(fullId)
                 // 投屏中连接断开：自动重连一次（读循环死亡 = WS 帧解析失
                 // 同步等瞬态故障，重建链路常可自愈；连续失败由用户重试）
                 if (wasStreaming) scheduleStreamReconnect(fullId)
@@ -1380,6 +1470,7 @@ class LinkSpaceService private constructor(private val appContext: Context) {
     fun stopAll() {
         input.stop("stopped by user")
         controlledInput.terminate()
+        reverseScreen.stop()
         stop()
         taskMap.clear()
         _transfers.value = emptyList()

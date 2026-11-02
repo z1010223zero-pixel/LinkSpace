@@ -122,6 +122,9 @@ export interface Connection {
  */
 type AnyMessageHandler = (conn: Connection, msg: Envelope) => void | Promise<void>
 
+/** 二进制帧处理：WS 二进制帧（屏幕投屏的视频块）不进 JSON 信封，走这里分流 */
+export type BinaryHandler = (conn: Connection, data: Buffer) => void
+
 export type MessageHandler<T = unknown> = (
   conn: Connection,
   msg: Envelope<T>
@@ -141,6 +144,7 @@ export class ControlNode {
   private wss: WebSocketServer | null = null
   private readonly conns = new Map<WebSocket, Connection>()
   private readonly handlers = new Map<string, AnyMessageHandler[]>()
+  private readonly binaryHandlers: BinaryHandler[] = []
   private heartbeatTimer: NodeJS.Timeout | null = null
   private readonly deviceId: string
 
@@ -152,6 +156,16 @@ export class ControlNode {
     const list = this.handlers.get(type) ?? []
     list.push(handler as unknown as AnyMessageHandler)
     this.handlers.set(type, list)
+    return this
+  }
+
+  /**
+   * 注册二进制帧处理（反向 screen.stream 的视频块用）。
+   * 文本帧走 on(type) 的 JSON 信封分发，二进制帧不进信封——ws 库按
+   * opcode 区分，二者共用同一条连接、互不干扰。
+   */
+  onBinary(handler: BinaryHandler): this {
+    this.binaryHandlers.push(handler)
     return this
   }
 
@@ -293,8 +307,21 @@ export class ControlNode {
       }
     }
 
-    ws.on('message', (raw) => {
+    ws.on('message', (raw, isBinary) => {
       conn.lastSeen = Date.now()
+      // 二进制帧（屏幕投屏的视频块）：不进 JSON 信封解析，直接分流给
+      // binaryHandlers。之前这里无条件 JSON.parse，视频块会被静默丢弃。
+      if (isBinary) {
+        const data = Buffer.isBuffer(raw) ? raw : Buffer.from(raw as ArrayBuffer)
+        for (const handler of node.binaryHandlers) {
+          try {
+            handler(conn, data)
+          } catch (err) {
+            console.error(`[control] binary handler 失败:`, err)
+          }
+        }
+        return
+      }
       let msg: Envelope
       try {
         msg = JSON.parse(String(raw)) as Envelope
