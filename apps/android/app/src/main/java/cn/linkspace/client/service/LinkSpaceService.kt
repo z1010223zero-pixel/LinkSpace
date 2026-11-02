@@ -1088,6 +1088,8 @@ class LinkSpaceService private constructor(private val appContext: Context) {
             // 都从这条连接回来（文本帧 = JSON 控制消息，二进制帧 = 视频块）
             var recvFrames = 0
             var recvBytes = 0
+            // id 去重（协议 §3）：本连接的已见 id 窗口，随读循环生死
+            val seenIds = SeenMessageIds()
             val myPrefix = identity.get().fingerprint.replace(":", "").take(12)
             while (true) {
                 val frame = try {
@@ -1134,7 +1136,26 @@ class LinkSpaceService private constructor(private val appContext: Context) {
                     Log.w(TAG, "丢弃 ts 超偏的消息 type=${msg.optString("type")} 偏差=${System.currentTimeMillis() - msg.optLong("ts", 0L)}ms")
                     continue
                 }
+                // from 绑定（协议 §3）：这条连接建链时已知的对端就是 fullId，
+                // from 为空或不符的消息丢弃并记告警，不断连（与桌面端同款分级处置）。
+                // 此前 from 直接取自信封交给各 handler，冒名消息能一路走到会话层。
                 val from = msg.optString("from")
+                if (from.isEmpty() || from != fullId) {
+                    Log.w(TAG, "丢弃 from 与连接身份不符的消息 type=${msg.optString("type")} from=$from 期望=$fullId")
+                    continue
+                }
+                // id 去重（协议 §3）：同一连接上同一 id 只处理一次；空 id 视为畸形
+                val id = msg.optString("id")
+                if (id.isEmpty()) {
+                    Log.w(TAG, "丢弃 id 为空的消息 type=${msg.optString("type")}")
+                    continue
+                }
+                if (seenIds.isDuplicate(id)) {
+                    if (seenIds.duplicateCount <= 3 || seenIds.duplicateCount % 100 == 0) {
+                        Log.w(TAG, "丢弃重复消息 id=$id type=${msg.optString("type")}（第 ${seenIds.duplicateCount} 次）")
+                    }
+                    continue
+                }
                 val payload = msg.optJSONObject("payload") ?: JSONObject()
                 when (msg.optString("type")) {
                     Protocol.TYPE_SESSION_ACCEPT -> input.onAccepted(from, payload)
@@ -1632,6 +1653,8 @@ class LinkSpaceService private constructor(private val appContext: Context) {
                     var token: String? = null
                     val deadline = System.currentTimeMillis() + 60_000
                     val myPrefix = identity.get().fingerprint.replace(":", "").take(12)
+                    // id 去重（协议 §3）：本次等待的已见 id 窗口
+                    val seenIds = SeenMessageIds()
                     while (token == null && System.currentTimeMillis() < deadline) {
                         val text = client.readText(conn) ?: error("控制通道已关闭")
                         val msg = runCatching { JSONObject(text) }.getOrNull() ?: continue
@@ -1639,6 +1662,17 @@ class LinkSpaceService private constructor(private val appContext: Context) {
                         if (msg.optInt("v", -1) != Protocol.VERSION) continue
                         if (to.isNotEmpty() && to != myPrefix) continue
                         if (kotlin.math.abs(System.currentTimeMillis() - msg.optLong("ts", 0L)) > 60_000) continue
+                        // from 绑定（协议 §3）：等的是 peerFullId 的回告，
+                        // from 为空或不符的直接跳过
+                        val from = msg.optString("from")
+                        if (from.isEmpty() || from != peerFullId) {
+                            Log.w(TAG, "等待 accept 时丢弃 from 不符的消息 type=${msg.optString("type")} from=$from 期望=$peerFullId")
+                            continue
+                        }
+                        // id 去重（协议 §3）：同一连接上同一 id 只处理一次；空 id 丢弃
+                        val id = msg.optString("id")
+                        if (id.isEmpty()) continue
+                        if (seenIds.isDuplicate(id)) continue
                         when (msg.optString("type")) {
                             Protocol.TYPE_TRANSFER_ACCEPT ->
                                 token = msg.optJSONObject("payload")?.optString("token")

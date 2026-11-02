@@ -16,7 +16,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { generate } from 'selfsigned'
 import { WebSocket } from 'ws'
-import { ControlNode, MAX_CLOCK_SKEW_MS, PROTOCOL_VERSION, type Envelope } from './control/node'
+import { ControlNode, MAX_CLOCK_SKEW_MS, MAX_SEEN_MESSAGE_IDS, PROTOCOL_VERSION, SeenMessageIds, type Envelope } from './control/node'
 import { Host } from './host'
 import { fingerprintOfCert, type DeviceCert } from './transfer/identity'
 import type { DiscoveredService } from './discovery'
@@ -1065,8 +1065,29 @@ async function testHeartbeatTimeout(): Promise<void> {
 // __closed__ 的 emptyEnvelope（v 已是 PROTOCOL_VERSION）不走消息
 // 解析，坏 v 测试同时验证该路径不断链（服务端 onClosed 正常触发）。
 
+function testSeenMessageIds(): void {
+  console.log('\n=== 纯逻辑：消息 id 去重（协议 §3） ===\n')
+
+  const seen = new SeenMessageIds(3)
+  check('首次 id 不算重复', !seen.isDuplicate('a') && !seen.isDuplicate('b'))
+  check('同一 id 第二次算重复', seen.isDuplicate('a'))
+  check('重复计数累计', seen.duplicateCount === 1)
+  check('窗口内其他 id 仍算重复', seen.isDuplicate('b'))
+  seen.isDuplicate('c')
+  seen.isDuplicate('d') // 窗口 {b, c, d}，a 被淘汰
+  check('窗口内 id 被新 id 挤掉前仍算重复', seen.isDuplicate('b'))
+  check('淘汰出窗口的 id 再次出现视为新消息', !seen.isDuplicate('a'))
+
+  const full = new SeenMessageIds()
+  let fresh = true
+  for (let i = 0; i < MAX_SEEN_MESSAGE_IDS; i++) fresh &&= !full.isDuplicate(`id-${i}`)
+  check('默认窗口 1024 条内不误判', fresh)
+  check('窗口满后最旧 id 仍算重复', full.isDuplicate('id-0'))
+  check('新 id 挤掉最旧 id', !full.isDuplicate('id-1024') && !full.isDuplicate('id-0'))
+}
+
 async function testEnvelopeValidation(): Promise<void> {
-  console.log('\n=== 信封校验：v / to / ts 分级失败处理 ===\n')
+  console.log('\n=== 信封校验：v / to / ts / from / id 分级失败处理 ===\n')
 
   const server = new ControlNode({
     deviceId: 'dev_server',
@@ -1077,6 +1098,10 @@ async function testEnvelopeValidation(): Promise<void> {
   const closedPeers: string[] = []
   server.on('device.heartbeat', (_conn, msg) => {
     received.push(msg.id)
+  })
+  // 模拟 pairing.ts 的 announce 登记：peerId 由首条 announce 的 from 填上
+  server.on('device.announce', (conn, msg) => {
+    conn.peerId = msg.from
   })
   server.onClosed((conn) => {
     closedPeers.push(conn.peerId)
@@ -1159,6 +1184,63 @@ async function testEnvelopeValidation(): Promise<void> {
     } finally {
       ws4.close()
     }
+
+    // 5. from 绑定：announce 登记后，from 不符/为空的消息丢弃，不断连。
+    // 登记前（ws1-ws4）from='dev_client' 能通过，正是“登记前只要求非空”。
+    const ws5 = await rawClient()
+    try {
+      ws5.send(JSON.stringify(envelope({ type: 'device.announce', id: 'bind-announce' })))
+      await sleep(300)
+      const base = received.length
+      ws5.send(JSON.stringify(envelope({ id: 'bind-ok-1' })))
+      await waitFor(() => (received.length >= base + 1 ? received[base] : undefined))
+      check('登记身份的 from 到达 handler', received.length === base + 1)
+      ws5.send(JSON.stringify(envelope({ from: 'dev_other', id: 'bind-spoof-1' })))
+      await sleep(300)
+      check('冒名 from 丢弃', received.length === base + 1)
+      ws5.send(JSON.stringify(envelope({ from: '', id: 'bind-empty-1' })))
+      await sleep(300)
+      check('空 from 丢弃', received.length === base + 1)
+      ws5.send(JSON.stringify(envelope({ id: 'bind-ok-2' })))
+      await waitFor(() => (received.length >= base + 2 ? received[base + 1] : undefined))
+      check('from 不合不断连（随后合法消息仍到达）', received.length === base + 2 && ws5.readyState === WebSocket.OPEN)
+      // 同一连接上重发 announce 改绑身份：from 不符直接在信封层拦住
+      ws5.send(
+        JSON.stringify(envelope({ type: 'device.announce', from: 'dev_other', id: 'bind-reannounce' }))
+      )
+      await sleep(300)
+      ws5.send(JSON.stringify(envelope({ id: 'bind-ok-3' })))
+      await waitFor(() => (received.length >= base + 3 ? received[base + 2] : undefined))
+      check('重发 announce 改绑失败（原身份消息仍到达）', received.length === base + 3)
+    } finally {
+      ws5.close()
+    }
+
+    // 6. id 去重：同一连接上同一 id 只处理一次；空 id 丢弃
+    const ws6 = await rawClient()
+    try {
+      ws6.send(JSON.stringify(envelope({ type: 'device.announce', id: 'dedup-announce' })))
+      await sleep(300)
+      const base = received.length
+      ws6.send(JSON.stringify(envelope({ id: 'dup-1' })))
+      await waitFor(() => (received.length >= base + 1 ? received[base] : undefined))
+      check('首个 id 到达 handler', received.length === base + 1)
+      ws6.send(JSON.stringify(envelope({ id: 'dup-1' })))
+      await sleep(300)
+      check('重复 id 只处理一次', received.length === base + 1)
+      ws6.send(JSON.stringify(envelope({ id: 'dup-1' })))
+      await sleep(300)
+      check('第三次重放同样丢弃', received.length === base + 1)
+      ws6.send(JSON.stringify(envelope({ id: 'dup-2' })))
+      await waitFor(() => (received.length >= base + 2 ? received[base + 1] : undefined))
+      check('新 id 正常到达', received.length === base + 2)
+      ws6.send(JSON.stringify(envelope({ id: '' })))
+      await sleep(300)
+      check('空 id 丢弃', received.length === base + 2)
+      check('去重不断连', ws6.readyState === WebSocket.OPEN)
+    } finally {
+      ws6.close()
+    }
   } finally {
     server.stop()
   }
@@ -1169,6 +1251,7 @@ async function main(): Promise<void> {
 
   testProtocol()
   testStreamStopDirection()
+  testSeenMessageIds()
   testCoordinator()
   await testController()
   testEdge()

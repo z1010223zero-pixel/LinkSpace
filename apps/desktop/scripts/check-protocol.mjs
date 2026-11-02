@@ -4,6 +4,7 @@
 // 代码里的协议常量是否一致：
 //   - Kotlin: apps/android/.../service/Protocol.kt（消息类型、数值常量）
 //             + LinkSpaceService.kt（配对/心跳/剪贴板散落常量抽查）
+//             + TransferServer.kt（入站 from 绑定与 id 去重守卫抽查）
 //   - TS: apps/desktop/src/main/input/protocol.ts、control/node.ts、
 //         screen-stream.ts、pairing.ts、clipboard.ts、transfer/server.ts、
 //         transfer/chunker.ts、host.ts
@@ -89,6 +90,7 @@ const ktInjector = read(resolve(ANDROID, 'ControlledInputInjector.kt'))
 const ktA11y = read(resolve(ANDROID, 'LinkSpaceAccessibilityService.kt'))
 const tsSink = read(resolve(DESKTOP, 'input/win32/sink.ts'))
 const md = read(resolve(ROOT, 'docs/protocol.md'))
+const ktServer = read(resolve(ANDROID, 'TransferServer.kt'))
 const tsInput = read(resolve(DESKTOP, 'input/protocol.ts'))
 const tsNode = read(resolve(DESKTOP, 'control/node.ts'))
 const tsStream = read(resolve(DESKTOP, 'screen-stream.ts'))
@@ -287,6 +289,29 @@ check('Android 中键落点 GLOBAL_ACTION_HOME', true, ktA11y.includes('GLOBAL_A
 check('Windows 右键落点 MOUSEEVENTF_RIGHTDOWN', true, tsSink.includes('MOUSEEVENTF_RIGHTDOWN'), 'input/win32/sink.ts')
 check('Windows 中键落点 MOUSEEVENTF_MIDDLEDOWN', true, tsSink.includes('MOUSEEVENTF_MIDDLEDOWN'), 'input/win32/sink.ts')
 check('protocol.md 登记左右键映射', true, md.includes('右键返回') && md.includes('GLOBAL_ACTION_BACK'), 'docs/protocol.md §4.6')
+// ---------- 7. 信封绑定与去重（协议 §3） ----------
+check('dedupMaxIdsPerConnection', C.dedupMaxIdsPerConnection, evalNum(tsConst(tsNode, 'MAX_SEEN_MESSAGE_IDS')), 'control/node.ts MAX_SEEN_MESSAGE_IDS')
+check('dedupMaxIdsPerConnection', C.dedupMaxIdsPerConnection, evalNum(ktConst(kt, 'MAX_SEEN_MESSAGE_IDS')), 'Protocol.kt MAX_SEEN_MESSAGE_IDS')
+
+// from 绑定与去重的守卫必须真实存在于四处入口，不只常量对齐：
+// 桌面 control/node.ts、Android 入站 TransferServer、Android 出站
+// 主读循环与传输等待循环（后两者都在 LinkSpaceService.kt 内）。
+function mustContain(name, src, needle, source) {
+  if (src.includes(needle)) {
+    passed++
+    console.log(`PASS  ${name}  (${source})`)
+  } else {
+    failures.push(name)
+    console.log(`FAIL  ${name}：缺少 ${needle}  (${source})`)
+  }
+}
+mustContain('from 绑定（桌面）', tsNode, 'msg.from !== conn.peerId', 'control/node.ts')
+mustContain('from 绑定（Android 入站）', ktServer, 'registered != from', 'TransferServer.kt')
+mustContain('from 绑定（Android 出站主读循环）', ktService, 'from != fullId', 'LinkSpaceService.kt')
+mustContain('from 绑定（Android 出站传输等待循环）', ktService, 'from != peerFullId', 'LinkSpaceService.kt')
+mustContain('id 去重（桌面）', tsNode, 'seenIds.isDuplicate(msg.id)', 'control/node.ts')
+mustContain('id 去重（Android 入站）', ktServer, 'seen.isDuplicate(id)', 'TransferServer.kt')
+mustContain('id 去重（Android 出站主读循环）', ktService, 'seenIds.isDuplicate(id)', 'LinkSpaceService.kt')
 
 // ---------- 汇总 ----------
 console.log(`\n通过 ${passed} 项，失败 ${failures.length} 项，警告 ${warnings.length} 项。`)

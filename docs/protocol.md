@@ -61,7 +61,11 @@
 
 **校验规则**：接收方必须校验 `v` 可处理、`to` 为自身、`ts` 在 ±60s 窗口内、`from` 为已知或待配对设备。任一项失败即断开连接并记录告警。
 
-> **实现现状（2026-11-02，W3）**：桌面端 `control/node.ts` 已有结构校验（`isEnvelope`）+ `to` 校验 + `ts` ±60s 校验，本批补 `v === PROTOCOL_VERSION` 等值校验；失败处理分级——`v` 不合断开连接并记告警，`to` 不合静默丢弃，`ts` 超偏丢弃并记告警（与上文“任一项失败即断开”的有意偏离：`to` 不合只是错投本机、`ts` 超偏多为时钟误配，不断连才是合理处置；`from` 不在信封层绑定——announce 之前对端身份未知，各 handler 保留现有来源核对）。Android 端 `LinkSpaceService.kt` 两处收消息入口（主读循环、传输等待循环）已有 `v` / `to` / `ts` 三项过滤（已核实，未改代码）。**已知缺口（两端均未实现，不隐瞒）**：`from` 与连接身份的绑定、`id` 去重。当前防线仍是连接级身份门禁（announce 指纹锚定 + TLS 证书）与各消息处理器的来源核对。
+> **实现现状（2026-11-02，W3）**：桌面端 `control/node.ts` 已有结构校验（`isEnvelope`）+ `to` 校验 + `ts` ±60s 校验，本批补 `v === PROTOCOL_VERSION` 等值校验；失败处理分级——`v` 不合断开连接并记告警，`to` 不合静默丢弃，`ts` 超偏丢弃并记告警（与上文“任一项失败即断开”的有意偏离：`to` 不合只是错投本机、`ts` 超偏多为时钟误配，不断连才是合理处置）。Android 端 `LinkSpaceService.kt` 两处收消息入口（主读循环、传输等待循环）已有 `v` / `to` / `ts` 三项过滤（已核实，未改代码）。
+>
+> **实现现状（2026-11-03，线 2 补缺口）**：`from` 与连接身份的绑定、`id` 去重已在两端四处入口全部实现，上段的“已知缺口”就此关闭：
+> - **from 绑定**：连接身份由首条 `device.announce` 登记（桌面端 `pairing.ts` 填 `conn.peerId`；Android 入站 `TransferServer` 以首条消息的 `from` 登记），之后固定；`from` 为空或与登记身份不符 → 丢弃并记告警，**不断连**（分级处置：连接本身已由 TLS 证书锚定，错标多为对端实现问题；断连会掐掉一条活着的合法会话，与 `ts` 超偏同款处理）。Android 出站两条读循环（主读循环、传输等待循环）以建链时已知的对端完整 deviceId 为期望值核对 `from`——此前 `from` 直接取自信封交给各 handler，冒名消息能一路走到会话层。桌面端此前完全没有 from 校验：`conn.peerId` 由 announce 登记后，任何 `from` 的消息都会进 handler，且重发 announce 能改绑连接身份，现均由 `control/node.ts` 信封层拦住。
+> - **id 去重**：同一连接上同一 `id` 只处理一次；空 `id` 视为畸形丢弃并记告警。去重窗口为每连接最近 1024 条 id（`dedupMaxIdsPerConnection`，`protocol.json` 与两端常量 `MAX_SEEN_MESSAGE_IDS` 对齐，`verify:protocol` 钉死），按插入顺序淘汰最旧的 id——窗口外的旧 id 再次出现视为新消息（重放窗口有限，不承诺永久去重）。存储：桌面端 `control/node.ts` 每连接闭包 `SeenMessageIds`；Android 入站 `TransferServer` 每连接一个 `SeenMessageIds`（随连接关闭清理）；Android 出站两条读循环各持一个局部 `SeenMessageIds`（随循环生死）。桌面端去重放在限频之后：重放洪泛仍会计入限频、超限按 4008 断开，不给留一条绕过限频的路。重复消息的告警节流：每连接前 3 次全记、之后每 100 次记一次。
 
 ---
 
