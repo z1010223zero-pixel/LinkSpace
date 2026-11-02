@@ -16,6 +16,7 @@ import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityManager
 import cn.linkspace.client.service.ControlledInputInjector.DecodedEvent
 import cn.linkspace.client.service.ControlledInputInjector.InjectResult
+import cn.linkspace.client.service.ControlledInputInjector.InputFailure
 import cn.linkspace.client.service.ControlledInputInjector.InputInjector
 import cn.linkspace.client.service.ControlledInputInjector.MouseButtonTracker
 import cn.linkspace.client.service.ControlledInputInjector.PressAction
@@ -27,8 +28,10 @@ import cn.linkspace.client.service.ControlledInputInjector.PressAction
  * 本机——手势走 [dispatchGesture]，按键走系统全局动作与 API 33+
  * 输入连接（见下文“按键”一节）。
  * 不读窗口内容（`canRetrieveWindowContent=false`），不监听无障碍事件
- * （`onAccessibilityEvent` 空实现），不做中文输入（VK 通道表达不了
- * IME 组合输入，见任务 2.3-3，另设通道）。
+ * （`onAccessibilityEvent` 空实现）。中文输入（任务 2.3-3，三通道
+ * B1+B2+C）：B1 按键直通复用下面的按键通道（平板自带输入法组字）；
+ * B2 文本直通走 [commitText]（`InputConnection.commitText` 直接上屏）；
+ * C 粘贴回退由会话层写剪贴板 + 本服务的按键通道注 Ctrl+V。
  *
  * **安全门禁不在这里**：服务本身只认「已连接 + 会话层放行」。
  * 会话层（[ControlledInputSession]）在 `session.start` 时先查系统
@@ -153,8 +156,27 @@ class LinkSpaceAccessibilityService : AccessibilityService(), InputInjector {
         /** 会话层注入入口：服务未连接时直接回失败，不静默丢掉。 */
         fun inject(events: List<DecodedEvent>): InjectResult {
             val svc = instance
-                ?: return InjectResult.Failed("无障碍服务未开启：请在系统设置 → 无障碍中开启 LinkSpace 远程输入")
+                ?: return InjectResult.Failed(
+                    "无障碍服务未开启：请在系统设置 → 无障碍中开启 LinkSpace 远程输入",
+                    InputFailure.ACCESSIBILITY_DISABLED
+                )
             return svc.injectEvents(events)
+        }
+
+        /**
+         * 文本直通（协议 4.9，B2）：成品文本经输入连接 commitText 直接上屏。
+         * 返回 null 表示已提交，否则是失败（code + 原因），会话层回
+         * `input.error` 并报 UI。`commitText` 本身会结束当前组字，因此
+         * B1 切到 B2 时未选的拼音按输入法行为结束（见协议 §4.9 模式互斥）。
+         * 服务未连接 / 无连接 / Android < 13 时回明确失败，不静默丢掉。
+         */
+        fun commitText(text: String): InputFailure? {
+            val svc = instance
+                ?: return InputFailure(
+                    InputFailure.ACCESSIBILITY_DISABLED,
+                    "无障碍服务未开启：请在系统设置 → 无障碍中开启 LinkSpace 远程输入"
+                )
+            return svc.commitTextInternal(text)
         }
 
         /** 会话结束/断连时抬起全部按住的键与鼠标键（防卡键）。 */
@@ -237,17 +259,17 @@ class LinkSpaceAccessibilityService : AccessibilityService(), InputInjector {
         synchronized(lock) {
             for (ev in events) {
                 val failure = applyEventLocked(ev)
-                if (failure != null) return InjectResult.Failed(failure)
+                if (failure != null) return InjectResult.Failed(failure.reason, failure.code)
             }
             return InjectResult.Ok
         }
     }
 
     /**
-     * 落单条事件。返回 null 表示成功，否则是明确的失败原因
-     * （调用方停批并上报）。
+     * 落单条事件。返回 null 表示成功，否则是失败（code + 原因，
+     * 调用方停批并上报）。
      */
-    private fun applyEventLocked(ev: DecodedEvent): String? {
+    private fun applyEventLocked(ev: DecodedEvent): InputFailure? {
         return when (ev) {
             is DecodedEvent.Move -> {
                 pointerX = ev.x.toFloat()
@@ -284,7 +306,7 @@ class LinkSpaceAccessibilityService : AccessibilityService(), InputInjector {
                         dragPoints = null
                         val duration = dragDurationMs(pts)
                         if (!dispatchStroke(pts, duration)) {
-                            "手势分发被系统拒绝（button=${ev.button}，服务可能已断开）"
+                            InputFailure(InputFailure.INJECT_FAILED, "手势分发被系统拒绝（button=${ev.button}，服务可能已断开）")
                         } else null
                     }
                     // 右键返回 / 中键主页：系统全局动作，抬起时触发。
@@ -292,13 +314,13 @@ class LinkSpaceAccessibilityService : AccessibilityService(), InputInjector {
                     PressAction.BACK -> {
                         dragPoints = null
                         if (!performGlobalAction(GLOBAL_ACTION_BACK)) {
-                            "返回动作被系统拒绝（右键，服务可能已断开）"
+                            InputFailure(InputFailure.INJECT_FAILED, "返回动作被系统拒绝（右键，服务可能已断开）")
                         } else null
                     }
                     PressAction.HOME -> {
                         dragPoints = null
                         if (!performGlobalAction(GLOBAL_ACTION_HOME)) {
-                            "主页动作被系统拒绝（中键，服务可能已断开）"
+                            InputFailure(InputFailure.INJECT_FAILED, "主页动作被系统拒绝（中键，服务可能已断开）")
                         } else null
                     }
                 }
@@ -317,7 +339,7 @@ class LinkSpaceAccessibilityService : AccessibilityService(), InputInjector {
                 }
                 val pts = listOf(PointF(pointerX, pointerY), PointF(endX, endY))
                 if (!dispatchStroke(pts, WHEEL_SWIPE_MS)) {
-                    "滚轮滑动手势分发被系统拒绝（服务可能已断开）"
+                    InputFailure(InputFailure.INJECT_FAILED, "滚轮滑动手势分发被系统拒绝（服务可能已断开）")
                 } else null
             }
             is DecodedEvent.Key -> dispatchKeyReasonLocked(ev.keyCode, ev.down)
@@ -354,10 +376,10 @@ class LinkSpaceAccessibilityService : AccessibilityService(), InputInjector {
     }
 
     /**
-     * 发单个按键。返回 null 表示已发出，否则是明确的失败原因
-     * （调用方停批并上报，不静默）。
+     * 发单个按键。返回 null 表示已发出，否则是失败（code + 原因，
+     * 调用方停批并上报，不静默）。
      */
-    private fun dispatchKeyReasonLocked(keyCode: Int, down: Boolean): String? {
+    private fun dispatchKeyReasonLocked(keyCode: Int, down: Boolean): InputFailure? {
         val now = SystemClock.uptimeMillis()
         if (down) heldKeys += keyCode
         val meta = metaStateLocked()
@@ -374,25 +396,25 @@ class LinkSpaceAccessibilityService : AccessibilityService(), InputInjector {
     /**
      * 按键的三档公开路线（见类注释“按键”一节）：
      * 系统键走全局动作/音量；其余按键走 API 33+ 输入连接；
-     * 无路可走时回明确原因。返回 null 表示已发出。
+     * 无路可走时回失败（code + 原因）。返回 null 表示已发出。
      */
-    private fun dispatchKeyToSystemLocked(event: KeyEvent): String? {
+    private fun dispatchKeyToSystemLocked(event: KeyEvent): InputFailure? {
         when (event.keyCode) {
             KeyEvent.KEYCODE_BACK -> {
                 if (event.action == KeyEvent.ACTION_DOWN) return null
-                return if (performGlobalAction(GLOBAL_ACTION_BACK)) null else "返回动作被系统拒绝"
+                return if (performGlobalAction(GLOBAL_ACTION_BACK)) null else InputFailure(InputFailure.INJECT_FAILED, "返回动作被系统拒绝")
             }
             KeyEvent.KEYCODE_HOME -> {
                 if (event.action == KeyEvent.ACTION_DOWN) return null
-                return if (performGlobalAction(GLOBAL_ACTION_HOME)) null else "主页动作被系统拒绝"
+                return if (performGlobalAction(GLOBAL_ACTION_HOME)) null else InputFailure(InputFailure.INJECT_FAILED, "主页动作被系统拒绝")
             }
             KeyEvent.KEYCODE_APP_SWITCH -> {
                 if (event.action == KeyEvent.ACTION_DOWN) return null
-                return if (performGlobalAction(GLOBAL_ACTION_RECENTS)) null else "最近任务动作被系统拒绝"
+                return if (performGlobalAction(GLOBAL_ACTION_RECENTS)) null else InputFailure(InputFailure.INJECT_FAILED, "最近任务动作被系统拒绝")
             }
             KeyEvent.KEYCODE_POWER -> {
                 if (event.action == KeyEvent.ACTION_DOWN) return null
-                return if (performGlobalAction(GLOBAL_ACTION_POWER_DIALOG)) null else "电源菜单动作被系统拒绝"
+                return if (performGlobalAction(GLOBAL_ACTION_POWER_DIALOG)) null else InputFailure(InputFailure.INJECT_FAILED, "电源菜单动作被系统拒绝")
             }
             KeyEvent.KEYCODE_VOLUME_UP -> {
                 if (event.action == KeyEvent.ACTION_DOWN) {
@@ -414,17 +436,51 @@ class LinkSpaceAccessibilityService : AccessibilityService(), InputInjector {
             }
         }
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
-            return "本机 Android 低于 13，按键注入需要输入连接（API 33+），本次按键未发出"
+            return InputFailure(InputFailure.UNSUPPORTED_VERSION, "本机 Android 低于 13，按键注入需要输入连接（API 33+），本次按键未发出")
         }
         val method = runCatching { inputMethod }.getOrNull()
-            ?: return "无障碍输入法未就绪（FLAG_INPUT_METHOD_EDITOR 未生效），按键未发出"
+            ?: return InputFailure(InputFailure.ACCESSIBILITY_DISABLED, "无障碍输入法未就绪（FLAG_INPUT_METHOD_EDITOR 未生效），按键未发出")
         val connection = runCatching { method.currentInputConnection }.getOrNull()
-            ?: return "当前没有获得焦点的输入框，按键只能落在文本输入处，本次按键未发出"
+            ?: return InputFailure(InputFailure.NO_FOCUS, "当前没有获得焦点的输入框，按键只能落在文本输入处，本次按键未发出")
         return try {
             connection.sendKeyEvent(event)
             null
         } catch (e: Exception) {
-            "输入连接发送失败：${e.message}"
+            InputFailure(InputFailure.INJECT_FAILED, "输入连接发送失败：${e.message}")
+        }
+    }
+
+    /**
+     * 文本直通落点（协议 4.9，B2）：复用按键通道的同一个输入连接句柄。
+     * `commitText` 返回 false（目标输入框拒绝提交）同样算失败，不静默。
+     * 调用方（会话层）须在同一把锁内串行调用，与按键注入不并发。
+     */
+    private fun commitTextInternal(text: String): InputFailure? {
+        // 与按键注入同一把锁串行：B1 组字中途不得插入 B2 提交（协议 §4.9 模式互斥）。
+        synchronized(lock) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            return InputFailure(
+                InputFailure.UNSUPPORTED_VERSION,
+                "本机 Android 低于 13，文本直通需要输入连接（API 33+），本次文本未提交"
+            )
+        }
+        val method = runCatching { inputMethod }.getOrNull()
+            ?: return InputFailure(
+                InputFailure.ACCESSIBILITY_DISABLED,
+                "无障碍输入法未就绪（FLAG_INPUT_METHOD_EDITOR 未生效），文本未提交"
+            )
+        val connection = runCatching { method.currentInputConnection }.getOrNull()
+            ?: return InputFailure(
+                InputFailure.NO_FOCUS,
+                "当前没有获得焦点的输入框，文本只能提交到文本输入处，请先点一下输入框"
+            )
+        return try {
+            if (!connection.commitText(text, 1, null)) {
+                InputFailure(InputFailure.INJECT_FAILED, "输入连接拒绝提交文本（目标输入框可能不支持 commitText）")
+            } else null
+        } catch (e: Exception) {
+            InputFailure(InputFailure.INJECT_FAILED, "输入连接提交失败：${e.message}")
+        }
         }
     }
 
@@ -452,7 +508,7 @@ class LinkSpaceAccessibilityService : AccessibilityService(), InputInjector {
                 // 抬键也走同一路线；发不出去只记日志，不因此报错——
                 // 会话已经结束了，bookkeeping 清掉最重要。
                 val reason = dispatchKeyReasonLocked(keyCode, false)
-                if (reason != null) Log.w(TAG, "抬起按键 keyCode=$keyCode 未发出：$reason")
+                if (reason != null) Log.w(TAG, "抬起按键 keyCode=$keyCode 未发出：${reason.reason}")
             }
             resetStateLocked()
         }

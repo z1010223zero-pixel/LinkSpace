@@ -97,10 +97,30 @@ object ControlledInputInjector {
         }
     }
 
+    /**
+     * 文本/粘贴类输入失败：code 供控制端 UI 分流（如无焦点时提示点输入框），
+     * reason 人读（中文）。与协议 4.9 `input.error` 的 code 一一对应，
+     * 两端必须一致。
+     */
+    data class InputFailure(val code: String, val reason: String) {
+        companion object {
+            /** 当前没有获得焦点的输入框 */
+            const val NO_FOCUS = "no-focus"
+            /** 无障碍服务未开启 */
+            const val ACCESSIBILITY_DISABLED = "accessibility-disabled"
+            /** 被控端 Android 低于 13，输入连接不可用 */
+            const val UNSUPPORTED_VERSION = "unsupported-version"
+            /** 其他注入失败（手势/输入连接被拒等） */
+            const val INJECT_FAILED = "inject-failed"
+            /** 单条文本超限 */
+            const val TOO_LARGE = "too-large"
+        }
+    }
+
     /** 注入结果：成功，或带明确原因的失败（调用方必须上报，不许吞掉） */
     sealed class InjectResult {
         object Ok : InjectResult()
-        data class Failed(val reason: String) : InjectResult()
+        data class Failed(val reason: String, val code: String = InputFailure.INJECT_FAILED) : InjectResult()
     }
 
     /** 事件注入出口。到达时已完成解码与坐标映射。 */

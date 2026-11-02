@@ -98,6 +98,18 @@ object Protocol {
     /** 投屏粘贴（协议 4.8）：写被控端剪贴板并注入 Ctrl+V，寄生 input 会话 */
     const val TYPE_SCREEN_PASTE = "screen.paste"
 
+    /** 文本直通（协议 4.9）：成品文本经输入连接 commitText 上屏，寄生 input 会话 */
+    const val TYPE_INPUT_TEXT = "input.text"
+
+    /** 输入失败回告（协议 4.9）：code + reason，控制端 UI 展示用 */
+    const val TYPE_INPUT_ERROR = "input.error"
+
+    /** 单条 input.text 上限（UTF-8 字节），与桌面端 MAX_INPUT_TEXT_BYTES 一致 */
+    const val MAX_INPUT_TEXT_BYTES = 8 * 1024
+
+    /** screen.paste 单条上限（协议 4.8，与 4.4 剪贴板一致） */
+    const val MAX_PASTE_BYTES = 512 * 1024
+
     /** sessionId 约束，与桌面端 SESSION_ID_RE 一致 */
     const val SESSION_ID_RE = "[A-Za-z0-9_-]{1,64}"
 
