@@ -452,7 +452,7 @@ class LinkSpaceService private constructor(private val appContext: Context) {
             // 与 input 会话解耦：反向流的启停不以活动 input 会话为前提，
             // 授权门是平板端的 MediaProjection 系统录屏授权。
             Protocol.TYPE_SCREEN_STREAM_REQUEST -> reverseScreen.onRequest(from, payload)
-            Protocol.TYPE_SCREEN_STREAM_STOP -> reverseScreen.onStop(from, payload)
+            Protocol.TYPE_SCREEN_STREAM_STOP -> handleScreenStreamStop(from, payload)
         }
     }
 
@@ -1166,14 +1166,7 @@ class LinkSpaceService private constructor(private val appContext: Context) {
                         synchronized(pendingVideo) { pendingVideo.clear() }
                         startStreamDecoder()
                     }
-                    Protocol.TYPE_SCREEN_STREAM_STOP -> {
-                        streamDecoder?.shutdown()
-                        streamDecoder = null
-                        _screenStream.value = null
-                        // 同一条消息也可能是桌面停反向流：两边各按自己的
-                        // 活动流匹配，不匹配的安全忽略（与 session.stop 同款）
-                        reverseScreen.onStop(from, payload)
-                    }
+                    Protocol.TYPE_SCREEN_STREAM_STOP -> handleScreenStreamStop(from, payload)
                     Protocol.TYPE_SCREEN_STREAM_ERROR -> {
                         streamDecoder?.shutdown()
                         streamDecoder = null
@@ -1494,12 +1487,43 @@ class LinkSpaceService private constructor(private val appContext: Context) {
     fun stopScreenStream() {
         val out = outbound
         if (out != null) {
-            val text = envelope(Protocol.TYPE_SCREEN_STREAM_STOP, out.peerId) {}.toString()
+            val text = envelope(Protocol.TYPE_SCREEN_STREAM_STOP, out.peerId) {
+                put("direction", Protocol.STREAM_DIRECTION_FORWARD)
+            }.toString()
             outboundWriter.execute { runCatching { client.sendText(out.conn, text) } }
         }
         streamDecoder?.shutdown()
         streamDecoder = null
         _screenStream.value = null
+    }
+
+    /**
+     * screen.stream.stop 的统一入口（出站读循环与入站服务共用）：
+     * 按 direction 只停对应的一路流——forward 停本机投屏解码，
+     * reverse 交反向推流端；direction 缺失的旧版本对端按
+     * Protocol.resolveStreamStopDirection 的兼容规则解析（单路在跑
+     * 停那一路、双向在跑只停 forward），绝不顺手停掉另一路；
+     * direction 非法则忽略本消息。forwardLive / reverseLive 只认
+     * 属于发消息对端的流，旁观连接的 stop 够不着别人的流。
+     */
+    private fun handleScreenStreamStop(from: String, payload: JSONObject) {
+        val forwardLive = (streamDecoder != null || _screenStream.value != null) && outbound?.peerId == from
+        val reverseLive = reverseScreen.pendingRequest?.peerId == from ||
+            reverseScreen.activeStream?.peerId == from
+        val rawDirection: String? =
+            if (payload.has("direction") && !payload.isNull("direction")) payload.optString("direction") else null
+        val direction = Protocol.resolveStreamStopDirection(rawDirection, forwardLive, reverseLive)
+        if (direction == null) {
+            Log.w(TAG, "忽略无法解析方向的 screen.stream.stop（from=$from）")
+            return
+        }
+        if (direction == Protocol.STREAM_DIRECTION_FORWARD) {
+            streamDecoder?.shutdown()
+            streamDecoder = null
+            _screenStream.value = null
+        } else {
+            reverseScreen.onStop(from, direction)
+        }
     }
 
     /**
