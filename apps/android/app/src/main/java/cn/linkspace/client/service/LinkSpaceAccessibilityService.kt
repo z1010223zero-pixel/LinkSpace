@@ -100,13 +100,41 @@ class LinkSpaceAccessibilityService : AccessibilityService(), InputInjector {
          * 会话层与 UI 都以它为准；重启 App 后仍有效（系统级开关）。
          */
         fun isEnabled(context: Context): Boolean {
+            // 主判据：AccessibilityService 只有系统开启并绑定后才会有实例；
+            // 注入也必须依赖这个实例。某些 ROM 的 Settings/API 列表会不可靠，
+            // 因此实例存在时直接认为服务可用。
+            if (instance != null) return true
+            // 本 ROM 的 AccessibilityManager 列表会出现“dumpsys 显示已绑定、
+            // getEnabledAccessibilityServiceList 不含本服务”的情况。这里以
+            // Settings.Secure 为准；真正的安全兜底是 inject() 必须拿到
+            // 已连接服务实例，未连接时仍会失败。
+            val enabledSetting = runCatching {
+                android.provider.Settings.Secure.getString(
+                    context.contentResolver,
+                    android.provider.Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+                )
+            }.getOrNull()
+            if (!enabledSetting.isNullOrBlank()) {
+                val enabled = enabledSetting.split(':').any { raw ->
+                    ComponentName.unflattenFromString(raw) ==
+                        ComponentName(context, LinkSpaceAccessibilityService::class.java)
+                }
+                if (enabled) return true
+            }
             val am = context.getSystemService(Context.ACCESSIBILITY_SERVICE)
                 as? AccessibilityManager ?: return false
             val id = ComponentName(context, LinkSpaceAccessibilityService::class.java)
-                .flattenToString()
+            // 不同 ROM / Android 版本里 AccessibilityServiceInfo.id 可能是
+            // flattenToString 或 flattenToShortString 形态。按组件名归一后
+            // 比较，避免“服务已绑定但 App 状态仍为关闭”的假阴性。
             return runCatching {
                 am.getEnabledAccessibilityServiceList(AccessibilityServiceInfo.FEEDBACK_ALL_MASK)
-                    .any { it.id == id }
+                    .any {
+                        ComponentName.unflattenFromString(it.id) == id ||
+                            it.resolveInfo?.serviceInfo?.let { si ->
+                                ComponentName(si.packageName, si.name)
+                            } == id
+                    }
             }.getOrDefault(false)
         }
 
@@ -150,6 +178,9 @@ class LinkSpaceAccessibilityService : AccessibilityService(), InputInjector {
             heldKeys.clear()
         }
         Log.i(TAG, "无障碍服务已连接，远程输入注入就绪")
+        // 系统绑定服务可能晚于 Activity onResume。这里主动回填状态，
+        // 否则 UI 仍显示“未开启”，控制请求也会走错误的门禁分支。
+        runCatching { LinkSpaceService.get(applicationContext).refreshAccessibilityState() }
     }
 
     override fun onUnbind(intent: android.content.Intent?): Boolean {
