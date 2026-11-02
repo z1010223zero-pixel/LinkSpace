@@ -188,7 +188,7 @@ fun ReverseStreamBanner(
 ) {
     Card(
         colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.primaryContainer,
+            containerColor = LinkSpaceStatusColors.SuccessContainer,
         ),
         modifier = modifier.fillMaxWidth().padding(
             horizontal = LinkSpaceSpacing.lg,
@@ -205,18 +205,18 @@ fun ReverseStreamBanner(
             Icon(
                 Icons.Filled.Info,
                 contentDescription = null,
-                tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                tint = LinkSpaceStatusColors.SuccessOnContainer,
             )
             Column(Modifier.weight(1f).padding(horizontal = LinkSpaceSpacing.sm)) {
                 Text(
                     "正在向电脑推流",
                     style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                    color = LinkSpaceStatusColors.SuccessOnContainer,
                 )
                 Text(
                     "$peerName · $detail",
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                    color = LinkSpaceStatusColors.SuccessOnContainer,
                 )
             }
             OutlinedButton(onClick = onStop) { Text("停止推流") }

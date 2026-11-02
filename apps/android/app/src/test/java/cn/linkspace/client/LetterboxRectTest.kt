@@ -1,6 +1,7 @@
 package cn.linkspace.client
 
 import androidx.compose.ui.geometry.Rect
+import cn.linkspace.client.ui.letterboxRect
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test

@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -22,8 +23,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.changedToDown
 import androidx.compose.ui.input.pointer.changedToUp
 import androidx.compose.ui.input.pointer.pointerInput
@@ -32,7 +33,7 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
+import cn.linkspace.client.ui.StreamTokens
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
@@ -44,6 +45,11 @@ import kotlin.math.roundToInt
  * - 点按小球展开控制菜单（触控模式切换 / 退出投屏），菜单项为大号
  *   Surface，hit 区远大于此前的文字按钮
  * - 球面字标随模式变化：「指」= 点哪指哪，「跟」= 滑动跟随
+ *
+ * B 线 token 收敛（2026-11-02）：圆角 / 尺寸 / 字号收进 StreamTokens；
+ * 颜色改走 ScreenMirrorScreen 深色 token 包裹内的 MaterialTheme
+ * （surface / onSurface，画面窗口深色 token 的实际形态），
+ * 黑 / 白字面值不变，可拖动吸附与菜单行为一律不动。
  */
 @Composable
 fun FloatingControlPill(
@@ -55,8 +61,8 @@ fun FloatingControlPill(
     modifier: Modifier = Modifier
 ) {
     val density = LocalDensity.current
-    val pillPx = with(density) { 52.dp.toPx().roundToInt() }
-    val marginPx = with(density) { 8.dp.toPx().roundToInt() }
+    val pillPx = with(density) { StreamTokens.PillSize.toPx().roundToInt() }
+    val marginPx = with(density) { StreamTokens.PillMargin.toPx().roundToInt() }
 
     var offset by remember { mutableStateOf(IntOffset(-1, -1)) } // x=-1 未初始化
     var menuExpanded by remember { mutableStateOf(false) }
@@ -86,13 +92,13 @@ fun FloatingControlPill(
         // 菜单：贴在小球左侧
         if (menuExpanded && offset.x >= 0) {
             Surface(
-                shape = RoundedCornerShape(12.dp),
-                color = Color.Black.copy(alpha = 0.85f),
+                shape = RoundedCornerShape(StreamTokens.CornerLg),
+                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.85f),
                 shadowElevation = 6.dp,
                 modifier = Modifier
                     .offset {
                         IntOffset(
-                            (offset.x - with(density) { 190.dp.toPx().roundToInt() })
+                            (offset.x - with(density) { StreamTokens.PillMenuWidth.toPx().roundToInt() })
                                 .coerceAtLeast(marginPx),
                             offset.y
                         )
@@ -125,9 +131,9 @@ fun FloatingControlPill(
         Box(
             Modifier
                 .offset { IntOffset(offset.x.coerceAtLeast(marginPx), offset.y.coerceAtLeast(marginPx)) }
-                .size(52.dp)
-                .background(Color.Black.copy(alpha = 0.55f), CircleShape)
-                .border(1.dp, Color.White.copy(alpha = 0.5f), CircleShape)
+                .size(StreamTokens.PillSize)
+                .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.55f), CircleShape)
+                .border(1.dp, MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f), CircleShape)
                 .pointerInput(containerSize) {
                     awaitPointerEventScope {
                         var startTouch = Offset.Zero
@@ -178,8 +184,8 @@ fun FloatingControlPill(
         ) {
             Text(
                 if (relativeMode) "跟" else "指",
-                color = Color.White,
-                fontSize = 20.sp,
+                color = MaterialTheme.colorScheme.onSurface,
+                fontSize = StreamTokens.PillLabelSize,
                 fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
             )
         }
@@ -201,8 +207,8 @@ private fun ResolutionMenu(
     Column {
         Text(
             "分辨率",
-            color = Color.White.copy(alpha = 0.6f),
-            fontSize = 12.sp,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+            fontSize = StreamTokens.SmallSize,
             modifier = Modifier.padding(horizontal = 14.dp, vertical = 4.dp)
         )
         RESOLUTION_OPTIONS.forEach { (label, width) ->
@@ -219,13 +225,13 @@ private fun MenuAction(label: String, onClick: () -> Unit) {
     Surface(
         color = Color.Transparent,
         onClick = onClick,
-        shape = RoundedCornerShape(8.dp),
+        shape = RoundedCornerShape(StreamTokens.CornerMd),
         modifier = Modifier.fillMaxWidth()
     ) {
         Text(
             label,
-            color = Color.White,
-            fontSize = 15.sp,
+            color = MaterialTheme.colorScheme.onSurface,
+            fontSize = StreamTokens.PillMenuItemSize,
             modifier = Modifier
                 .padding(horizontal = 14.dp, vertical = 12.dp)
                 .fillMaxWidth()
