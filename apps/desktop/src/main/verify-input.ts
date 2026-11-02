@@ -97,6 +97,24 @@ function testProtocol(): void {
   check('超大坐标拒绝', decodeInputEvents({ events: [{ t: 'move', x: 99999, y: 0 }] }) === null)
   check('NaN 拒绝', decodeInputEvents({ events: [{ t: 'move', x: Number.NaN, y: 0 }] }) === null)
   check('非法鼠标键拒绝', decodeInputEvents({ events: [{ t: 'down', b: 'middle2' }] }) === null)
+  const buttons = decodeInputEvents({
+    events: [
+      { t: 'down', b: 'right' },
+      { t: 'up', b: 'right' },
+      { t: 'down', b: 'middle' },
+      { t: 'up', b: 'middle' }
+    ]
+  })
+  check(
+    '右/中键 down/up 原样通过解码',
+    buttons !== null &&
+      buttons.length === 4 &&
+      (buttons[0] as { b: string }).b === 'right' &&
+      (buttons[1] as { b: string }).b === 'right' &&
+      (buttons[2] as { b: string }).b === 'middle' &&
+      (buttons[3] as { b: string }).b === 'middle',
+    JSON.stringify(buttons)
+  )
   check('越界 VK 拒绝', decodeInputEvents({ events: [{ t: 'key', vk: 300, down: true }] }) === null)
   check('down 非布尔拒绝', decodeInputEvents({ events: [{ t: 'key', vk: 65, down: 1 }] }) === null)
   const wheel = decodeInputEvents({ events: [{ t: 'wheel', dx: 99999, dy: -99999 }] })
@@ -804,6 +822,41 @@ async function testE2e(): Promise<void> {
     await waitFor(() => (injectedB.length > beforeRev ? true : undefined))
     const revMove = injectedB[injectedB.length - 1][0] as { t: string; x: number; y: number }
     check('流坐标按声明尺寸映射到本屏', revMove.x === 500 && revMove.y === 250, JSON.stringify(revMove))
+    // 左右键映射（线 2）：右/中键 down/up 随 input.event 原样到达被控端
+    // 注入层，b 不塌成左键；落点语义（右键返回/中键 Home）由 Android
+    // 被控端按协议 4.6 落地，本处只钉桌面控制端不丢键。
+    const beforeBtn = injectedB.length
+    A.sendInputEvents([
+      { t: 'down', b: 'right' },
+      { t: 'up', b: 'right' }
+    ])
+    await waitFor(() => (injectedB.length > beforeBtn ? true : undefined))
+    const btnBatch = injectedB[injectedB.length - 1]
+    check(
+      '右键 down/up 原样到达被控端注入层',
+      btnBatch.length === 2 &&
+        btnBatch[0].t === 'down' &&
+        (btnBatch[0] as { b: string }).b === 'right' &&
+        btnBatch[1].t === 'up' &&
+        (btnBatch[1] as { b: string }).b === 'right',
+      JSON.stringify(btnBatch)
+    )
+    const beforeMid = injectedB.length
+    A.sendInputEvents([
+      { t: 'down', b: 'middle' },
+      { t: 'up', b: 'middle' }
+    ])
+    await waitFor(() => (injectedB.length > beforeMid ? true : undefined))
+    const midBatch = injectedB[injectedB.length - 1]
+    check(
+      '中键 down/up 原样到达被控端注入层',
+      midBatch.length === 2 &&
+        midBatch[0].t === 'down' &&
+        (midBatch[0] as { b: string }).b === 'middle' &&
+        midBatch[1].t === 'up' &&
+        (midBatch[1] as { b: string }).b === 'middle',
+      JSON.stringify(midBatch)
+    )
     // 会话结束清声明（第 7 节的 releasedB 计数随之 +1，见下）
     A.stopInputControl('reverse window closed')
     await waitFor(() => (A.controllingPeer() === null ? true : undefined))
