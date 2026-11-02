@@ -4,6 +4,7 @@
 // 代码里的协议常量是否一致：
 //   - Kotlin: apps/android/.../service/Protocol.kt（消息类型、数值常量）
 //             + LinkSpaceService.kt（配对/心跳/剪贴板散落常量抽查）
+//             + TransferServer.kt（入站 from 绑定与 id 去重守卫抽查）
 //   - TS: apps/desktop/src/main/input/protocol.ts、control/node.ts、
 //         screen-stream.ts、pairing.ts、clipboard.ts、transfer/server.ts、
 //         transfer/chunker.ts、host.ts
@@ -85,6 +86,7 @@ function ktConst(src, name) {
 // ---------- 读入各方源文件 ----------
 const kt = read(resolve(ANDROID, 'Protocol.kt'))
 const ktService = read(resolve(ANDROID, 'LinkSpaceService.kt'))
+const ktServer = read(resolve(ANDROID, 'TransferServer.kt'))
 const tsInput = read(resolve(DESKTOP, 'input/protocol.ts'))
 const tsNode = read(resolve(DESKTOP, 'control/node.ts'))
 const tsStream = read(resolve(DESKTOP, 'screen-stream.ts'))
@@ -241,6 +243,30 @@ check('maxClockSkewMs', C.maxClockSkewMs, evalNum(ktSkewM[1]), 'LinkSpaceService
 const ktClipM = ktService.match(/toByteArray\(Charsets\.UTF_8\)\.size\s*>\s*([\d_* ]+)/)
 if (!ktClipM) throw new Error('LinkSpaceService.kt 剪贴板上限未找到')
 check('clipboardMaxBytes', C.clipboardMaxBytes, evalNum(ktClipM[1]), 'LinkSpaceService.kt 剪贴板 512 * 1024')
+
+// ---------- 7. 信封绑定与去重（协议 §3） ----------
+check('dedupMaxIdsPerConnection', C.dedupMaxIdsPerConnection, evalNum(tsConst(tsNode, 'MAX_SEEN_MESSAGE_IDS')), 'control/node.ts MAX_SEEN_MESSAGE_IDS')
+check('dedupMaxIdsPerConnection', C.dedupMaxIdsPerConnection, evalNum(ktConst(kt, 'MAX_SEEN_MESSAGE_IDS')), 'Protocol.kt MAX_SEEN_MESSAGE_IDS')
+
+// from 绑定与去重的守卫必须真实存在于四处入口，不只常量对齐：
+// 桌面 control/node.ts、Android 入站 TransferServer、Android 出站
+// 主读循环与传输等待循环（后两者都在 LinkSpaceService.kt 内）。
+function mustContain(name, src, needle, source) {
+  if (src.includes(needle)) {
+    passed++
+    console.log(`PASS  ${name}  (${source})`)
+  } else {
+    failures.push(name)
+    console.log(`FAIL  ${name}：缺少 ${needle}  (${source})`)
+  }
+}
+mustContain('from 绑定（桌面）', tsNode, 'msg.from !== conn.peerId', 'control/node.ts')
+mustContain('from 绑定（Android 入站）', ktServer, 'registered != from', 'TransferServer.kt')
+mustContain('from 绑定（Android 出站主读循环）', ktService, 'from != fullId', 'LinkSpaceService.kt')
+mustContain('from 绑定（Android 出站传输等待循环）', ktService, 'from != peerFullId', 'LinkSpaceService.kt')
+mustContain('id 去重（桌面）', tsNode, 'seenIds.isDuplicate(msg.id)', 'control/node.ts')
+mustContain('id 去重（Android 入站）', ktServer, 'seen.isDuplicate(id)', 'TransferServer.kt')
+mustContain('id 去重（Android 出站主读循环）', ktService, 'seenIds.isDuplicate(id)', 'LinkSpaceService.kt')
 
 // ---------- 汇总 ----------
 console.log(`\n通过 ${passed} 项，失败 ${failures.length} 项，警告 ${warnings.length} 项。`)
