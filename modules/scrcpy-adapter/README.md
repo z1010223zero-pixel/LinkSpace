@@ -16,6 +16,37 @@
 - **不修改 scrcpy 源码**（方案 3.1 第 3 条）
 - **不用于实现 Windows 扩展屏幕** —— scrcpy 的 Android 虚拟显示 ≠ Windows 虚拟显示器
 
+## 过渡定位与退役条件（线 2 选 A，2026-11-02 用户定）
+
+scrcpy 只是过渡方案，不是产品功能：
+
+- 正路是反向 screen.stream——平板用 MediaProjection 推画面，电脑在
+  自己的画面窗口里看并控制；scrcpy 窗口不嵌入（已定：嵌完还是 scrcpy
+  的窗口，迁就窗口句柄/输入路由/工具栏不值得）。
+- 过渡期 scrcpy 只留必需能力：启动/停止/生命周期跟踪/错误分类，
+  不扩新功能，不接管输入，不解析视频流。
+- 衔接规则（代码见 `apps/desktop/src/main/ipc.ts`）：反向流在跑时
+  `scrcpy:startFor` 拒绝同设备启动；反向流发起成功后停掉同一设备的
+  scrcpy 会话；反向流仅发起未确认时仍允许 scrcpy（免得平板拒绝后
+  两边都没有）。
+- 退役条件（须同时满足）：① 反向流在联想小新平板 Pro GT 上通过
+  2.6 人工走查（输入延迟、中文输入、剪贴板、断网恢复四项硬指标）；
+  ② 用户确认。满足后下线 scrcpy 启动入口（屏幕页投屏卡片），
+  适配器本身可随版本移除。退役前不删代码、不停维护门禁。
+
+## 断开恢复语义（2.5）
+
+- adb 断开（USB 拔出/断网）：scrcpy 进程自己退出，适配器按退出码与
+  stderr 分类为 `DEVICE_NOT_FOUND`（可重试），用户在屏幕页重新点
+  「启动投屏」即可；重连时无线走 IP-join 重算、USB 走持久化显式绑定。
+- 设备下线（LinkSpace 对端断连）≠ 撤销信任：scrcpy 不自动停
+  （adb 通道独立于 LinkSpace 控制连接，信任还在）。
+- 信任撤销：级联停掉该设备全部 scrcpy 会话并删除其绑定（W2，
+  `host.ts` 的 `onRevoked` + `ipc.ts` 的 `setScrcpyRevokedHandler`）。
+- 进程僵死：设备连续两次成功枚举都不见（约 10 秒）而会话还挂着，
+  `DeviceManager.refresh()` 主动停掉（见 `device-manager.ts`
+  `reconcileStaleSessions`）；枚举失败时保留上次列表，不误删会话。
+
 ## 关键实现要求
 
 - 会话 ID 与子进程 PID 绑定，主进程维护映射表

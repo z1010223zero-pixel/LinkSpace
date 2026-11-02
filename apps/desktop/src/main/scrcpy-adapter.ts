@@ -4,6 +4,14 @@
 // 第一阶段只做进程编排：启动、停止、生命周期跟踪、错误分类。
 // 不解析视频流，不接管输入，不修改 scrcpy 源码（方案 3.1）。
 //
+// 过渡定位（线 2 选 A，2.5 收敛）：scrcpy 只是过渡方案，正路是反向
+// screen.stream（平板 MediaProjection 推画面 + 电脑自有画面窗口）。
+// 反向流在跑时 ipc.ts 拒绝同设备再开 scrcpy，反向流发起成功后停掉
+// 同设备的 scrcpy 会话。退役条件：反向流在小新平板 Pro GT 上通过
+// 2.6 人工走查（输入延迟、中文输入、剪贴板、断网恢复）且用户确认；
+// 满足前只留过渡期必需能力，不扩新功能、不嵌窗口。详见
+// modules/scrcpy-adapter/README.md「过渡定位与退役条件」。
+//
 // 实测依据（2026-10-28，scrcpy 5.0.1）：
 //   - 正常结束 / --time-limit 到期 → 退出码 0
 //   - 设备不存在 → 退出码 1，stderr 含 "ERROR: Could not find ADB device <serial>:"
