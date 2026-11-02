@@ -73,6 +73,19 @@ class ClipboardSync(
         send(cur)
     }
 
+    /**
+     * 远端写入本机剪贴板的来源标记（协议 4.8 回退 C，2.4-3 防回环）：
+     * 只更新基线并打开抑制窗口，不写剪贴板（调用方已写过）、不发送。
+     * 未运行时无事可做——poll 本来就不跑；开启后 start() 会重读基线。
+     */
+    @Synchronized
+    fun markRemoteWrite(text: String) {
+        if (!running) return
+        if (text.isEmpty()) return
+        lastSeen = text
+        suppressUntil = now() + SUPPRESS_MS
+    }
+
     /** 收到对端推来的文本 */
     @Synchronized
     fun receive(text: String) {

@@ -131,3 +131,40 @@ export function mapPoint(
   const my = Math.min(to.h - 1, Math.max(0, Math.round((y * to.h) / from.h)))
   return { x: mx, y: my }
 }
+
+/** 单条 input.text 消息的文本上限（UTF-8 字节，协议 4.9）。超长由控制端分段 */
+export const MAX_INPUT_TEXT_BYTES = 8 * 1024
+
+/** UTF-8 字节长（按码位计，代理对按一个码位算 4 字节） */
+export function utf8ByteLength(text: string): number {
+  let n = 0
+  for (const ch of text) {
+    const cp = ch.codePointAt(0) ?? 0
+    n += cp < 0x80 ? 1 : cp < 0x800 ? 2 : cp < 0x10000 ? 3 : 4
+  }
+  return n
+}
+
+/**
+ * 把文本按 UTF-8 字节切成 ≤ MAX_INPUT_TEXT_BYTES 的段。
+ * 按码位切分，绝不拆开代理对/多字节字符；空文本返回空数组。
+ */
+export function segmentInputText(text: string): string[] {
+  if (!text) return []
+  const segments: string[] = []
+  let cur = ''
+  let curBytes = 0
+  for (const ch of text) {
+    const cp = ch.codePointAt(0) ?? 0
+    const b = cp < 0x80 ? 1 : cp < 0x800 ? 2 : cp < 0x10000 ? 3 : 4
+    if (curBytes + b > MAX_INPUT_TEXT_BYTES && cur) {
+      segments.push(cur)
+      cur = ''
+      curBytes = 0
+    }
+    cur += ch
+    curBytes += b
+  }
+  if (cur) segments.push(cur)
+  return segments
+}

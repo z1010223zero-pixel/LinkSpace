@@ -44,6 +44,7 @@ const qualityWidth = ref(1920)
 let ctx: CanvasRenderingContext2D | null = null
 let unsubFrame: (() => void) | null = null
 let unsubChanged: (() => void) | null = null
+let unsubNotice: (() => void) | null = null
 let pollTimer: number | null = null
 
 // 工具栏默认折叠（ToDesk 式），点标题栏 chevron 展开；全屏时自动隐藏。
@@ -51,6 +52,13 @@ const toolbarExpanded = ref(false)
 const detailsExpanded = ref(false)
 const isFullscreen = ref(false)
 const toolbarVisible = computed(() => toolbarExpanded.value && !isFullscreen.value)
+
+// 中文输入模式（任务 2.3-3，协议 §4.9 模式互斥）：同一时刻只走一条通道。
+// pinyin（B1，默认）：键盘原始按键直通，平板自带输入法组字；
+// finished（B2/C）：电脑端组字完成后再发送成品文本/粘贴。
+const inputMode = ref<'pinyin' | 'finished'>('pinyin')
+const finishedText = ref('')
+const pasteArmed = ref(false)
 
 // 控制请求倒计时：状态里没有请求发起时间戳，自首次观测到 pending 起本地计时。
 // 服务端 TTL 30 秒（main/input/session.ts DEFAULT_REQUEST_TTL_MS），显示为约数。
@@ -159,6 +167,50 @@ async function retryInput(): Promise<void> {
   await loadStatus()
 }
 
+function setInputMode(mode: 'pinyin' | 'finished'): void {
+  if (inputMode.value === mode) return
+  pasteArmed.value = false
+  inputMode.value = mode
+  // 切出拼音模式时平板上未选词的组字会被下一段成品提交结束（协议 §4.9），
+  // 先明说；切回拼音模式时上一段成品已提交完成，组字状态干净。
+  notice.value =
+    mode === 'finished'
+      ? '已切换到成品输入：平板上未选词的拼音组字将被结束'
+      : '拼音直通：电脑输入法请切英文，打拼音由平板输入法组字'
+}
+
+async function sendFinishedText(): Promise<void> {
+  const text = finishedText.value
+  if (!text) return
+  const res = await window.linkspace.sendReverseText(peerId, text).catch(() => null)
+  if (!res) {
+    notice.value = '发送失败：主进程无响应'
+    return
+  }
+  if (!res.ok) {
+    notice.value = res.error.message
+    return
+  }
+  finishedText.value = ''
+}
+
+async function sendPasteToTablet(): Promise<void> {
+  const text = finishedText.value
+  if (!text) return
+  // 两步确认：粘贴会覆盖平板剪贴板（协议 §4.8），第一下只进入待确认态
+  if (!pasteArmed.value) {
+    pasteArmed.value = true
+    return
+  }
+  pasteArmed.value = false
+  const res = await window.linkspace.sendReversePaste(peerId, text).catch(() => null)
+  if (!res) {
+    notice.value = '发送失败：主进程无响应'
+    return
+  }
+  if (!res.ok) notice.value = res.error.message
+}
+
 function onFullscreenChange(): void {
   isFullscreen.value = document.fullscreenElement !== null
 }
@@ -263,8 +315,11 @@ function onWheel(e: WheelEvent): void {
 }
 
 // ---------- 键盘：Chromium keyCode 在 Windows 上就是 Win32 VK 码 ----------
-// 中文输入不在本批（2.3-3 另排）：IME 组合输入走不了 vk 通道
+// 中文输入（任务 2.3-3）：拼音直通模式下原始按键走 input.event，由平板
+// 自带输入法组字（B1）；成品输入模式下键盘门控，改走成品输入框（B2/C）
 function onKey(e: KeyboardEvent, down: boolean): void {
+  // 成品输入模式下键盘不再直通按键（B1/B2 互斥，协议 §4.9）：打字走成品输入框
+  if (inputMode.value !== 'pinyin') return
   const tag = (e.target as HTMLElement | null)?.tagName
   if (tag === 'SELECT' || tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'BUTTON') return
   if (down && e.repeat) return
@@ -289,6 +344,10 @@ onMounted(() => {
     status.value = s
     if (s.scaleWidth) qualityWidth.value = s.scaleWidth
   })
+  // 平板回的输入失败（协议 4.9 input.error，主进程已译成可执行提示）
+  unsubNotice = window.linkspace.onReverseStreamNotice((msg) => {
+    notice.value = msg
+  })
   pollTimer = window.setInterval(() => {
     now.value = Date.now()
     void loadStatus()
@@ -301,6 +360,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   unsubFrame?.()
   unsubChanged?.()
+  unsubNotice?.()
   if (pollTimer !== null) window.clearInterval(pollTimer)
   if (moveRaf) cancelAnimationFrame(moveRaf)
   document.removeEventListener('fullscreenchange', onFullscreenChange)
@@ -341,6 +401,25 @@ onBeforeUnmount(() => {
         <button class="btn btn--sm" @click="toggleFullscreen">全屏</button>
       </div>
       <div class="rs-toolbar__group">
+        <span class="rs-toolbar__group-label">输入</span>
+        <button
+          class="btn btn--sm"
+          :class="{ 'btn--active': inputMode === 'pinyin' }"
+          title="拼音直通（默认）：键盘原始按键发到平板，由平板自带输入法组字、弹候选栏"
+          @click="setInputMode('pinyin')"
+        >
+          拼音直通
+        </button>
+        <button
+          class="btn btn--sm"
+          :class="{ 'btn--active': inputMode === 'finished' }"
+          title="成品输入：在电脑端用中文输入法组字完成后发送上屏"
+          @click="setInputMode('finished')"
+        >
+          成品输入
+        </button>
+      </div>
+      <div class="rs-toolbar__group">
         <span class="rs-toolbar__group-label">控制</span>
         <button
           class="badge badge-btn"
@@ -355,6 +434,24 @@ onBeforeUnmount(() => {
       <div class="rs-toolbar__group rs-toolbar__group--danger">
         <span class="rs-toolbar__group-label">断开</span>
         <button class="btn btn--sm btn--danger" @click="disconnect">断开</button>
+      </div>
+    </div>
+
+    <div v-if="inputMode === 'pinyin' && streamRunning" class="rs-input-hint">
+      拼音直通：电脑输入法请切英文，打拼音由平板输入法组字、弹候选栏；空格/数字键选词。
+    </div>
+    <div v-if="inputMode === 'finished'" class="rs-finished">
+      <textarea
+        v-model="finishedText"
+        class="rs-finished__input"
+        rows="2"
+        placeholder="在电脑端用中文输入法组字完成后，点发送上屏（走 input.text，超长自动分段）"
+      />
+      <div class="rs-finished__actions">
+        <button class="btn btn--sm" :disabled="!finishedText" @click="sendFinishedText">发送到平板</button>
+        <button class="btn btn--sm" :disabled="!finishedText" @click="sendPasteToTablet">
+          {{ pasteArmed ? '确认覆盖平板剪贴板并发送' : '粘贴到平板（回退）' }}
+        </button>
       </div>
     </div>
 
@@ -396,7 +493,7 @@ onBeforeUnmount(() => {
     </div>
 
     <footer class="rs-footer">
-      <span>点按 / 滑动 / 滚轮 / 键盘直接落到平板对应位置；右键返回、中键回主页；中文输入暂不支持（2.3-3 另排）。</span>
+      <span>点按 / 滑动 / 滚轮 / 键盘直接落到平板对应位置；右键返回、中键回主页；中文输入：拼音直通（电脑切英文）或成品输入（电脑端组字后发送）。</span>
       <span>关闭窗口即结束控制会话；全屏时按 Esc 退出全屏。</span>
     </footer>
   </div>
@@ -545,6 +642,41 @@ onBeforeUnmount(() => {
   pointer-events: none;
   text-align: center;
   padding: 0 24px;
+}
+.rs-input-hint {
+  padding: 4px 12px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+}
+.rs-finished {
+  padding: 8px 12px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.rs-finished__input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-2);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  resize: vertical;
+}
+.rs-finished__actions {
+  display: flex;
+  gap: 8px;
+}
+.btn--active {
+  border-color: var(--accent);
+  color: var(--accent);
 }
 .rs-footer {
   display: flex;

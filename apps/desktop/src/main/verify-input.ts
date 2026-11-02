@@ -21,7 +21,7 @@ import { Host } from './host'
 import { fingerprintOfCert, type DeviceCert } from './transfer/identity'
 import type { DiscoveredService } from './discovery'
 import type { PendingPairing } from './pairing'
-import { decodeInputEvents, decodeScreenSize, mapPoint, type InputEvent, type MouseButton } from './input/protocol'
+import { decodeInputEvents, decodeScreenSize, mapPoint, MAX_INPUT_TEXT_BYTES, segmentInputText, utf8ByteLength, type InputEvent, type MouseButton } from './input/protocol'
 import { resolveStreamStopDirection } from './screen-stream'
 import { InputSessionCoordinator, InputController } from './input/session'
 import { EdgeSwitcher, type EdgeLayout } from './input/edge'
@@ -385,6 +385,94 @@ async function testController(): Promise<void> {
     check('对端无响应按失败回落', !res.ok && res.error === '对端未响应控制请求')
     check('超时后可再次发起', (await ctl.request('dev_B', { w: 1, h: 1 }, 'A')) !== undefined)
   }
+}
+
+// ---------- 纯逻辑：文本直通 input.text（协议 4.9，中文输入 B2） ----------
+
+function testInputText(): void {
+  console.log('\n=== 纯逻辑：input.text 分段 ===\n')
+
+  check('空文本不分段', segmentInputText('').length === 0)
+  check('短文本一段', segmentInputText('你好世界').length === 1)
+  check('ASCII 恰好 8 KiB 一段', segmentInputText('a'.repeat(8 * 1024)).length === 1)
+  const over = segmentInputText('a'.repeat(8 * 1024 + 1))
+  check(
+    'ASCII 超 1 字节切两段',
+    over.length === 2 && over[0].length === 8 * 1024 && over[1] === 'a'
+  )
+  check('汉字按 3 字节计长', utf8ByteLength('汉') === 3 && utf8ByteLength('a汉😀') === 1 + 3 + 4)
+  const han = segmentInputText('汉'.repeat(3000))
+  check(
+    '汉字长文按字节切段且每段不超限',
+    han.length === 2 &&
+      han.every((s) => utf8ByteLength(s) <= MAX_INPUT_TEXT_BYTES) &&
+      han.join('') === '汉'.repeat(3000),
+    han.map((s) => utf8ByteLength(s)).join('+')
+  )
+  // emoji 是代理对（4 字节）：切分点落在段边界时不得拆开
+  const emoSegs = segmentInputText('😀'.repeat(3000)) // 12000 字节 → 两段
+  check(
+    'emoji 不拆代理对',
+    emoSegs.length === 2 &&
+      emoSegs.every((s) => utf8ByteLength(s) <= MAX_INPUT_TEXT_BYTES) &&
+      emoSegs.join('') === '😀'.repeat(3000) &&
+      [...emoSegs[0]].length === 2048,
+    emoSegs.map((s) => utf8ByteLength(s)).join('+')
+  )
+  check('单段上限常量 8 KiB', MAX_INPUT_TEXT_BYTES === 8 * 1024)
+}
+
+async function testInputTextSend(): Promise<void> {
+  console.log('\n=== 纯逻辑：控制端 input.text / screen.paste 发送 ===\n')
+
+  const sent: SentMsg[] = []
+  const ctl = new InputController({
+    callbacks: { send: (peerId, type, payload) => sent.push({ peerId, type, payload }) }
+  })
+  // 未建立会话时发送是安全空操作
+  ctl.sendText('你好')
+  ctl.sendPaste('粘贴')
+  check('无会话时文本/粘贴不外发', sent.length === 0)
+
+  const req = ctl.request('dev_B', { w: 2000, h: 1000 }, 'Alpha')
+  const sid = (sent[0].payload as { sessionId: string }).sessionId
+  ctl.onAccepted('dev_B', sid, { w: 1000, h: 500 })
+  await req
+  sent.length = 0
+
+  ctl.sendText('你好世界')
+  const texts = sent.filter((m) => m.type === 'input.text')
+  check(
+    '短文本一段 input.text',
+    texts.length === 1 &&
+      (texts[0].payload as { text?: string }).text === '你好世界' &&
+      (texts[0].payload as { sessionId?: string }).sessionId === sid
+  )
+  sent.length = 0
+  ctl.sendText('a'.repeat(9000))
+  const long = sent.filter((m) => m.type === 'input.text')
+  check(
+    '长文本按 8 KiB 分段发送',
+    long.length === 2 &&
+      long.every((m) => (m.payload as { sessionId?: string }).sessionId === sid) &&
+      long.map((m) => (m.payload as { text?: string }).text ?? '').join('') === 'a'.repeat(9000),
+    long.map((m) => ((m.payload as { text?: string }).text ?? '').length).join('+')
+  )
+  sent.length = 0
+  ctl.sendPaste('粘贴文本')
+  check(
+    '粘贴一次 screen.paste',
+    sent.length === 1 &&
+      sent[0].type === 'screen.paste' &&
+      (sent[0].payload as { text?: string }).text === '粘贴文本'
+  )
+  sent.length = 0
+  ctl.sendPaste('a'.repeat(512 * 1024 + 1))
+  check('超 512 KiB 的粘贴不发送', sent.length === 0)
+  ctl.stop('done')
+  sent.length = 0
+  ctl.sendText('你好')
+  check('退出后文本不再外发', sent.length === 0)
 }
 
 // ---------- 纯逻辑：边缘穿越与布局存储 ----------
@@ -1254,6 +1342,8 @@ async function main(): Promise<void> {
   testSeenMessageIds()
   testCoordinator()
   await testController()
+  testInputText()
+  await testInputTextSend()
   testEdge()
   testWin32()
 

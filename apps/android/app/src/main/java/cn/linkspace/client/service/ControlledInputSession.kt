@@ -1,6 +1,7 @@
 package cn.linkspace.client.service
 
 import android.util.Log
+import cn.linkspace.client.service.ControlledInputInjector.InputFailure
 import org.json.JSONObject
 
 /**
@@ -17,6 +18,9 @@ import org.json.JSONObject
  * - onEvent 会话匹配校验先行（peerId + sessionId 双核对），再经
  *   [ControlledInputInjector] 解码 + 坐标映射，交 AccessibilityService
  *   注入手势/按键；注入失败带明确原因上报，不静默丢掉。
+ * - onText / onScreenPaste（协议 4.9 / 4.8，中文输入 B2/C）：同一套会话
+ *   校验；文本超 8 KiB / 粘贴超 512 KiB 整条丢弃；提交失败回
+ *   `input.error`（code + 原因，同一 code 5 秒内只回一次）并报 UI。
  * - 门禁三：无障碍服务未开启时控制请求直接回 session.reject
  *   （reason `accessibility disabled`），不进 pending、不弹 UI，
  *   并由 [Listener.onAccessibilityNotEnabled] 通知界面引导用户去开。
@@ -46,7 +50,23 @@ class ControlledInputSession(
         { _, _ -> ControlledInputInjector.InjectResult.Failed("accessibility service not wired") },
     /** 会话结束时抬起全部按住的键与鼠标键（防卡键）。 */
     private val releaseAll: () -> Unit = {},
-    private val listener: Listener? = null
+    private val listener: Listener? = null,
+    /**
+     * 文本直通出口（协议 4.9，B2）。到达时已完成会话校验与长度校验；
+     * 返回 null 表示已提交，否则是失败（code + 原因），会话层回
+     * `input.error` 并报给 UI。默认拒绝提交（未接线时不提交任何文本）。
+     */
+    private val commitText: (String) -> InputFailure? =
+        { InputFailure(InputFailure.ACCESSIBILITY_DISABLED, "文本直通未接线") },
+    /**
+     * 粘贴出口（协议 4.8，C 回退：桌面→平板）。到达时已完成会话校验
+     * 与长度校验；实现侧写剪贴板 + 注入 Ctrl+V + 回环抑制。
+     * 返回 null 表示完成，否则是失败，会话层回 `input.error`。
+     */
+    private val paste: (String) -> InputFailure? =
+        { InputFailure(InputFailure.ACCESSIBILITY_DISABLED, "粘贴通道未接线") },
+    /** 时间源（input.error 节流用，测试可注入确定性时钟）。 */
+    private val now: () -> Long = { System.currentTimeMillis() }
 ) {
 
     interface Listener {
@@ -87,6 +107,10 @@ class ControlledInputSession(
 
     @Volatile
     private var active: ActiveSession? = null
+
+    /** input.error 节流：同一 code 上次回告的 code 与时间（见 reportInputError） */
+    private var lastInputErrorCode: String? = null
+    private var lastInputErrorAt: Long = 0L
 
     private var ttlTimer: java.util.Timer? = null
 
@@ -263,9 +287,89 @@ class ControlledInputSession(
             is ControlledInputInjector.InjectResult.Ok -> Unit
             is ControlledInputInjector.InjectResult.Failed -> {
                 Log.e(TAG, "input.event 注入失败（会话 ${a.sessionId}）：${result.reason}")
-                listener?.onInjectError(a.sessionId, result.reason)
+                reportInputError(a, InputFailure(result.code, result.reason))
             }
         }
+    }
+
+    /**
+     * 处理 input.text（协议 4.9，B2 文本直通）。会话匹配校验与
+     * input.event 同口径；单条超 8 KiB 整条丢弃并回 input.error
+     * （code too-large），不截断；提交失败回 input.error 并报 UI。
+     * 与 B1 按键同一把锁串行处理，不并发（协议 §4.9 模式互斥）。
+     */
+    @Synchronized
+    fun onText(peerId: String, payload: JSONObject) {
+        val a = active
+        if (a == null || peerId != a.peerId) {
+            Log.i(TAG, "忽略 $peerId 的 input.text（无活动会话或来源不符）")
+            return
+        }
+        if (payload.optString("sessionId") != a.sessionId) return
+        val text = payload.optString("text", "")
+        if (text.isEmpty()) return
+        val size = text.toByteArray(Charsets.UTF_8).size
+        if (size > Protocol.MAX_INPUT_TEXT_BYTES) {
+            reportInputError(
+                a,
+                InputFailure(
+                    InputFailure.TOO_LARGE,
+                    "文本超过单条 8 KiB 上限（$size 字节），整条已丢弃，请分段发送"
+                )
+            )
+            return
+        }
+        val failure = commitText(text)
+        if (failure != null) reportInputError(a, failure)
+    }
+
+    /**
+     * 处理 screen.paste（协议 4.8，C 回退：桌面→平板）。会话匹配校验
+     * 与 input.event 同口径；超 512 KiB 整段丢弃并回 input.error；
+     * 写剪贴板 + Ctrl+V + 回环抑制由 paste 出口实现。
+     */
+    @Synchronized
+    fun onScreenPaste(peerId: String, payload: JSONObject) {
+        val a = active
+        if (a == null || peerId != a.peerId) {
+            Log.i(TAG, "忽略 $peerId 的 screen.paste（无活动会话或来源不符）")
+            return
+        }
+        val text = payload.optString("text", "")
+        if (text.isEmpty()) return
+        val size = text.toByteArray(Charsets.UTF_8).size
+        if (size > Protocol.MAX_PASTE_BYTES) {
+            reportInputError(
+                a,
+                InputFailure(
+                    InputFailure.TOO_LARGE,
+                    "粘贴内容超过 512 KiB 上限（$size 字节），整段已丢弃"
+                )
+            )
+            return
+        }
+        val failure = paste(text)
+        if (failure != null) reportInputError(a, failure)
+    }
+
+    /**
+     * 输入失败回告（协议 4.9 `input.error`）：会话匹配通过后注入失败时
+     * 发给控制端，桌面 UI 原样展示原因。同一 code 5 秒内只回告一次——
+     * B1 按键是高频流，无焦点时每键都回告会刷屏；节流后桌面仍能看到
+     * 原因，5 秒后复发一次提醒。另经 listener 报给本机 UI（双通道）。
+     */
+    @Synchronized
+    private fun reportInputError(session: ActiveSession, failure: InputFailure) {
+        val nowMs = now()
+        if (failure.code == lastInputErrorCode && nowMs - lastInputErrorAt < INPUT_ERROR_MIN_INTERVAL_MS) return
+        lastInputErrorCode = failure.code
+        lastInputErrorAt = nowMs
+        send(session.peerId, Protocol.TYPE_INPUT_ERROR) {
+            put("sessionId", session.sessionId)
+            put("code", failure.code)
+            put("reason", failure.reason)
+        }
+        listener?.onInjectError(session.sessionId, failure.reason)
     }
 
     /** 处理 session.stop（对端主动结束） */
@@ -371,5 +475,8 @@ class ControlledInputSession(
 
         /** 挂起的控制请求多久无人处理即自动拒绝，与桌面端一致。产品值 30s */
         const val REQUEST_TTL_MS = 30_000L
+
+        /** 同一 code 的 input.error 最小回告间隔（协议 4.9，防高频按键刷屏） */
+        const val INPUT_ERROR_MIN_INTERVAL_MS = 5_000L
     }
 }

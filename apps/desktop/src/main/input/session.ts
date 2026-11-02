@@ -18,7 +18,7 @@
 // 「每次控制请求都要提示」；持久化的 control 授权会让提示失去意义。
 
 import { randomUUID } from 'node:crypto'
-import { decodeInputEvents, decodeScreenSize, mapPoint, SESSION_ID_RE, type InputEvent, type ScreenSize } from './protocol'
+import { decodeInputEvents, decodeScreenSize, mapPoint, segmentInputText, SESSION_ID_RE, utf8ByteLength, type InputEvent, type ScreenSize } from './protocol'
 
 /** 需要用户确认的控制请求（被控端 UI 展示用） */
 export interface InputControlRequest {
@@ -391,6 +391,28 @@ export class InputController {
   sendEvents(events: InputEvent[]): void {
     if (!this.active || events.length === 0) return
     this.cbs.send(this.active.peerId, 'input.event', { sessionId: this.active.sessionId, events })
+  }
+
+  /**
+   * 文本直通（协议 4.9，B2）：成品文本分段发 input.text。
+   * 只在活动会话中发送；断线/退出后调用是安全的空操作。
+   * 段与段之间按序发出，会话层串行处理，不并发（模式互斥）。
+   */
+  sendText(text: string): void {
+    if (!this.active || !text) return
+    for (const seg of segmentInputText(text)) {
+      this.cbs.send(this.active.peerId, 'input.text', { sessionId: this.active.sessionId, text: seg })
+    }
+  }
+
+  /**
+   * 粘贴回退（协议 4.8，C）：桌面→平板方向。单条 ≤ 512 KiB，
+   * 超限不发送（调用方须先提示/分段）；只在活动会话中发送。
+   */
+  sendPaste(text: string): void {
+    if (!this.active || !text) return
+    if (utf8ByteLength(text) > 512 * 1024) return
+    this.cbs.send(this.active.peerId, 'screen.paste', { text })
   }
 
   /** 本地主动退出（7.4 快捷键 / UI 按钮 / 边缘逻辑要求）。幂等 */

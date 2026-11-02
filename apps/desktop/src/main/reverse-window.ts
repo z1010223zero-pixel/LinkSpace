@@ -57,6 +57,11 @@ export class ReverseWindowManager {
       }
       this.sendStatus()
     })
+    this.host.on('reverseInputError', (err) => {
+      // 只认当前窗口的对端；原因译成用户可执行的提示发给画面窗口
+      if (err.peerId !== this.peerId) return
+      this.sendNotice(inputErrorNoticeText(err.code, err.reason))
+    })
   }
 
   get isOpen(): boolean {
@@ -165,6 +170,31 @@ export class ReverseWindowManager {
     const win = this.win
     if (!win || win.isDestroyed()) return
     win.webContents.send('reverse-stream:changed', this.statusSnapshot())
+  }
+
+  private sendNotice(message: string): void {
+    const win = this.win
+    if (!win || win.isDestroyed()) return
+    win.webContents.send('reverse-stream:notice', message)
+  }
+}
+
+/**
+ * 平板回的输入失败 code → 画面窗口提示文案（协议 4.9 input.error）。
+ * 无焦点时只提示手动点输入框，不自动点按聚焦（D-4）。
+ */
+export function inputErrorNoticeText(code: string, reason: string): string {
+  switch (code) {
+    case 'no-focus':
+      return '平板上没有获得焦点的输入框：请先点一下平板画面里的输入框，再打字'
+    case 'accessibility-disabled':
+      return '平板无障碍服务未开启，远程输入已停'
+    case 'unsupported-version':
+      return '平板 Android 版本低于 13，文本输入不可用，可改用粘贴'
+    case 'too-large':
+      return `文本过长，已被平板拒绝：${reason}`
+    default:
+      return `远程输入失败：${reason}`
   }
 }
 

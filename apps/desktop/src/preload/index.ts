@@ -152,6 +152,12 @@ const api: LinkSpaceApi = {
   sendReverseInput: (input: ReverseWindowInput) =>
     ipcRenderer.invoke('reverse-stream:input', input) as Promise<IpcResult<void>>,
 
+  sendReverseText: (peerId: string, text: string) =>
+    ipcRenderer.invoke('reverse-stream:text', peerId, text) as Promise<IpcResult<void>>,
+
+  sendReversePaste: (peerId: string, text: string) =>
+    ipcRenderer.invoke('reverse-stream:paste', peerId, text) as Promise<IpcResult<void>>,
+
   onReverseStreamFrame: (cb: (frame: ReverseStreamFrameView) => void) =>
     subscribeData<ReverseStreamFrameView>('reverse-stream:frame', cb),
 

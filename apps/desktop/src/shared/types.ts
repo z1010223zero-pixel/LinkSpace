@@ -288,6 +288,10 @@ export interface LinkSpaceApi {
   retryReverseInput(peerId: string): Promise<IpcResult<void>>
   /** 画面窗口的输入事件（主进程映射坐标后走 input.event 外发） */
   sendReverseInput(input: ReverseWindowInput): Promise<IpcResult<void>>
+  /** 画面窗口的成品文本（协议 4.9 B2）：主进程分段发 input.text */
+  sendReverseText(peerId: string, text: string): Promise<IpcResult<void>>
+  /** 画面窗口的粘贴回退（协议 4.8 C）：主进程发 screen.paste */
+  sendReversePaste(peerId: string, text: string): Promise<IpcResult<void>>
   /** 反向投屏解出的 RGBA 帧（画面窗口订阅） */
   onReverseStreamFrame(cb: (frame: ReverseStreamFrameView) => void): Unsubscribe
   /** 反向投屏状态变化（画面窗口订阅，收到的是完整快照） */
