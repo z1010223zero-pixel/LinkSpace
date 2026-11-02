@@ -35,7 +35,7 @@ import {
 } from './input/session'
 import type { InputEvent, ScreenSize } from './input/protocol'
 import { InputLayoutStore } from './input/layout'
-import { ScreenStreamService, ScreenStreamReceiver, STREAM_QUALITY_PRESETS, STREAM_RECONNECT_BACKOFFS_MS, type ReverseStreamFrame, type ReverseStreamStatus } from './screen-stream'
+import { ScreenStreamService, ScreenStreamReceiver, STREAM_QUALITY_PRESETS, STREAM_RECONNECT_BACKOFFS_MS, STREAM_DIRECTION_FORWARD, STREAM_DIRECTION_REVERSE, resolveStreamStopDirection, type ReverseStreamFrame, type ReverseStreamStatus } from './screen-stream'
 import { log } from './log'
 
 export interface HostOptions {
@@ -1213,19 +1213,35 @@ export class Host {
         sendTo(peerId, 'screen.stream.error', { message: `投屏启动失败：${String(err)}` })
       }
     })
-    control.on('screen.stream.stop', (conn, _msg) => {
+    control.on('screen.stream.stop', (conn, msg) => {
       if (!conn.peerId) return
-      this.screenStream.stop()
-      // 同一条消息也可能是平板停反向流：两边各按自己的活动流匹配。
-      // 注意：双向流同时在跑时 stop 没有方向位，两边会一起停——
-      // 已知局限（见 protocol.md §4.7），真要并发双向需给 stop 加流标识。
-      if (conn.peerId === this.reverseStreamPeerId) this.stopReverseReceiver('对端停止反向投屏')
-      sendTo(conn.peerId, 'screen.stream.stop', {})
+      // 方向位（协议 4.7）：direction 指明停哪一路流；缺失时按本端
+      // 属于该对端的活动流解析（单路停那路、双向只停 forward），
+      // 绝不顺手停掉另一路。非法值忽略。
+      const forwardLive =
+        this.screenStream.running && this.inputCoordinator?.activeSession?.peerId === conn.peerId
+      const reverseLive = this.reverseStreamPeerId === conn.peerId
+      const direction = resolveStreamStopDirection(msg.payload, forwardLive, reverseLive)
+      if (!direction) {
+        log.warn(`[screen-stream] 忽略无法解析方向的 screen.stream.stop（from=${conn.peerId}）`)
+        return
+      }
+      let stopped = false
+      if (direction === STREAM_DIRECTION_FORWARD) {
+        this.screenStream.stop()
+        stopped = forwardLive
+      } else if (reverseLive) {
+        this.stopReverseReceiver('对端停止反向投屏')
+        stopped = true
+      }
+      // 只在确实停掉一路流时回声确认：对端收到回声时本地已无流可停，
+      // 不再回声，停流确认不会来回 ping-pong。
+      if (stopped) sendTo(conn.peerId, 'screen.stream.stop', { direction })
     })
     // ffmpeg 意外退出（平板断开/编码器崩溃）：通知对端清 UI
     this.screenStream.onEnded = () => {
       const peer = this.inputCoordinator?.activeSession?.peerId
-      if (peer) sendTo(peer, 'screen.stream.stop', {})
+      if (peer) sendTo(peer, 'screen.stream.stop', { direction: STREAM_DIRECTION_FORWARD })
     }
 
     // ---------- 反向投屏（线 2 W6：平板画面进电脑窗口，协议 4.7 反向） ----------
@@ -1247,7 +1263,7 @@ export class Host {
       const scaleWidth = typeof p?.scaleWidth === 'number' ? p.scaleWidth : this.reverseStreamScaleWidth
       if (!this.opts.screenFfmpegPath) {
         log.warn('[screen-stream] 反向投屏无法解码：本机缺少 ffmpeg')
-        sendTo(peerId, 'screen.stream.stop', {})
+        sendTo(peerId, 'screen.stream.stop', { direction: STREAM_DIRECTION_REVERSE })
         this.stopReverseReceiver('本机缺少 ffmpeg，无法解码')
         return
       }
@@ -1364,7 +1380,7 @@ export class Host {
     const target = peerId ?? this.reverseStreamPeerId
     if (!target) return
     this.clearReverseStreamReconnectTimer()
-    this.peers.get(target)?.send('screen.stream.stop', {})
+    this.peers.get(target)?.send('screen.stream.stop', { direction: STREAM_DIRECTION_REVERSE })
     if (this.reverseStreamPeerId === target) this.stopReverseReceiver('本机停止反向投屏', true)
   }
 
