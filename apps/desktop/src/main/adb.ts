@@ -65,7 +65,16 @@ export function parseDevicesOutput(stdout: string): AdbDevice[] {
   return out
 }
 
-export async function listDevices(timeoutMs = 8000): Promise<AdbDevice[]> {
+export type ListDevicesResult =
+  | { ok: true; devices: AdbDevice[] }
+  | { ok: false; error: string }
+
+/**
+ * 带成功/失败区分的枚举。listDevices() 失败时吞错返回 []，调用方分不清
+ * 「没有设备」与「adb 出错」——refresh() 的陈旧会话清理（2.5 断开恢复）
+ * 必须只在「枚举成功」时做，否则一次 adb 故障会误删全部会话。
+ */
+export async function tryListDevices(timeoutMs = 8000): Promise<ListDevicesResult> {
   const { adb } = locateBinaries()
   try {
     const { stdout } = await execFileAsync(adb, ['devices', '-l'], {
@@ -74,12 +83,17 @@ export async function listDevices(timeoutMs = 8000): Promise<AdbDevice[]> {
     })
     const devices = parseDevicesOutput(stdout)
     log.info(`adb 枚举到 ${devices.length} 台设备`)
-    return devices
+    return { ok: true, devices }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     log.error(`adb devices 失败: ${msg}`)
-    return []
+    return { ok: false, error: msg }
   }
+}
+
+export async function listDevices(timeoutMs = 8000): Promise<AdbDevice[]> {
+  const r = await tryListDevices(timeoutMs)
+  return r.ok ? r.devices : []
 }
 
 /** 读取单个设备属性（原型阶段用于补充型号信息） */

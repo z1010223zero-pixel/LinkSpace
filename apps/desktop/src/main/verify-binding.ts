@@ -14,6 +14,9 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { generate } from "selfsigned"
 import { Host } from "./host"
+import { DeviceManager } from "./device-manager"
+import type { ScrcpyAdapter } from "./scrcpy-adapter"
+import { EventEmitter } from "node:events"
 import { fingerprintOfCert, type DeviceCert } from "./transfer/identity"
 import type { DiscoveredService } from "./discovery"
 import type { PendingPairing } from "./pairing"
@@ -305,6 +308,65 @@ async function testE2e(workDir: string): Promise<void> {
   }
 }
 
+// ---------- DeviceManager：统一视图 + 断开恢复（2.5） ----------
+
+async function testDeviceManager(): Promise<void> {
+  console.log("\n=== DeviceManager：统一视图 + 断开恢复 ===\n")
+
+  const devA = { serial: "192.168.1.5:5555", state: "device" as const, wireless: true }
+  const fakeSessions = [
+    {
+      id: "scr-1",
+      serial: "192.168.1.5:5555",
+      pid: 123,
+      state: "running" as const,
+      startedAt: Date.now()
+    }
+  ]
+  const stoppedIds: string[] = []
+  const fakeAdapter = Object.assign(new EventEmitter(), {
+    list: () => fakeSessions,
+    findBySerial: (serial: string) => fakeSessions.filter((s) => s.serial === serial),
+    stop: async (id: string) => {
+      stoppedIds.push(id)
+      return { ok: true as const, value: undefined }
+    }
+  }) as unknown as ScrcpyAdapter
+
+  // 枚举剧本：1. 有设备 → 2. 失败 → 3. 空（首次缺失）→ 4. 空（二次缺失）
+  let calls = 0
+  const enumerate = async () => {
+    calls++
+    if (calls === 1) return { ok: true as const, devices: [devA] }
+    if (calls === 2) return { ok: false as const, error: "adb server 未响应" }
+    return { ok: true as const, devices: [] }
+  }
+
+  const dm = new DeviceManager(fakeAdapter, {
+    resolveIdentity: (serial) =>
+      serial === devA.serial
+        ? { deviceId: "dev-x", paired: true, bound: false, allowed: true }
+        : { deviceId: null, paired: false, bound: false, allowed: false },
+    enumerate
+  })
+
+  await dm.refresh()
+  check("首刷列出设备", dm.view().length === 1)
+  const v = dm.view()[0]
+  check(
+    "视图带解析身份",
+    v?.deviceId === "dev-x" && v?.paired === true && v?.scrcpyAllowed === true,
+    JSON.stringify(v)
+  )
+  await dm.refresh()
+  check("枚举失败保留上次列表", dm.view().length === 1)
+  check("枚举失败不误删会话", stoppedIds.length === 0)
+  await dm.refresh()
+  check("首次缺失不断会话（等一次确认）", stoppedIds.length === 0)
+  await dm.refresh()
+  check("连续两次缺失停掉陈旧会话", stoppedIds.includes("scr-1"), JSON.stringify(stoppedIds))
+}
+
 async function main(): Promise<void> {
   console.log("\n=== LinkSpace scrcpy 配对门禁测试（W2） ===\n")
 
@@ -314,6 +376,7 @@ async function main(): Promise<void> {
   try {
     await testBindingStore(workDir)
     testResolvePure(workDir)
+    await testDeviceManager()
     await testE2e(workDir)
   } finally {
     await rm(workDir, { recursive: true, force: true })
