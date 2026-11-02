@@ -72,6 +72,14 @@ class ProtocolTest {
         assertEquals(32768, Protocol.MAX_COORD)
         assertEquals(32 * 1024 * 1024, Protocol.MAX_CHUNK_BODY)
         assertEquals(listOf("file", "clipboard"), Protocol.DEFAULT_GRANT_SCOPE)
+        assertEquals(8 * 1024, Protocol.MAX_INPUT_TEXT_BYTES)
+        assertEquals(512 * 1024, Protocol.MAX_PASTE_BYTES)
+    }
+
+    @Test
+    fun `input text and input error 类型常量`() {
+        assertEquals("input.text", Protocol.TYPE_INPUT_TEXT)
+        assertEquals("input.error", Protocol.TYPE_INPUT_ERROR)
     }
 
     @Test

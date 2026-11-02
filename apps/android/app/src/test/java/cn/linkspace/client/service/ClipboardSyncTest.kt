@@ -146,6 +146,43 @@ class ClipboardSyncTest {
     }
 
     @Test
+    fun `markRemoteWrite - 写入后窗口内不回推`() {
+        val h = Harness()
+        val sync = h.make()
+        sync.start()
+        sync.markRemoteWrite("远端粘贴")
+        h.clipboard = "远端粘贴"
+        h.advance(100) // < SUPPRESS_MS(500)
+        sync.poll()
+        assertTrue("窗口内的回读不得外发", h.sent.isEmpty())
+    }
+
+    @Test
+    fun `markRemoteWrite - 窗口外同内容也不回推（基线已更新）`() {
+        val h = Harness()
+        val sync = h.make()
+        sync.start()
+        sync.markRemoteWrite("远端粘贴")
+        h.advance(600) // > SUPPRESS_MS
+        h.clipboard = "远端粘贴"
+        sync.poll()
+        assertTrue("窗口结束若回发，说明基线在窗口内被错误更新", h.sent.isEmpty())
+    }
+
+    @Test
+    fun `markRemoteWrite - 未运行时不写剪贴板、不抑制`() {
+        val h = Harness()
+        val sync = h.make()
+        sync.markRemoteWrite("远端粘贴")
+        assertTrue(h.written.isEmpty())
+        sync.start()
+        h.clipboard = "远端粘贴"
+        h.advance(10)
+        sync.poll()
+        assertEquals(listOf("远端粘贴"), h.sent)
+    }
+
+    @Test
     fun `空变更 - 剪贴板清空不外发`() {
         val h = Harness()
         val sync = h.make()
