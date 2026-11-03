@@ -460,9 +460,10 @@ export function registerIpc(
   // 补被控端分支后再开 extend:request/exit。Host 层的
   // requestExtendControl/stopExtendControl 已就绪（无头环路覆盖），
   // 只等对端。
-  ipcMain.handle('extend:approve', (_e, sessionId: unknown) => {
+  // approve 是异步的（虚拟显示器创建上限约 30s），渲染层 await 本调用。
+  ipcMain.handle('extend:approve', async (_e, sessionId: unknown) => {
     if (typeof sessionId !== 'string' || !sessionId) return fail('缺少会话 ID')
-    const r = host.approveExtendControl(sessionId)
+    const r = await host.approveExtendControl(sessionId)
     broadcast(getWindow, 'extend:changed')
     return r.ok ? { ok: true as const } : fail(r.error ?? '批准失败')
   })

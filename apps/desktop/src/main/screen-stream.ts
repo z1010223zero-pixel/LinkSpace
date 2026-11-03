@@ -84,6 +84,60 @@ export const STREAM_SOURCE_VIRTUAL_DISPLAY = 'virtual-display'
 export type ScreenStreamSource = 'screen' | 'virtual-display'
 
 /**
+ * 推流编码器（h264 核实项，线 3 任务）。
+ *
+ * - 默认 `'libx264'`（当前代码行为）；
+ * - `LINKSPACE_STREAM_ENCODER=h264_mf` 可临时切 Windows MediaFoundation
+ *   编码器做 A/B 对照，只作排障用。
+ *
+ * 2026-10-31 排障记录称 MF 编码的流在该 ROM（c2.qti）上全绿、libx264
+ * 流下半帧全零，但代码从未真正切到 MF——此前注释写“换 MF 直接绕开”
+ * 与代码的 `-c:v libx264` 漂移。真机核实后二者改一致，环境变量覆盖
+ * 在核实完成前不得当作正式方案。
+ */
+export type StreamEncoder = 'libx264' | 'h264_mf'
+
+export function resolveStreamEncoder(): StreamEncoder {
+  const v = process.env.LINKSPACE_STREAM_ENCODER
+  if (v === 'h264_mf') return 'h264_mf'
+  if (v !== undefined && v !== 'libx264') {
+    log.warn(`[screen-stream] 未知编码器 ${v}，回落 libx264`)
+  }
+  return 'libx264'
+}
+
+/**
+ * 编码段参数（gdigrab 与 DD 帧源共用）：缩放 + 编码器 + GOP + 像素格式。
+ *
+ * 缩放三约束（真机 c2.qti 实证）：①高度必须 32 对齐——16 对齐的
+ * 624/1200 均触发「顶部条带正常、其余绿块」，取最近的 32 倍数变形
+ * 1.5% 以内；②宽度上限 1920——3200 宽的流只有顶部条带正常（超
+ * 中端平板 AVC 硬解宽度上限），多屏全景 6720 宽完全花屏；③不放
+ * 大——比显示器原生还小的屏（1440x900）强制拉到 1920 宽只会白耗
+ * 码率还把高度顶进临界值。min 引号形式过 ffmpeg 图解析器（逗号
+ * 不能裸露）；TS 源里别用反斜杠转义（会被字符串字面量吃掉）。
+ * 缩放到 1920 宽（不放大小屏），高度取最近 32 倍数（1088 档）。
+ */
+function buildEncodeArgs(scaleWidth: number, encoder: StreamEncoder): string[] {
+  const args: string[] = [
+    '-vf', `scale='min(${scaleWidth},iw)':-32`,
+    '-c:v', encoder
+  ]
+  if (encoder === 'libx264') {
+    args.push(
+      '-preset', 'ultrafast',
+      '-tune', 'zerolatency',
+      // zerolatency 已关 lookahead/sync lookahead；这里再显式钉住，
+      // 并关 sliced-threads 保持单 slice 兼容性
+      '-x264-params', 'rc-lookahead=0:sync-lookahead=0:sliced-threads=0'
+    )
+  }
+  // GOP 30（1s 一个 IDR，丢帧后 1s 内自愈）
+  args.push('-g', '30', '-pix_fmt', 'yuv420p', '-f', 'h264', 'pipe:1')
+  return args
+}
+
+/**
  * 解析 screen.stream.stop 的停流方向（与 Android 端 Protocol.kt 的
  * resolveStreamStopDirection 同规则，两端必须一致）：
  * - direction 明确给出 forward/reverse：直接采用；
@@ -149,6 +203,7 @@ export class ScreenStreamService {
     const streamFrom = process.env.LINKSPACE_STREAM_FROM
     this.scaleWidth = scaleWidth
     this.regionArgs = regionArgs
+    this.encoder = resolveStreamEncoder()
     const args = streamFrom
       ? [
           '-hide_banner', '-loglevel', 'error',
@@ -159,42 +214,162 @@ export class ScreenStreamService {
           'pipe:1'
         ]
       : [
-      '-hide_banner', '-loglevel', 'error',
-      '-f', 'gdigrab',
-      // draw_mouse=0：采集不含真实光标——注入移动与采集互相打架会让
-      // 镜像里光标持续闪烁（用户实测）；触端按绝对坐标直接映射，
-      // 不依赖画面里的光标
-      '-draw_mouse', '0',
-      '-framerate', '30',
-      ...regionArgs,
-      '-i', 'desktop',
-      // 缩放三约束（真机 c2.qti 实证）：①高度必须 32 对齐——16 对齐的
-      // 624/1200 均触发「顶部条带正常、其余绿块」，取最近的 32 倍数变形
-      // 1.5% 以内；②宽度上限 1920——3200 宽的流只有顶部条带正常（超
-      // 中端平板 AVC 硬解宽度上限），多屏全景 6720 宽完全花屏；③不放
-      // 大——比显示器原生还小的屏（1440x900）强制拉到 1920 宽只会白耗
-      // 码率还把高度顶进临界值。min 引号形式过 ffmpeg 图解析器（逗号
-      // 不能裸露）；TS 源里别用反斜杠转义（会被字符串字面量吃掉）。
-      // 缩放到 1920 宽（不放大小屏），高度取最近 32 倍数（1088 档）。
-      // 编码器 h264_mf（Windows MediaFoundation）：**真机 2026-10-31 排障
-      // 定论——libx264（medium/ultrafast 均试）在 1088 高度产出的流，这
-      // ROM 的 C2 解码器（c2.qti 与软解 alike，ByteBuffer 模式离线复现）
-      // 解出下半帧全零**；同流桌面 ffmpeg 解码完全正常、两端 WS 字节
-      // sha256 分段一致，唯 MF 编码器同源同几何流全绿。不再是编码参数
-      // 问题，是 libx264 位流与该 ROM 解码器栈的相性，换 MF 直接绕开。
-      '-vf', `scale='min(${scaleWidth},iw)':-32`,
-      '-c:v', 'libx264',
-      '-preset', 'ultrafast',
-      '-tune', 'zerolatency',
-      // zerolatency 已关 lookahead/sync lookahead；这里再显式钉住，
-      // 并关 sliced-threads 保持单 slice 兼容性
-      '-x264-params', 'rc-lookahead=0:sync-lookahead=0:sliced-threads=0',
-      // GOP 30（1s 一个 IDR，丢帧后 1s 内自愈）
-      '-g', '30',
-      '-pix_fmt', 'yuv420p',
-      '-f', 'h264',
-      'pipe:1'
-      ]
+          '-hide_banner', '-loglevel', 'error',
+          '-f', 'gdigrab',
+          // draw_mouse=0：采集不含真实光标——注入移动与采集互相打架会让
+          // 镜像里光标持续闪烁（用户实测）；触端按绝对坐标直接映射，
+          // 不依赖画面里的光标
+          '-draw_mouse', '0',
+          '-framerate', '30',
+          ...regionArgs,
+          '-i', 'desktop',
+          ...buildEncodeArgs(scaleWidth, this.encoder)
+        ]
+    this.streamSource = 'screen'
+    this.ddRect = null
+    this.ddCapturePath = null
+    this.launchEncoder(ffmpegPath, args, onChunk, scaleWidth)
+  }
+
+  /**
+   * 启动推流（虚拟显示器帧源，线 3，3.2-1）：dd-capture 从虚拟显示器
+   * 取 DD 帧（stdout 原始 BGRA）→ ffmpeg rawvideo 输入 → 编码 → WS。
+   *
+   * 时序：spawn dd-capture，等 stderr 上的 `DD-READY w h`（10s 超时
+   * 判失败）后才起 ffmpeg 编码器；`onReady` 在编码器起后回调，宿主
+   * 据此发 screen.stream.start（w/h 为虚拟显示器尺寸，触控映射基准）。
+   * 就绪前失败（找不到输出 / DuplicateOutput 失败 / 10s 未就绪）
+   * 走 onEnded，宿主按推流意外结束处理（此时 start 尚未发出，对端
+   * 不会看到半截流）。
+   *
+   * 运行中 dd-capture 退出（AccessLost：输出被拔、模式切换等）时停
+   * 编码器并走 onEnded，由宿主决定重建或结束流，不自动重建。
+   * gdigrab 路径保留作镜像投屏，不混用。
+   */
+  startDd(opts: {
+    ffmpegPath: string
+    ddCapturePath: string
+    onChunk: (data: Buffer) => void
+    /** 虚拟显示器在虚拟屏坐标系里的矩形（与 session.accept 的 virtualScreen 一致） */
+    rect: { x: number; y: number; w: number; h: number }
+    scaleWidth?: number
+    /** 编码器已启动、可以发 screen.stream.start 时回调 */
+    onReady?: (size: { w: number; h: number }) => void
+  }): void {
+    const { ffmpegPath, ddCapturePath, onChunk, rect } = opts
+    const scaleWidth = opts.scaleWidth ?? 1920
+    if (this.proc) {
+      log.warn('[screen-stream] 发现残留推流进程，先停再启')
+      this.stop()
+    }
+    this.streamSource = 'virtual-display'
+    this.ddRect = { ...rect }
+    this.ddCapturePath = ddCapturePath
+    this.scaleWidth = scaleWidth
+    this.encoder = resolveStreamEncoder()
+    const dd = spawn(
+      ddCapturePath,
+      ['--rect', String(rect.x), String(rect.y), String(rect.w), String(rect.h)],
+      { windowsHide: true }
+    )
+    this.ddProc = dd
+    let ready = false
+    let stderrBuf = ''
+    const ddStderrTail: string[] = []
+    dd.stderr.on('data', (chunk: Buffer) => {
+      stderrBuf += chunk.toString()
+      const lines = stderrBuf.split(/\r?\n/)
+      stderrBuf = lines.pop() ?? ''
+      for (const line of lines) {
+        const t = line.trim()
+        if (!t) continue
+        ddStderrTail.push(t)
+        if (ddStderrTail.length > 10) ddStderrTail.shift()
+        if (t.startsWith('DD-READY')) {
+          if (ready) continue
+          ready = true
+          this.clearDdReadyTimer()
+          log.info(`[screen-stream] dd-capture 就绪（${t}），启动编码器`)
+          this.launchEncoder(
+            ffmpegPath,
+            [
+              '-hide_banner', '-loglevel', 'error',
+              '-f', 'rawvideo', '-pix_fmt', 'bgra', '-s', `${rect.w}x${rect.h}`,
+              '-i', 'pipe:0',
+              ...buildEncodeArgs(scaleWidth, this.encoder)
+            ],
+            onChunk,
+            scaleWidth,
+            dd.stdout,
+            () => {
+              // 编码器先于 dd 退出：dd 已无消费方，杀掉免空转
+              if (this.ddProc && !this.ddProc.killed) this.ddProc.kill()
+              this.ddProc = null
+            }
+          )
+          opts.onReady?.({ w: rect.w, h: rect.h })
+        } else {
+          log.warn(`[screen-stream] dd-capture: ${t}`)
+        }
+      }
+    })
+    dd.on('error', (err) => {
+      log.warn(`[screen-stream] dd-capture 启动失败: ${String(err)}`)
+      this.failDdStart('dd-capture 启动失败')
+    })
+    dd.on('exit', (code) => {
+      log.info(`[screen-stream] dd-capture 退出（code=${code}）`)
+      if (this.ddProc !== dd) return
+      this.ddProc = null
+      if (!ready) {
+        // 未就绪就退出：帧源起不来，整个推流失败
+        this.clearDdReadyTimer()
+        this.failDdStart(`dd-capture 退出（code=${code}）：${ddStderrTail.join(' | ')}`)
+      } else {
+        // 运行中退出（AccessLost 等）：停编码器，通知宿主
+        this.stop()
+        this.onEnded?.()
+      }
+    })
+    this.ddReadyTimer = setTimeout(() => {
+      if (!ready && this.ddProc === dd) {
+        log.warn('[screen-stream] dd-capture 10s 未报 DD-READY，判失败')
+        this.failDdStart('dd-capture 10s 未就绪')
+      }
+    }, 10_000)
+    this.ddReadyTimer.unref?.()
+  }
+
+  /** dd-capture 就绪前失败：杀进程、清定时器、走 onEnded（宿主按推流失败处理） */
+  private failDdStart(reason: string): void {
+    this.clearDdReadyTimer()
+    const dd = this.ddProc
+    this.ddProc = null
+    if (dd && !dd.killed) dd.kill()
+    log.warn(`[screen-stream] 虚拟显示器帧源启动失败：${reason}`)
+    this.onEnded?.()
+  }
+
+  private clearDdReadyTimer(): void {
+    if (this.ddReadyTimer) {
+      clearTimeout(this.ddReadyTimer)
+      this.ddReadyTimer = null
+    }
+  }
+
+  /**
+   * 起 ffmpeg 编码器并接线（gdigrab 与 DD 帧源共用）：stdout 的字节块
+   * 经 onChunk 交给宿主以 WS 二进制帧发出；`feedStdin` 给定时把该流
+   * 接到 ffmpeg stdin（DD 帧源的 BGRA 管道）。
+   */
+  private launchEncoder(
+    ffmpegPath: string,
+    args: string[],
+    onChunk: (data: Buffer) => void,
+    scaleWidth: number,
+    feedStdin?: NodeJS.ReadableStream,
+    onEncoderExit?: () => void
+  ): void {
     // 自适应码率与用户画质档位取交集：拥塞时仍能下降；用户选低清晰度
     // 时也不会因为 t0 无上限而把 Wi-Fi 打爆。
     const preset = STREAM_QUALITY_PRESETS.find((p) => p.width === scaleWidth)
@@ -218,6 +393,12 @@ export class ScreenStreamService {
       log.info(`[screen-stream] 推流字节落盘: ${teePath}`)
     }
     const proc = spawn(ffmpegPath, [...args, ...tierArgs], { windowsHide: true })
+    if (feedStdin) {
+      proc.stdin.on('error', () => {
+        /* 编码器已死时管道写失败是预期，不抛 */
+      })
+      feedStdin.pipe(proc.stdin)
+    }
     log.info(`[screen-stream] 推流启动于 ${TIERS[this.tier]?.label ?? 't0'} · ${scaleWidth}p · ${(bps / 1_000_000).toFixed(1)}Mbps`)
     this.stderrTail = []
     proc.stderr.on('data', (chunk: Buffer) => {
@@ -239,6 +420,7 @@ export class ScreenStreamService {
         this.proc = null
         this.onEnded?.()
       }
+      onEncoderExit?.()
     })
     this.proc = proc
     log.info('[screen-stream] 推流已启动（stdout → WS 二进制帧）')
@@ -261,13 +443,48 @@ export class ScreenStreamService {
     log.info(`[screen-stream] 码率档位 ${TIERS[this.tier]?.label} → ${TIERS[clamped]?.label}（重启推流，解码器带内消化）`)
     this.tier = clamped
     this.stop()
-    this.start(path, onChunk, this.regionArgs, this.scaleWidth)
+    // 换档重启走同一帧源：DD 帧源不经过 onReady（start 已发出，解码器
+    // 带内消化新档位），直接重起 dd-capture + 编码器
+    if (this.streamSource === 'virtual-display' && this.ddRect && this.ddCapturePath) {
+      this.startDd({
+        ffmpegPath: path,
+        ddCapturePath: this.ddCapturePath,
+        onChunk,
+        rect: this.ddRect,
+        scaleWidth: this.scaleWidth
+      })
+    } else {
+      this.start(path, onChunk, this.regionArgs, this.scaleWidth)
+    }
   }
 
   private ffmpegPath: string | null = null
   private onChunkRef: ((data: Buffer) => void) | null = null
+  /** 当前推流帧源（换档重启与锁屏恢复按此选路） */
+  private streamSource: ScreenStreamSource = 'screen'
+  /** DD 帧源参数（换档重启用） */
+  private ddRect: { x: number; y: number; w: number; h: number } | null = null
+  private ddCapturePath: string | null = null
+  /** dd-capture 子进程（DD 帧源）；null = 未启动或已退出 */
+  private ddProc: ChildProcessWithoutNullStreams | null = null
+  private ddReadyTimer: NodeJS.Timeout | null = null
+  private encoder: StreamEncoder = 'libx264'
+
+  /** 当前推流帧源（宿主锁屏恢复、状态查询用） */
+  get source(): ScreenStreamSource {
+    return this.streamSource
+  }
+
+  /** DD 帧源是否在跑（dd-capture 进程活着） */
+  get ddRunning(): boolean {
+    return this.ddProc != null
+  }
 
   stop(): void {
+    this.clearDdReadyTimer()
+    const dd = this.ddProc
+    this.ddProc = null
+    if (dd && !dd.killed) dd.kill()
     if (!this.proc) return
     const p = this.proc
     this.proc = null

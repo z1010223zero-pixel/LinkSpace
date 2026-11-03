@@ -66,10 +66,14 @@ export interface ExtendCoordinatorCallbacks {
    * 创建虚拟显示器。成功返回其在虚拟屏坐标系里的矩形；失败返回原因
    * （如驱动未安装、测试签名未开），会话层据此回 session.reject。
    * 实现侧是 VirtualDisplayManager（3.2）：SWD 创建 + 模式选定。
+   *
+   * 异步：SWD 创建要等设备就绪 + 新输出出现（上限约 30s），approve
+   * 必须 await。创建期间 deny/过期/断连/撤销会取消本次创建——显示
+   * 器若已建成则立即销毁，不留残留设备。
    */
   createVirtualDisplay: (
     preferred: ExtendPreferredSize | null
-  ) => { ok: true; screen: { x: number; y: number; w: number; h: number } } | { ok: false; reason: string }
+  ) => Promise<{ ok: true; screen: { x: number; y: number; w: number; h: number } } | { ok: false; reason: string }>
   /** 销毁当前虚拟显示器（SWD 销毁）。无虚拟显示器时是安全空操作 */
   destroyVirtualDisplay: () => void
   /** 给对端发消息。对端不在线时静默丢弃 */
@@ -114,6 +118,10 @@ export class DisplayExtendSessionCoordinator {
   private pending: ExtendControlRequest | null = null
   private active: ActiveExtendSession | null = null
   private ttlTimer: NodeJS.Timeout | null = null
+  /** 正在创建虚拟显示器的批准（approve 已调用、create 未落定） */
+  private creating: { sessionId: string; peerId: string } | null = null
+  /** 创建期间被取消（deny/过期/断连/撤销/终止）：落定后立即销毁已建成的显示器 */
+  private createCancelled = false
   private readonly cbs: ExtendCoordinatorCallbacks
   private readonly ttlMs: number
   private readonly now: () => number
@@ -211,24 +219,40 @@ export class DisplayExtendSessionCoordinator {
   /**
    * UI：用户同意。同意即创建虚拟显示器——创建失败时会话不建立，
    * 回 session.reject（reason 为创建失败原因），不先 accept 再补建。
+   *
+   * 异步：创建要等 SWD 就绪 + 新输出出现（上限约 30s）。创建期间
+   * deny/过期/断连/撤销会取消本次创建，显示器若已建成则立即销毁。
    */
-  approve(sessionId: string): { ok: boolean; error?: string } {
+  async approve(sessionId: string): Promise<{ ok: boolean; error?: string }> {
     const req = this.pending
     if (!req || req.sessionId !== sessionId) return { ok: false, error: '请求不存在或已过期' }
     if (this.now() > req.expiresAt) {
       this.expirePending()
       return { ok: false, error: '请求已过期' }
     }
-    const created = this.cbs.createVirtualDisplay(req.preferred)
+    if (this.creating) return { ok: false, error: '正在创建虚拟显示器' }
+    // 批准后 TTL 计时停止：创建本身最长约 30s，不能让 TTL 在创建
+    // 半途把请求判过期；创建期间的取消由 cancelCreation 负责。
+    this.clearTimer()
+    this.creating = { sessionId: req.sessionId, peerId: req.peerId }
+    this.createCancelled = false
+    const created = await this.cbs.createVirtualDisplay(req.preferred)
+    this.creating = null
+    if (this.createCancelled) {
+      // 创建期间被取消：显示器若已建成必须立即销毁，不留残留设备。
+      // reject 已由取消方发出（deny/过期），这里不再重复发。
+      if (created.ok) this.cbs.destroyVirtualDisplay()
+      this.pending = null
+      this.cbs.onChanged?.()
+      return { ok: false, error: '请求已取消' }
+    }
     if (!created.ok) {
-      this.clearTimer()
       this.pending = null
       this.cbs.send(req.peerId, 'session.reject', { sessionId: req.sessionId, reason: created.reason })
       this.cbs.log?.(`扩展屏创建失败，已拒绝 ${req.peerId}：${created.reason}`)
       this.cbs.onChanged?.()
       return { ok: false, error: created.reason }
     }
-    this.clearTimer()
     this.pending = null
     this.active = {
       sessionId: req.sessionId,
@@ -242,10 +266,25 @@ export class DisplayExtendSessionCoordinator {
     return { ok: true }
   }
 
+  /** 创建期间的取消：标记取消并清 pending，落定后由 approve 收尾销毁 */
+  private cancelCreation(): void {
+    if (!this.creating) return
+    this.createCancelled = true
+    this.clearTimer()
+    this.pending = null
+    this.cbs.onChanged?.()
+  }
+
   /** UI：用户拒绝 */
   deny(sessionId: string, reason = 'denied by user'): void {
     const req = this.pending
     if (!req || req.sessionId !== sessionId) return
+    if (this.creating) {
+      this.cancelCreation()
+      this.cbs.send(req.peerId, 'session.reject', { sessionId: req.sessionId, reason })
+      this.cbs.log?.('用户拒绝了扩展屏请求（创建进行中，已取消）')
+      return
+    }
     this.clearTimer()
     this.pending = null
     this.cbs.send(req.peerId, 'session.reject', { sessionId: req.sessionId, reason })
@@ -258,6 +297,8 @@ export class DisplayExtendSessionCoordinator {
     const p = payload as { sessionId?: unknown }
     if (this.active && this.active.peerId === peerId && p?.sessionId === this.active.sessionId) {
       this.endSession('对端结束了扩展屏')
+    } else if (this.creating && this.creating.peerId === peerId && p?.sessionId === this.creating.sessionId) {
+      this.cancelCreation()
     }
   }
 
@@ -265,6 +306,8 @@ export class DisplayExtendSessionCoordinator {
   onPeerDisconnected(peerId: string): void {
     if (this.active && this.active.peerId === peerId) {
       this.endSession('对端连接断开')
+    } else if (this.creating && this.creating.peerId === peerId) {
+      this.cancelCreation()
     } else if (this.pending && this.pending.peerId === peerId) {
       this.clearTimer()
       this.pending = null
@@ -274,15 +317,26 @@ export class DisplayExtendSessionCoordinator {
 
   /** 信任撤销：比断连更优先的终止理由，立即掐断并销毁虚拟显示器 */
   onTrustRevoked(peerId: string): void {
-    if ((this.active && this.active.peerId === peerId) || (this.pending && this.pending.peerId === peerId)) {
+    if (this.active && this.active.peerId === peerId) {
       this.clearTimer()
       this.pending = null
-      if (this.active) this.endSession('信任已被撤销')
+      this.endSession('信任已被撤销')
+    } else if (this.creating && this.creating.peerId === peerId) {
+      this.cancelCreation()
+    } else if (this.pending && this.pending.peerId === peerId) {
+      this.clearTimer()
+      this.pending = null
     }
   }
 
   /** 本机用户主动终止（被控端随时可以收回扩展屏） */
   terminate(): void {
+    if (this.creating) {
+      // 创建中的请求一并取消（不发 session.stop：会话尚未建立，
+      // 对端挂起的请求按自身 32s 超时回落，与 deny/过期口径一致）
+      this.cancelCreation()
+      return
+    }
     if (!this.active) return
     const peerId = this.active.peerId
     const sessionId = this.active.sessionId

@@ -135,4 +135,53 @@ function guessAdbBeside(scrcpyPath: string): string | null {
 /** 清除缓存，便于测试 */
 export function resetBinaryCache(): void {
   cached = null
+  cachedNative = null
+}
+
+// ---------- 虚拟显示器原生二进制（线 3，3.2-1） ----------
+//
+// 查找顺序：
+//   1. 环境变量 LINKSPACE_SWD_HOST / LINKSPACE_DD_CAPTURE（测试与调试用）
+//   2. 打包资源目录 <resourcesPath>/native/<swd-host|dd-capture>/
+//      （electron-builder extraResources 须把两处 x64/Release 产物打进去，
+//      否则打包后此路查不到——分发前补，见交接文档）
+//   3. 开发期仓内构建产物 <repo>/native/<...>/x64/Release/*.exe
+//      （electron-vite dev 时 cwd 在 apps/desktop，往上两级即仓根）
+//
+// 找不到时返回 null，不抛错：调用方（VirtualDisplayManager / 推流）
+// 按“虚拟显示器不可用”降级，扩展请求回 session.reject、投屏回 error。
+export interface NativeDisplayBinaries {
+  swdHost: string | null
+  ddCapture: string | null
+}
+
+let cachedNative: NativeDisplayBinaries | null = null
+
+function findNative(name: 'swd-host' | 'dd-capture'): string | null {
+  const exe = name + EXE
+  const envVar = name === 'swd-host' ? 'LINKSPACE_SWD_HOST' : 'LINKSPACE_DD_CAPTURE'
+  const envPath = process.env[envVar]
+  if (envPath && existsSync(envPath)) return envPath
+  const resourcesPath = (process as { resourcesPath?: string }).resourcesPath
+  if (resourcesPath) {
+    const p = join(resourcesPath, 'native', name, exe)
+    if (existsSync(p)) return p
+  }
+  // 开发期：cwd 在 apps/desktop（electron-vite dev）或仓根
+  for (const base of [process.cwd(), join(process.cwd(), '..', '..')]) {
+    const p = join(base, 'native', name, 'x64', 'Release', exe)
+    if (existsSync(p)) return p
+  }
+  return null
+}
+
+export function locateVirtualDisplayBinaries(): NativeDisplayBinaries {
+  if (cachedNative) return cachedNative
+  cachedNative = { swdHost: findNative('swd-host'), ddCapture: findNative('dd-capture') }
+  return cachedNative
+}
+
+/** 清除原生二进制缓存（与 resetBinaryCache 同口径，便于测试） */
+export function resetNativeBinaryCache(): void {
+  cachedNative = null
 }

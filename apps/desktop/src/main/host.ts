@@ -42,7 +42,7 @@ import {
 } from './extend/session'
 import type { InputEvent, ScreenSize } from './input/protocol'
 import { InputLayoutStore } from './input/layout'
-import { ScreenStreamService, ScreenStreamReceiver, STREAM_QUALITY_PRESETS, STREAM_RECONNECT_BACKOFFS_MS, STREAM_DIRECTION_FORWARD, STREAM_DIRECTION_REVERSE, resolveStreamStopDirection, type ReverseStreamFrame, type ReverseStreamStatus } from './screen-stream'
+import { ScreenStreamService, ScreenStreamReceiver, STREAM_QUALITY_PRESETS, STREAM_RECONNECT_BACKOFFS_MS, STREAM_DIRECTION_FORWARD, STREAM_DIRECTION_REVERSE, STREAM_SOURCE_VIRTUAL_DISPLAY, resolveStreamStopDirection, type ReverseStreamFrame, type ReverseStreamStatus, type ScreenStreamSource } from './screen-stream'
 import { log } from './log'
 
 export interface HostOptions {
@@ -88,16 +88,24 @@ export interface HostOptions {
    * 平板的 screen.stream.request 会收到 error 回告
    */
   screenFfmpegPath?: string
+  /**
+   * dd-capture 可执行路径（虚拟显示器帧源，线 3，3.2-1）。留空时
+   * source=virtual-display 的投屏请求回 error；gdigrab 镜像投屏不受影响
+   */
+  screenDdCapturePath?: string
   /** 虚拟屏 bounds（投屏采集范围，物理像素）。与注入 normalizeAbsolute 同基准 */
   inputVirtualScreen?: () => { x: number; y: number; w: number; h: number }
   /**
    * 虚拟显示器创建/销毁出口（线 3，display-extend 会话 accept 时调用）。
    * 正常路径由 3.2 的 VirtualDisplayManager 接线；缺省为「不可用」——
    * 创建失败时扩展请求回 session.reject，绝不先 accept 再补建。
+   *
+   * 异步：SWD 创建要等设备就绪 + 新输出出现（上限约 30s），Coordinator
+   * 的 approve 会 await；创建期间取消由 Coordinator 处理。
    */
   extendCreateVirtualDisplay?: (
     preferred: ExtendPreferredSize | null
-  ) => { ok: true; screen: { x: number; y: number; w: number; h: number } } | { ok: false; reason: string }
+  ) => Promise<{ ok: true; screen: { x: number; y: number; w: number; h: number } } | { ok: false; reason: string }>
   /** 虚拟显示器销毁出口。缺省为空操作 */
   extendDestroyVirtualDisplay?: () => void
 }
@@ -209,6 +217,26 @@ export class Host {
   private lastReverseStreamEndReason: string | null = null
   /** 本次投屏选中的显示器区域（虚拟屏坐标）；null = 未选/全桌面 */
   private streamRegion: { x: number; y: number; w: number; h: number } | null = null
+  /**
+   * 正向投屏归属（线 3，3.2-1/锁屏暂停）：当前流是推给谁的、什么帧源、
+   * 什么区域与档位。screen.source 只区分帧源，peerId 与 started 在此。
+   * 停流（对端 stop / 断连 / 锁屏暂停 / 意外退出）时一并清掉。
+   */
+  private forwardStreamPeerId: string | null = null
+  private forwardStreamSource: ScreenStreamSource = 'screen'
+  private forwardStreamRegion: { x: number; y: number; w: number; h: number } | null = null
+  private forwardStreamScaleWidth = 1920
+  private forwardStreamRegionArgs: string[] = []
+  /** screen.stream.start 是否已发出（DD 就绪前失败时不发 stop，避免对端清掉不存在的流） */
+  private forwardStreamStarted = false
+  /** 锁屏暂停的正向投屏（解锁后按原样重起）；无暂停时 null */
+  private pausedForwardStream: {
+    peerId: string
+    source: ScreenStreamSource
+    region: { x: number; y: number; w: number; h: number } | null
+    scaleWidth: number
+    regionArgs: string[]
+  } | null = null
   private readonly inputLayout: InputLayoutStore
   private listeners: { [K in keyof HostEvents]?: Listener<K>[] } = {}
   /** 已连接的对端：deviceId → Connection */
@@ -421,6 +449,8 @@ export class Host {
       // 挡死下一次 start）——这里直接兜底，stop 幂等
       this.screenStream.stop()
       this.streamRegion = null
+      this.clearForwardStreamState()
+      this.pausedForwardStream = null
       // 反向投屏跟着连接走：接收端先停（再喂帧无处去），再按
       // 5/10/20/30s×4 排期重发请求（线 1 同口径）；peerId 保留供重连用
       if (this.reverseStreamPeerId === pid) {
@@ -1066,8 +1096,15 @@ export class Host {
         log: (msg) => log.info(msg),
         onChanged: () => {
           // 会话结束（active 变 null 的过渡）时投流随之终止：画面是
-          // 会话授权的一部分，没有会话就没有画面
-          if (!this.inputCoordinator?.activeSession) this.screenStream.stop()
+          // 会话授权的一部分，没有会话就没有画面——但只停 'screen'
+          // 源的流：扩展屏推流（virtual-display 源）寄生在
+          // display-extend 会话而非 input 会话，input 结束不得掐断
+          // 它（3.2-2 解耦；此前无条件 stop 会把扩展屏画面一并掐掉）。
+          if (!this.inputCoordinator?.activeSession && this.screenStream.source === 'screen') {
+            this.screenStream.stop()
+            this.clearForwardStreamState()
+            this.pausedForwardStream = null
+          }
           this.emit('inputChanged')
         },
         onRequest: (req) => {
@@ -1149,36 +1186,56 @@ export class Host {
       this.inputCoordinator!.onEvent(conn.peerId, msg.payload)
     })
 
-    // ---------- 屏幕投屏（寄生在键鼠会话内，见 screen-stream.ts） ----------
+    // ---------- 屏幕投屏（见 screen-stream.ts） ----------
     // 视频块走 WS 二进制帧复用平板连出的控制连接：平板的 ServerSocket
     // 对任何入站端口都不通（ICMP 通、TCP 全拒），唯有平板自己连出的
-    // 链路可用（实测），TCP 全双工允许桌面在这个方向发数据
+    // 链路可用（实测），TCP 全双工允许桌面在这个方向发数据。
+    // 帧源（协议 4.7 [PROTOCOL] 2026-11-03 登记，线 3）：
+    //   - source 省略/'screen'：线 1 镜像投屏，gdigrab 抓真实桌面，
+    //     前置为活动 input 会话；
+    //   - source='virtual-display'：扩展屏，dd-capture 抓虚拟显示器，
+    //     前置为活动 display-extend 会话（不要求 input 会话）。
     control.on('screen.stream.request', (conn, msg) => {
       const peerId = conn.peerId
-      log.info(`[screen-stream] 收到投屏请求 display=${(msg.payload as { display?: unknown })?.display ?? '(无)'} from=${peerId ?? '(未登记)'}`)
+      const payload = (msg.payload ?? {}) as { display?: unknown; scaleWidth?: unknown; source?: unknown }
+      log.info(`[screen-stream] 收到投屏请求 display=${payload.display ?? '(无)'} source=${payload.source ?? 'screen'} from=${peerId ?? '(未登记)'}`)
       if (!peerId) return
+      if (!this.opts.screenFfmpegPath) {
+        sendTo(peerId, 'screen.stream.error', { message: '本机缺少 ffmpeg，无法投屏' })
+        return
+      }
+      const requestedScaleWidth =
+        typeof payload.scaleWidth === 'number' ? (payload.scaleWidth as number) : 1920
+      const scaleWidth = STREAM_QUALITY_PRESETS.some((p) => p.width === requestedScaleWidth)
+        ? requestedScaleWidth
+        : 1920
+      if (payload.source === STREAM_SOURCE_VIRTUAL_DISPLAY) {
+        const ext = this.extendCoordinator?.activeSession
+        if (!ext || ext.peerId !== peerId) {
+          log.warn('[screen-stream] 拒绝：无活动扩展屏会话，virtual-display 帧源不可用')
+          sendTo(peerId, 'screen.stream.error', { message: '扩展屏投屏需要先建立扩展屏会话' })
+          return
+        }
+        if (!this.opts.screenDdCapturePath) {
+          sendTo(peerId, 'screen.stream.error', { message: '本机缺少 dd-capture，无法推虚拟显示器画面' })
+          return
+        }
+        // display 参数此时无意义（虚拟显示器只有一块），忽略；
+        // 区域就是 session.accept 回过的 virtualScreen。
+        this.startForwardStream(peerId, STREAM_SOURCE_VIRTUAL_DISPLAY, { ...ext.virtualScreen }, scaleWidth)
+        return
+      }
       const active = this.inputCoordinator?.activeSession
       if (!active || active.peerId !== peerId) {
         log.warn(`[screen-stream] 拒绝：无活动键鼠会话（active=${active ? active.peerId : 'null'}）`)
         sendTo(peerId, 'screen.stream.error', { message: '投屏需要先建立键鼠会话' })
         return
       }
-      if (!this.opts.screenFfmpegPath) {
-        sendTo(peerId, 'screen.stream.error', { message: '本机缺少 ffmpeg，无法投屏' })
-        return
-      }
       // 多显示器选择（ToDesk 体验，用户 2026-10-31 提出）：不带 display
       // 的请求先回显示器清单，带 display 的按其虚拟屏坐标区域抓取。
       // 单显示器免选择器，直接投 0 号屏；自动重连带 lastStreamDisplayIndex
       // 时同样直连，不会再弹清单。
-      let requested = (msg.payload as { display?: unknown } | null)?.display
-      const requestedScaleWidth =
-        typeof (msg.payload as { scaleWidth?: unknown } | null)?.scaleWidth === 'number'
-          ? (msg.payload as { scaleWidth: number }).scaleWidth
-          : 1920
-      const scaleWidth = STREAM_QUALITY_PRESETS.some((p) => p.width === requestedScaleWidth)
-        ? requestedScaleWidth
-        : 1920
+      let requested = payload.display
       const displays = this.opts.inputDisplays?.() ?? []
       if (typeof requested !== 'number') {
         if (displays.length === 0) {
@@ -1204,7 +1261,6 @@ export class Host {
         const y1 = Math.min(region.y + region.h, vs.y + vs.h)
         region = x1 > x0 && y1 > y0 ? { x: x0, y: y0, w: x1 - x0, h: y1 - y0 } : null
       }
-      this.streamRegion = region
       // gdigrab 的 -offset_x/-offset_y 用的是**物理虚拟屏绝对坐标**（其
       // 报错原文实证：Capture area ... extends outside window area
       // (-3840,-188),(2880,1972)——正是物理虚拟屏边界），inputDisplays
@@ -1220,89 +1276,18 @@ export class Host {
             `${region.w}x${region.h}`
           ]
         : []
-      try {
-        let streamBytesSent = 0
-        let sentHash = createHash('sha256')
-        let sentCarry = Buffer.alloc(0)
-        this.screenStream.start(
-          this.opts.screenFfmpegPath,
-          (chunk) => {
-            streamBytesSent += chunk.length
-            // 端到端取证：按精确 1MB 分段哈希（两侧对齐），定位字节损坏段
-            // （真机绿块排障 2026-10-31：软解也花 → 先证明字节本身是否一致）
-            let buf = Buffer.concat([sentCarry, chunk])
-            while (buf.length >= 1_048_576) {
-              sentHash.update(buf.subarray(0, 1_048_576))
-              log.info(`[screen-stream] 发送MB#${Math.floor(streamBytesSent / 1e6)} sha=${sentHash.digest('hex').slice(0, 16)}`)
-              sentHash = createHash('sha256')
-              buf = buf.subarray(1_048_576)
-            }
-            sentCarry = buf
-            conn.sendBinary(chunk)
-          },
-          regionArgs
-          ,
-          scaleWidth
-        )
-        // 码率自适应（B-3）：周期采样发送积压，持续拥塞降档、长稳升档。
-        // 换档在 screen-stream 内部同步重启 ffmpeg（stop+start 同 tick，
-        // 本探针不会插进间隙）；推流停止（会话结束/对端断开/手动）后
-        // running=false，探针自停车并复位档位
-        let lastProbeBytes = 0
-        let probeTick = 0
-        const backlogProbe = setInterval(() => {
-          if (!this.screenStream.running) {
-            clearInterval(backlogProbe)
-            this.screenStreamCurrentTier = 0
-            this.streamCongestionScore = 0
-            return
-          }
-          // 发送速率遥测（每 8 个采样 ≈16s 一条）：ffmpeg 出了字节没有、
-          // ws 堵没堵，一眼可辨（真机排障：解码端收不到帧时先分段定位）
-          if (++probeTick % 8 === 0 && streamBytesSent !== lastProbeBytes) {
-            log.info(
-              `[screen-stream] 累计 ${(streamBytesSent / 1e6).toFixed(1)}MB，backlog ${conn.backlog()}B`
-            )
-            lastProbeBytes = streamBytesSent
-          }
-          const backlog = conn.backlog()
-          if (backlog > 1_000_000) {
-            this.streamCongestionScore = Math.min(3, this.streamCongestionScore + 1)
-          } else if (backlog < 100_000) {
-            this.streamCongestionScore = Math.max(-8, this.streamCongestionScore - 1)
-          } else {
-            this.streamCongestionScore = 0
-          }
-          // 3 个连续拥塞采样 → 降档；恢复分累积到 -8（约 30s 稳定）→ 升档
-          if (this.streamCongestionScore >= 3) {
-            this.streamCongestionScore = 0
-            this.screenStreamCurrentTier = Math.min(this.screenStreamCurrentTier + 1, 3)
-            this.screenStream.setTier(this.screenStreamCurrentTier)
-          } else if (this.streamCongestionScore <= -8 && this.screenStreamCurrentTier > 0) {
-            this.streamCongestionScore = 0
-            this.screenStreamCurrentTier -= 1
-            this.screenStream.setTier(this.screenStreamCurrentTier)
-          }
-        }, 2000)
-        sendTo(peerId, 'screen.stream.start', {
-          w: region?.w ?? this.opts.inputVirtualScreen?.().w ?? 1920,
-          h: region?.h ?? this.opts.inputVirtualScreen?.().h ?? 1080,
-          scaleWidth
-        })
-        log.info(`[screen-stream] 已为 ${peerId} 开启投屏${region ? `（显示器 ${region.w}x${region.h} @ ${region.x},${region.y}）` : '（全桌面）'}`)
-      } catch (err) {
-        const tail = this.screenStream.lastErrors().join(' | ')
-        log.warn(`[screen-stream] 启动失败: ${String(err)} ${tail}`)
-        sendTo(peerId, 'screen.stream.error', { message: `投屏启动失败：${String(err)}` })
-      }
+      this.startForwardStream(peerId, 'screen', region, scaleWidth, regionArgs)
     })
     control.on('screen.stream.stop', (conn, msg) => {
       if (!conn.peerId) return
       // 方向位（协议 4.7）：direction 指明停哪一路流；缺失时按本端
       // 属于该对端的活动流解析（单路停那路、双向只停 forward），
       // 绝不顺手停掉另一路。非法值忽略。
+      // forwardLive 按正向投屏归属（forwardStreamPeerId）判定，不按
+      // input 会话——扩展屏流（virtual-display 源）没有 input 会话，
+      // 按旧口径会被当成“无流”而忽略 stop。
       const forwardLive =
-        this.screenStream.running && this.inputCoordinator?.activeSession?.peerId === conn.peerId
+        this.screenStream.running && this.forwardStreamPeerId === conn.peerId
       const reverseLive = this.reverseStreamPeerId === conn.peerId
       const direction = resolveStreamStopDirection(msg.payload, forwardLive, reverseLive)
       if (!direction) {
@@ -1312,6 +1297,8 @@ export class Host {
       let stopped = false
       if (direction === STREAM_DIRECTION_FORWARD) {
         this.screenStream.stop()
+        this.clearForwardStreamState()
+        this.pausedForwardStream = null
         stopped = forwardLive
       } else if (reverseLive) {
         this.stopReverseReceiver('对端停止反向投屏')
@@ -1321,10 +1308,15 @@ export class Host {
       // 不再回声，停流确认不会来回 ping-pong。
       if (stopped) sendTo(conn.peerId, 'screen.stream.stop', { direction })
     })
-    // ffmpeg 意外退出（平板断开/编码器崩溃）：通知对端清 UI
+    // ffmpeg/dd-capture 意外退出（平板断开/编码器崩溃/帧源丢失）：
+    // 通知对端清 UI。start 尚未发出（DD 就绪前失败）时不发 stop，
+    // 对端没有流可清，发了反而可能清掉它正在看的别的流。
     this.screenStream.onEnded = () => {
-      const peer = this.inputCoordinator?.activeSession?.peerId
-      if (peer) sendTo(peer, 'screen.stream.stop', { direction: STREAM_DIRECTION_FORWARD })
+      const peer = this.forwardStreamPeerId
+      const started = this.forwardStreamStarted
+      this.clearForwardStreamState()
+      this.pausedForwardStream = null
+      if (peer && started) sendTo(peer, 'screen.stream.stop', { direction: STREAM_DIRECTION_FORWARD })
     }
 
     // ---------- 反向投屏（线 2 W6：平板画面进电脑窗口，协议 4.7 反向） ----------
@@ -1465,7 +1457,7 @@ export class Host {
     this.extendCoordinator = new DisplayExtendSessionCoordinator({
       callbacks: {
         isPeerAuthorized: (peerId) => this.trust.isKnown(peerId),
-        createVirtualDisplay: (preferred) =>
+        createVirtualDisplay: async (preferred) =>
           this.opts.extendCreateVirtualDisplay?.(preferred) ?? {
             ok: false as const,
             reason: 'virtual display unavailable'
@@ -1477,9 +1469,11 @@ export class Host {
         onRequest: (req) => {
           // 走查自动批准：LINKSPACE_AUTO_APPROVE=1 时跳过人工确认（与
           // input 会话同口径，仅显式环境变量开启，真机走查用）。
+          // approve 是异步的（虚拟显示器创建上限约 30s），不阻塞请求
+          // 回路；创建失败时 Coordinator 自行回 session.reject。
           if (process.env.LINKSPACE_AUTO_APPROVE === '1') {
             log.info(`[walkthrough] 自动批准 ${req.peerId} 的扩展屏请求`)
-            this.approveExtendControl(req.sessionId)
+            void this.approveExtendControl(req.sessionId)
             return
           }
           this.emit('extendRequested', req)
@@ -1506,6 +1500,187 @@ export class Host {
    * 反向流不以活动 input 会话为前提（协议 4.7 反向）；平板端的授权门
    * 是 MediaProjection 系统录屏授权，由平板用户在系统弹框里确认。
    */
+  /**
+   * 正向投屏启动（线 1 镜像 + 线 3 扩展屏共用，见 screen.stream.request
+   * 分发）。按帧源选路：'screen' 走 gdigrab（start），'virtual-display'
+   * 走 dd-capture（startDd，DD 就绪后才发 screen.stream.start）。
+   * 码率自适应探针与 start 消息都在流真正跑起来后才建，避免 DD 就
+   * 绪前失败留一条空转探针。锁屏暂停后解锁恢复也调这里（按原参数重起）。
+   */
+  private startForwardStream(
+    peerId: string,
+    source: ScreenStreamSource,
+    region: { x: number; y: number; w: number; h: number } | null,
+    scaleWidth: number,
+    regionArgs: string[] = []
+  ): void {
+    const conn = this.peers.get(peerId)
+    const ffmpegPath = this.opts.screenFfmpegPath
+    if (!conn || !ffmpegPath) return
+    const sendTo = (type: string, payload: Record<string, unknown>): void => {
+      this.peers.get(peerId)?.send(type, payload)
+    }
+    try {
+      let streamBytesSent = 0
+      let sentHash = createHash('sha256')
+      let sentCarry = Buffer.alloc(0)
+      const onChunk = (chunk: Buffer): void => {
+        streamBytesSent += chunk.length
+        // 端到端取证：按精确 1MB 分段哈希（两侧对齐），定位字节损坏段
+        // （真机绿块排障 2026-10-31：软解也花 → 先证明字节本身是否一致）
+        let buf = Buffer.concat([sentCarry, chunk])
+        while (buf.length >= 1_048_576) {
+          sentHash.update(buf.subarray(0, 1_048_576))
+          log.info(`[screen-stream] 发送MB#${Math.floor(streamBytesSent / 1e6)} sha=${sentHash.digest('hex').slice(0, 16)}`)
+          sentHash = createHash('sha256')
+          buf = buf.subarray(1_048_576)
+        }
+        sentCarry = buf
+        conn.sendBinary(chunk)
+      }
+      // 流跑起来后的收尾：码率自适应探针 + screen.stream.start。
+      // DD 源在 onReady 里调（编码器已起）；gdigrab 源直接调。
+      const afterStarted = (w: number, h: number): void => {
+        this.forwardStreamPeerId = peerId
+        this.forwardStreamSource = source
+        this.forwardStreamRegion = region ? { ...region } : null
+        this.forwardStreamScaleWidth = scaleWidth
+        this.forwardStreamRegionArgs = [...regionArgs]
+        this.forwardStreamStarted = true
+        // 码率自适应（B-3）：周期采样发送积压，持续拥塞降档、长稳升档。
+        // 换档在 screen-stream 内部同步重启 ffmpeg（stop+start 同 tick，
+        // 本探针不会插进间隙）；推流停止（会话结束/对端断开/手动）后
+        // running=false，探针自停车并复位档位
+        let lastProbeBytes = 0
+        let probeTick = 0
+        const backlogProbe = setInterval(() => {
+          if (!this.screenStream.running) {
+            clearInterval(backlogProbe)
+            this.screenStreamCurrentTier = 0
+            this.streamCongestionScore = 0
+            return
+          }
+          // 发送速率遥测（每 8 个采样 ≈16s 一条）：ffmpeg 出了字节没有、
+          // ws 堵没堵，一眼可辨（真机排障：解码端收不到帧时先分段定位）
+          if (++probeTick % 8 === 0 && streamBytesSent !== lastProbeBytes) {
+            log.info(
+              `[screen-stream] 累计 ${(streamBytesSent / 1e6).toFixed(1)}MB，backlog ${conn.backlog()}B`
+            )
+            lastProbeBytes = streamBytesSent
+          }
+          const backlog = conn.backlog()
+          if (backlog > 1_000_000) {
+            this.streamCongestionScore = Math.min(3, this.streamCongestionScore + 1)
+          } else if (backlog < 100_000) {
+            this.streamCongestionScore = Math.max(-8, this.streamCongestionScore - 1)
+          } else {
+            this.streamCongestionScore = 0
+          }
+          // 3 个连续拥塞采样 → 降档；恢复分累积到 -8（约 30s 稳定）→ 升档
+          if (this.streamCongestionScore >= 3) {
+            this.streamCongestionScore = 0
+            this.screenStreamCurrentTier = Math.min(this.screenStreamCurrentTier + 1, 3)
+            this.screenStream.setTier(this.screenStreamCurrentTier)
+          } else if (this.streamCongestionScore <= -8 && this.screenStreamCurrentTier > 0) {
+            this.streamCongestionScore = 0
+            this.screenStreamCurrentTier -= 1
+            this.screenStream.setTier(this.screenStreamCurrentTier)
+          }
+        }, 2000)
+        sendTo('screen.stream.start', { w, h, scaleWidth })
+        log.info(`[screen-stream] 已为 ${peerId} 开启投屏${region ? `（${source === STREAM_SOURCE_VIRTUAL_DISPLAY ? '虚拟显示器' : '显示器'} ${region.w}x${region.h} @ ${region.x},${region.y}）` : '（全桌面）'}`)
+      }
+      this.streamRegion = region
+      if (source === STREAM_SOURCE_VIRTUAL_DISPLAY && region && this.opts.screenDdCapturePath) {
+        this.screenStream.startDd({
+          ffmpegPath,
+          ddCapturePath: this.opts.screenDdCapturePath,
+          onChunk,
+          rect: region,
+          scaleWidth,
+          onReady: ({ w, h }) => afterStarted(w, h)
+        })
+        // 注意：start 发在 onReady 里；就绪前失败走 screenStream.onEnded，
+        // 此时 forwardStreamStarted 仍为 false，不会误发 stop。
+      } else {
+        this.screenStream.start(ffmpegPath, onChunk, regionArgs, scaleWidth)
+        afterStarted(
+          region?.w ?? this.opts.inputVirtualScreen?.().w ?? 1920,
+          region?.h ?? this.opts.inputVirtualScreen?.().h ?? 1080
+        )
+      }
+    } catch (err) {
+      const tail = this.screenStream.lastErrors().join(' | ')
+      log.warn(`[screen-stream] 启动失败: ${String(err)} ${tail}`)
+      sendTo('screen.stream.error', { message: `投屏启动失败：${String(err)}` })
+    }
+  }
+
+  /**
+   * 清掉正向投屏归属（停流/断连/意外退出时调）。锁屏暂停记录不在
+   * 这里清——锁屏停流后恢复还要用它；对端 stop / 断连 / 意外退出
+   * 时调用方显式清 pausedForwardStream。
+   */
+  private clearForwardStreamState(): void {
+    this.forwardStreamPeerId = null
+    this.forwardStreamStarted = false
+  }
+
+  /**
+   * 锁屏：正向投屏暂停。gdigrab 在锁屏下抓不到画面（Winlogon 安全
+   * 桌面不可见，ffmpeg 报 error 5 / Access denied，2026-11-03 真机
+   * 复现），DD 同样看不到锁屏画面——与其让编码器空转报错，不如停
+   * 流并记下恢复参数，解锁后按原样重起；对端收到 screen.stream.stop，
+   * 画面收起，不会卡在最后一帧。反向流（平板→桌面）不受锁屏影响。
+   */
+  handleSessionLock(): void {
+    if (!this.screenStream.running || !this.forwardStreamPeerId) return
+    const peerId = this.forwardStreamPeerId
+    // 先记恢复参数，再停流清归属（暂停记录保留到解锁）
+    this.pausedForwardStream = {
+      peerId,
+      source: this.forwardStreamSource,
+      region: this.forwardStreamRegion ? { ...this.forwardStreamRegion } : null,
+      scaleWidth: this.forwardStreamScaleWidth,
+      regionArgs: [...this.forwardStreamRegionArgs]
+    }
+    this.screenStream.stop()
+    this.clearForwardStreamState()
+    this.peers.get(peerId)?.send('screen.stream.stop', { direction: STREAM_DIRECTION_FORWARD })
+    log.info(`[screen-stream] 电脑已锁屏，正向投屏已暂停（${peerId}），解锁后自动恢复`)
+  }
+
+  /**
+   * 解锁：恢复锁屏时暂停的正向投屏。会话已不在（对端断连/扩展屏会
+   * 话已结束）时不再恢复，只记日志；扩展屏恢复时区域以当前虚拟显
+   * 示器为准（锁屏期间显示拓扑可能变了）。
+   */
+  handleSessionUnlock(): void {
+    const paused = this.pausedForwardStream
+    this.pausedForwardStream = null
+    if (!paused) return
+    if (!this.peers.has(paused.peerId)) {
+      log.info('[screen-stream] 解锁后对端已断连，锁屏暂停的投屏不再恢复')
+      return
+    }
+    if (paused.source === STREAM_SOURCE_VIRTUAL_DISPLAY) {
+      const ext = this.extendCoordinator?.activeSession
+      if (!ext || ext.peerId !== paused.peerId) {
+        log.info('[screen-stream] 解锁后扩展屏会话已不在，锁屏暂停的投屏不再恢复')
+        return
+      }
+      this.startForwardStream(paused.peerId, STREAM_SOURCE_VIRTUAL_DISPLAY, { ...ext.virtualScreen }, paused.scaleWidth)
+    } else {
+      const active = this.inputCoordinator?.activeSession
+      if (!active || active.peerId !== paused.peerId) {
+        log.info('[screen-stream] 解锁后键鼠会话已不在，锁屏暂停的投屏不再恢复')
+        return
+      }
+      this.startForwardStream(paused.peerId, 'screen', paused.region, paused.scaleWidth, paused.regionArgs)
+    }
+    log.info(`[screen-stream] 解锁后正向投屏已恢复（${paused.peerId}）`)
+  }
+
   requestReverseScreenStream(
     peerId: string,
     scaleWidth = 1920
@@ -1778,7 +1953,7 @@ export class Host {
   }
 
   /** UI（被控端）：同意扩展屏请求。同意即创建虚拟显示器，失败不建会话 */
-  approveExtendControl(sessionId: string): { ok: boolean; error?: string } {
+  async approveExtendControl(sessionId: string): Promise<{ ok: boolean; error?: string }> {
     return this.extendCoordinator?.approve(sessionId) ?? { ok: false, error: '主机未启动' }
   }
 

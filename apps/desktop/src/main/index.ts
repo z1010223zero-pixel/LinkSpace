@@ -1,11 +1,12 @@
-import { app, BrowserWindow, clipboard, globalShortcut, Menu, screen, shell } from 'electron'
+import { app, BrowserWindow, clipboard, globalShortcut, Menu, powerMonitor, screen, shell } from 'electron'
 import { spawnSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { DeviceManager } from './device-manager'
 import { ScrcpyAdapter } from './scrcpy-adapter'
 import { registerIpc } from './ipc'
-import { locateBinaries } from './platform'
+import { locateBinaries, locateVirtualDisplayBinaries } from './platform'
+import { VirtualDisplayManager } from './extend/virtual-display'
 import { log } from './log'
 import { Host } from './host'
 import { ReverseWindowManager } from './reverse-window'
@@ -73,6 +74,36 @@ function locateFfmpeg(): string | undefined {
   return undefined
 }
 
+// 显示器枚举（物理像素）：gdigrab 抓取、SendInput 归一化、DD 帧源与
+// 虚拟显示器差分都以物理像素为基准（GetSystemMetrics 系，实测虚拟屏
+// 6720x2160），而 Electron bounds 是 DIP 逻辑分辨率（200%/175% 缩放
+// 下各差 2/1.75 倍）——必须乘回 scaleFactor，否则选屏抓区域偏、触控
+// 映射错位、虚拟显示器矩形对不上 DD 输出。
+function listPhysicalDisplays(): Array<{ x: number; y: number; w: number; h: number }> {
+  return screen
+    .getAllDisplays()
+    .map((d) => ({
+      x: Math.round(d.bounds.x * d.scaleFactor),
+      y: Math.round(d.bounds.y * d.scaleFactor),
+      w: Math.round(d.bounds.width * d.scaleFactor),
+      h: Math.round(d.bounds.height * d.scaleFactor)
+    }))
+    .sort((a, b) => a.x - b.x || a.y - b.y)
+}
+
+// 虚拟显示器管理器（线 3，3.2-1）：approve 时 spawn swd-host 创建，
+// 会话结束时销毁。swd-host/dd-capture 缺失时创建直接失败（扩展请求
+// 回 session.reject），不影响镜像投屏与键鼠会话。
+const nativeDisplayBins = locateVirtualDisplayBinaries()
+log.info(
+  `虚拟显示器：swd-host=${nativeDisplayBins.swdHost ?? '缺失（扩展屏不可用）'}，` +
+    `dd-capture=${nativeDisplayBins.ddCapture ?? '缺失（扩展屏投屏不可用）'}`
+)
+const virtualDisplayManager = new VirtualDisplayManager({
+  swdHostPath: nativeDisplayBins.swdHost,
+  listDisplays: listPhysicalDisplays
+})
+
 const host = new Host({
   displayName: 'LinkSpace Desktop',
   deviceType: 'win',
@@ -80,34 +111,15 @@ const host = new Host({
   // scrcpy 投屏走 adb 不走局域网控制通道，但保持声明一致
   caps: ['file', 'clipboard', 'scrcpy', 'input'],
   inputLocalScreen,
-  // 多显示器枚举（B-2 选择器）：gdigrab 抓取与 SendInput 归一化都以
-  // **物理**像素为基准（GetSystemMetrics 系，实测虚拟屏 6720x2160），
-  // 而 Electron bounds 是 DIP 逻辑分辨率（200%/175% 缩放下各差 2/1.75
-  // 倍）——必须乘回 scaleFactor，否则选屏抓区域偏、触控映射错位
-  inputDisplays: win32
-    ? () => {
-        const { screen } = require('electron') as {
-          screen?: {
-            getAllDisplays: () => Array<{
-              bounds: { x: number; y: number; width: number; height: number }
-              scaleFactor: number
-            }>
-          }
-        }
-        return (
-          screen
-            ?.getAllDisplays()
-            .map((d) => ({
-              x: Math.round(d.bounds.x * d.scaleFactor),
-              y: Math.round(d.bounds.y * d.scaleFactor),
-              w: Math.round(d.bounds.width * d.scaleFactor),
-              h: Math.round(d.bounds.height * d.scaleFactor)
-            }))
-            .sort((a, b) => a.x - b.x || a.y - b.y) ?? []
-        )
-      }
-    : undefined,
+  inputDisplays: win32 ? listPhysicalDisplays : undefined,
   screenFfmpegPath: locateFfmpeg(),
+  // 虚拟显示器帧源（线 3，3.2-1）：source=virtual-display 的投屏请求
+  // 由 screen-stream.ts 的 startDd 经 dd-capture 取帧
+  screenDdCapturePath: nativeDisplayBins.ddCapture ?? undefined,
+  // 扩展屏创建/销毁出口（线 3，3.2-2）：approve 时创建虚拟显示器，
+  // 会话结束的任何路径都销毁
+  extendCreateVirtualDisplay: (preferred) => virtualDisplayManager.create(preferred),
+  extendDestroyVirtualDisplay: () => virtualDisplayManager.destroy(),
   inputVirtualScreen: win32 ? () => win32.virtualScreen() : undefined,
   inputInject: inputSink
     ? (events) => {
@@ -415,6 +427,12 @@ app.whenReady().then(async () => {
   } catch (err) {
     log.error(`主机启动失败: ${String(err)}`)
   }
+
+  // 锁屏/解锁（线 3 收尾）：锁屏下 gdigrab 与 DD 都抓不到画面
+  // （Winlogon 安全桌面不可见，ffmpeg 报 error 5），Host 收到锁屏
+  // 即停正向投屏并记恢复参数，解锁后按原样重起；反向流不受影响。
+  powerMonitor.on('lock-screen', () => host.handleSessionLock())
+  powerMonitor.on('unlock-screen', () => host.handleSessionUnlock())
 
   startClipboardSync()
   startInputLoop()

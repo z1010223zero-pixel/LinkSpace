@@ -1,19 +1,24 @@
 // 平板当扩展屏无头测试（线 3，协议 4.3，sessionType: 'display-extend'）。
 //
-// 两层：
+// 三层：
 //   1. 纯逻辑单测——扩展参数解码、虚拟显示器矩形解码、被控/控制状态机。
 //      覆盖门禁（未配对拒绝）、创建失败不建会话、终止路径全销毁虚拟
-//      显示器、与 input 会话解耦（状态机层面各占独立槽位）。
+//      显示器、与 input 会话解耦（状态机层面各占独立槽位），以及创建
+//      进行中的取消（deny/断连/撤销时已建成的显示器立即销毁）。
 //   2. 双 Host 环路——真实的 WebSocket 控制通道上跑完整的
 //      「请求 → 确认 → 会话建立 → input 会话并行 → input 结束不影响
 //      扩展 → 扩展退出销毁虚拟显示器」，外加未信任设备拒绝。
+//   3. VirtualDisplayManager 与 startDd——以 node 写的 fake swd-host
+//      （打 SWD-READY/APPEARED 行）验证管理器协议解析、模式选定与
+//      超时失败；startDd 以不存在的 dd-capture 路径验证失败走 onEnded。
 //
 // 真实的虚拟显示器创建（SWD + 驱动）在后台会话里不可用（须测试签名 +
 // 关 Secure Boot），创建/销毁层以注入的 fake 替代：验证的是「对的
 // 会话在对的时机创建/销毁虚拟显示器」，驱动本身的正确性留真机走查
-// （2026-10-30 PoC 已验证创建 + DD 取帧）。
+// （2026-10-30 PoC 已验证创建 + DD 取帧；swd-host 的 READY→TIMEOUT
+// 路径 2026-11-03 已在真机上实测，见 native/swd-host/README.md）。
 
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { generate } from 'selfsigned'
@@ -28,6 +33,8 @@ import {
   decodeVirtualScreen,
   type ExtendPreferredSize
 } from './extend/session'
+import { VirtualDisplayManager } from './extend/virtual-display'
+import { ScreenStreamService } from './screen-stream'
 
 let failures = 0
 
@@ -102,7 +109,7 @@ function testDecode(): void {
 function makeCoordinator(opts: {
   now?: () => number
   ttlMs?: number
-  create?: (preferred: ExtendPreferredSize | null) => { ok: true; screen: { x: number; y: number; w: number; h: number } } | { ok: false; reason: string }
+  create?: (preferred: ExtendPreferredSize | null) => Promise<{ ok: true; screen: { x: number; y: number; w: number; h: number } } | { ok: false; reason: string }>
 } = {}): {
   coord: DisplayExtendSessionCoordinator
   sent: SentMsg[]
@@ -114,7 +121,7 @@ function makeCoordinator(opts: {
   const requests: string[] = []
   const create =
     opts.create ??
-    ((preferred: ExtendPreferredSize | null) => {
+    (async (preferred: ExtendPreferredSize | null) => {
       state.created++
       const w = preferred?.width ?? 2560
       const h = preferred?.height ?? 1440
@@ -143,7 +150,7 @@ function startPayload(
   return { sessionId, sessionType: 'display-extend', params: { displayName: 'Alpha', ...params } }
 }
 
-function testCoordinator(): void {
+async function testCoordinator(): Promise<void> {
   console.log('\n=== 纯逻辑：被控端状态机 ===\n')
 
   // 1. 未信任设备：直接拒绝，不进 pending
@@ -168,7 +175,7 @@ function testCoordinator(): void {
     coord.onStart('dev_B', startPayload('e3', { width: 2560, height: 1440 }))
     check('合法请求进入待确认', coord.pendingRequest?.sessionId === 'e3')
     check('批准前不创建虚拟显示器', state.created === 0)
-    const r = coord.approve('e3')
+    const r = await coord.approve('e3')
     check('批准成功', r.ok)
     check('批准时创建虚拟显示器', state.created === 1)
     check(
@@ -185,10 +192,10 @@ function testCoordinator(): void {
   // 4. 创建失败：会话不建立，回 reject
   {
     const { coord, sent, state } = makeCoordinator({
-      create: () => ({ ok: false as const, reason: 'virtual display unavailable' })
+      create: async () => ({ ok: false as const, reason: 'virtual display unavailable' })
     })
     coord.onStart('dev_B', startPayload('e4'))
-    const r = coord.approve('e4')
+    const r = await coord.approve('e4')
     check('创建失败时批准返回失败', !r.ok && r.error === 'virtual display unavailable')
     check('创建失败时无活动会话', coord.activeSession === null)
     check('创建失败回 reject（不 accept）', sent.some((m) => m.type === 'session.reject' && m.payload.reason === 'virtual display unavailable'))
@@ -207,7 +214,7 @@ function testCoordinator(): void {
     const { coord: c2, sent: s2 } = makeCoordinator({ now: () => t, ttlMs: 1000 })
     c2.onStart('dev_B', startPayload('e6'))
     t += 1500
-    const r = c2.approve('e6')
+    const r = await c2.approve('e6')
     check('过期请求批准失败', !r.ok && r.error === '请求已过期')
     check('过期请求自动回 reject', s2.some((m) => m.type === 'session.reject' && m.payload.reason === 'expired'))
   }
@@ -216,7 +223,7 @@ function testCoordinator(): void {
   {
     const { coord, sent, state } = makeCoordinator()
     coord.onStart('dev_B', startPayload('e7'))
-    coord.approve('e7')
+    await coord.approve('e7')
     coord.onStop('dev_B', { sessionId: 'e7' })
     check('对端 stop 后会话结束', coord.activeSession === null)
     check('对端 stop 后虚拟显示器销毁', state.destroyed === 1)
@@ -224,19 +231,19 @@ function testCoordinator(): void {
 
     const { coord: c2, state: st2 } = makeCoordinator()
     c2.onStart('dev_B', startPayload('e8'))
-    c2.approve('e8')
+    await c2.approve('e8')
     c2.onPeerDisconnected('dev_B')
     check('对端断连终止会话并销毁显示器', c2.activeSession === null && st2.destroyed === 1)
 
     const { coord: c3, state: st3 } = makeCoordinator()
     c3.onStart('dev_B', startPayload('e9'))
-    c3.approve('e9')
+    await c3.approve('e9')
     c3.onTrustRevoked('dev_B')
     check('信任撤销立即掐断并销毁显示器', c3.activeSession === null && st3.destroyed === 1)
 
     const { coord: c4, sent: s4, state: st4 } = makeCoordinator()
     c4.onStart('dev_B', startPayload('e10'))
-    c4.approve('e10')
+    await c4.approve('e10')
     c4.terminate()
     check('本机终止后无活动会话', c4.activeSession === null)
     check('本机终止销毁显示器并通知对端', st4.destroyed === 1 && s4.some((m) => m.type === 'session.stop'))
@@ -246,7 +253,7 @@ function testCoordinator(): void {
   {
     const { coord, sent } = makeCoordinator()
     coord.onStart('dev_B', startPayload('e11'))
-    coord.approve('e11')
+    await coord.approve('e11')
     coord.onStart('dev_B', startPayload('e12'))
     check('活动期间新请求被拒', sent.some((m) => m.type === 'session.reject' && m.payload.reason === 'resource busy'))
     check('活动会话不受影响', coord.activeSession?.sessionId === 'e11')
@@ -256,6 +263,28 @@ function testCoordinator(): void {
       '同一会话 start 重发幂等重回 accept',
       sent.filter((m) => m.type === 'session.accept').length === acceptsBefore + 1
     )
+  }
+
+  // 8. 创建进行中取消：approve 未落定就 deny，落定后已建成的显示器
+  // 立即销毁，不 accept、不留活动会话
+  {
+    let resolveCreate!: (v: { ok: true; screen: { x: number; y: number; w: number; h: number } }) => void
+    const deferred = new Promise<{ ok: true; screen: { x: number; y: number; w: number; h: number } }>(
+      (r) => {
+        resolveCreate = r
+      }
+    )
+    const { coord, sent, state } = makeCoordinator({ create: () => deferred })
+    coord.onStart('dev_B', startPayload('e13'))
+    const approveP = coord.approve('e13')
+    coord.deny('e13')
+    resolveCreate({ ok: true as const, screen: { x: 1920, y: 0, w: 2560, h: 1440 } })
+    const r = await approveP
+    check('创建中拒绝后批准返回取消', !r.ok && r.error === '请求已取消')
+    check('创建中拒绝后已建成的显示器被销毁', state.destroyed === 1)
+    check('创建中拒绝后无 accept', !sent.some((m) => m.type === 'session.accept'))
+    check('创建中拒绝后无活动会话', coord.activeSession === null)
+    check('创建中拒绝后已回 reject', sent.some((m) => m.type === 'session.reject' && m.payload.reason === 'denied by user'))
   }
 }
 
@@ -357,7 +386,7 @@ async function testE2e(): Promise<void> {
     bind: '127.0.0.1',
     inputLocalScreen: () => ({ w: 1000, h: 500 }),
     // 虚拟显示器 fake：创建记数并回固定矩形，销毁记数
-    extendCreateVirtualDisplay: (preferred) => {
+    extendCreateVirtualDisplay: async (preferred) => {
       createdB++
       return { ok: true as const, screen: { x: 1000, y: 0, w: preferred?.width ?? 2560, h: preferred?.height ?? 1440 } }
     },
@@ -409,7 +438,7 @@ async function testE2e(): Promise<void> {
     check('确认前无活动扩展会话', B.extendedForPeer() === null && A.extendingToPeer() === null)
     check('确认前未创建虚拟显示器', createdB === 0)
 
-    const approved = B.approveExtendControl(req.sessionId)
+    const approved = await B.approveExtendControl(req.sessionId)
     check('被控端批准', approved.ok)
     check('批准时创建虚拟显示器', createdB === 1)
     const ext = await reqPromise
@@ -455,13 +484,139 @@ async function testE2e(): Promise<void> {
   }
 }
 
+// ---------- VirtualDisplayManager：fake swd-host ----------
+
+// fake swd-host（node 脚本）：按 argv[2] 的模式打协议行。
+//   ok     → READY → APPEARED 2，stdin EOF 后打 CLOSED 退出 0
+//   slow   → READY/APPEARED 各延迟几百毫秒（取消路径用）
+//   silent → 只打 READY，永不 APPEARED（超时路径用）
+//   fail   → stderr 打 SwDeviceCreate 失败，退出 1
+const FAKE_SWD_HOST_SRC = `const mode = process.argv[2] ?? 'ok'
+const out = (s) => process.stdout.write(s + '\\n')
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+if (mode === 'fail') {
+  process.stderr.write('[swd-host] SwDeviceCreate failed 0x80070005\\n')
+  process.exit(1)
+}
+await sleep(mode === 'slow' ? 500 : 50)
+out('SWD-READY')
+if (mode === 'silent') {
+  await new Promise(() => undefined)
+}
+await sleep(mode === 'slow' ? 300 : 50)
+out('SWD-DISPLAY-APPEARED 2')
+process.stdin.on('end', () => {
+  out('SWD-CLOSED 1 2')
+  process.exit(0)
+})
+process.stdin.resume()
+`
+
+async function testVirtualDisplayManager(): Promise<void> {
+  console.log('\n=== VirtualDisplayManager：fake swd-host ===\n')
+
+  const dir = await mkdtemp(join(tmpdir(), 'linkspace-vdm-'))
+  try {
+    const fakePath = join(dir, 'fake-swd-host.mjs')
+    await writeFile(fakePath, FAKE_SWD_HOST_SRC)
+
+    // 1. 二进制缺失直接失败，不 spawn
+    {
+      const m = new VirtualDisplayManager({ swdHostPath: null, listDisplays: () => [] })
+      const r = await m.create(null)
+      check('swd-host 缺失时创建失败', !r.ok && r.reason === 'virtual display unavailable')
+    }
+
+    // 2. 正常创建：差分定位新显示器，按最接近请求尺寸挑
+    {
+      let calls = 0
+      const before = [{ x: 0, y: 0, w: 1920, h: 1080 }]
+      const after = [
+        { x: 0, y: 0, w: 1920, h: 1080 },
+        { x: 1920, y: 0, w: 2560, h: 1440 },
+        { x: 1920, y: 0, w: 1024, h: 768 }
+      ]
+      const m = new VirtualDisplayManager({
+        swdHostPath: process.execPath,
+        swdHostArgs: [fakePath, 'ok'],
+        listDisplays: () => (++calls === 1 ? before : after)
+      })
+      const r = await m.create({ width: 2560, height: 1440 })
+      check('fake swd-host 创建成功', r.ok)
+      check('按最接近请求尺寸挑到 2560x1440', r.ok && r.screen.w === 2560 && r.screen.x === 1920)
+      check('创建后 active', m.active)
+      m.destroy()
+      await sleep(500)
+      check('销毁后 inactive', !m.active)
+    }
+
+    // 3. swd-host 失败退出（0x80070005）：原因带 stderr 尾巴
+    {
+      const m = new VirtualDisplayManager({
+        swdHostPath: process.execPath,
+        swdHostArgs: [fakePath, 'fail'],
+        listDisplays: () => []
+      })
+      const r = await m.create(null)
+      check('swd-host 退出 1 时创建失败', !r.ok)
+      check('失败原因带 SwDeviceCreate 报错', !r.ok && r.reason.includes('0x80070005'))
+    }
+
+    // 4. APPEARED 不来：短超时内失败，不挂死
+    {
+      const m = new VirtualDisplayManager({
+        swdHostPath: process.execPath,
+        swdHostArgs: [fakePath, 'silent'],
+        listDisplays: () => [],
+        readyTimeoutMs: 2000,
+        appearTimeoutMs: 500
+      })
+      const t0 = Date.now()
+      const r = await m.create(null)
+      check('APPEARED 超时创建失败', !r.ok)
+      check('超时失败不挂死（<5s）', Date.now() - t0 < 5000)
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+}
+
+// ---------- startDd：帧源失败路径 ----------
+
+async function testStartDdFailure(): Promise<void> {
+  console.log('\n=== startDd：帧源失败路径 ===\n')
+
+  const svc = new ScreenStreamService()
+  let ended = false
+  svc.onEnded = () => {
+    ended = true
+  }
+  // 不存在的 dd-capture 路径：spawn 报 error，走 onEnded，不挂死
+  svc.startDd({
+    ffmpegPath: 'ffmpeg',
+    ddCapturePath: join(tmpdir(), 'linkspace-no-such-dd-capture.exe'),
+    onChunk: () => undefined,
+    rect: { x: 0, y: 0, w: 1920, h: 1080 }
+  })
+  try {
+    await waitFor(() => (ended ? true : undefined), 5000)
+  } catch {
+    /* 超时即失败，check 会报 */
+  }
+  check('dd-capture 不存在时 onEnded 触发', ended)
+  check('dd-capture 不存在时 running 为 false', !svc.running)
+  svc.stop()
+}
+
 async function main(): Promise<void> {
   console.log('\n=== LinkSpace 扩展屏（display-extend）测试 ===\n')
 
   testDecode()
-  testCoordinator()
+  await testCoordinator()
   await testController()
   await testE2e()
+  await testVirtualDisplayManager()
+  await testStartDdFailure()
 
   console.log(`\n=== 结果：${failures === 0 ? '全部通过' : `${failures} 项失败`} ===\n`)
   process.exit(failures === 0 ? 0 : 1)
