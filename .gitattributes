@@ -12,3 +12,5 @@
 *.sys binary
 *.dll binary
 *.exe binary
+# Windows 批处理脚本必须 CRLF，否则 cmd.exe 解析失败
+native/winhelper/build.cmd text eol=crlf
