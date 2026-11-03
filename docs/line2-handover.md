@@ -137,7 +137,7 @@ git log --oneline -1   # 应为 a9436b1
 
 > 本批在未阻塞项两波之后，同一位线 3 开发员接手做完。提交：`3c6f2f1`（dd-capture/swd-host 入仓）、`97c5c9f`（VirtualDisplayManager + DD 帧源接线 + 锁屏暂停投屏）、`edc414f`（Android 扩展屏画面流接线）、`eb3ea7a`（反向流确认框修复）、`126012d`（FGS 根因 + 无障碍假阳性检测 + 端口日志）、`87aa546`（h264 注释 A/B）、`a8491ae`（触控板页视觉重排）。详见任务清单 §完成状态 ⑨–⑬。
 
-- **dd-capture/swd-host（3.2-1 半成品已接完）**：`native/dd-capture/`（Desktop Duplication 取帧，stdout 原始 BGRA）与 `native/swd-host/`（SwDeviceCreate 建 IddSampleDriver 设备）只入源码/README/build.cmd。swd-host 修了一个真 bug：`SnapshotOutputCount` 在 EnumOutputs 返回 `DXGI_ERROR_NOT_CURRENTLY_AVAILABLE`（会话 0）时对空指针调 GetDesc，直接 AV。验证：dd-capture 交互会话出帧（2 帧 = 21,659,168 字节，退出 0）；swd-host 会话 0 修复后 SWD-READY → SWD-DISPLAY-TIMEOUT → SWD-CLOSED 退出 0，交互会话 SwDeviceCreate 报 0x80070005（需管理员）。**SWD-DISPLAY-APPEARED 至今未在真机上出现**（Secure Boot 开 + testsigning 关，驱动无法加载）。
+- **dd-capture/swd-host（3.2-1 半成品已接完）**：`native/dd-capture/`（Desktop Duplication 取帧，stdout 原始 BGRA）与 `native/swd-host/`（SwDeviceCreate 建 IddSampleDriver 设备）只入源码/README/build.cmd。swd-host 修了一个真 bug：`SnapshotOutputCount` 在 EnumOutputs 返回 `DXGI_ERROR_NOT_CURRENTLY_AVAILABLE`（会话 0）时对空指针调 GetDesc，直接 AV。验证：dd-capture 交互会话出帧（2 帧 = 21,659,168 字节，退出 0）；swd-host 会话 0 修复后 SWD-READY → SWD-DISPLAY-TIMEOUT → SWD-CLOSED 退出 0，交互会话 SwDeviceCreate 报 0x80070005（需管理员）。**SWD-DISPLAY-APPEARED 至今未在真机上出现**（Secure Boot 开 + testsigning 关，驱动无法加载）。2026-11-03 用户定线 3 走复用开源 VDD（见 `docs/line3-vdd.md`），attestation 路线已弃；swd-host/IddSampleDriver 留仓备查。
 - **VirtualDisplayManager + DD 帧源接线（3.2-1，`97c5c9f`）**：`VirtualDisplayManager`（spawn swd-host，等 SWD-READY 10s / SWD-DISPLAY-APPEARED 25s，显示器差分挑屏）+ `screen-stream.ts` 的 `startDd`（DD 帧 → ffmpeg rawvideo BGRA → 编码 → WS）+ 锁屏停流/解锁恢复（`handleSessionLock`/`handleSessionUnlock`，powerMonitor lock-screen/unlock-screen 接线）+ `LINKSPACE_STREAM_ENCODER` 排障覆盖。桌面验证：typecheck 0 + verify:extend/input/binding/transfer/pairing/heartbeat/clipboard/net/layout 全过 + verify:protocol 128 项 0 失败 4 警告 + build 通过。诚实缺口：打包 extraResources 未补；startDd 的真实 DD 帧 → ffmpeg 编码管道端到端未跑。
 - **Android 扩展屏画面流接线（3.2-3，`edc414f`）**：`requestScreenStream` 加 source/force 参数；displayExtend 会话一建立就自动请求虚拟显示器画面流；扩展屏流断线重连；换档不切回镜像流。触控映射链无需改 tablet 侧代码（`streamRegion=virtualScreen` 是关键）。限制：扩展屏画面本身不需要 input 会话，但画面上的触控回传要经过 input 会话，点按需先建立键鼠控制。
 - **反向流确认框修复（`eb3ea7a`）**：MainScreen 在 input active 时整屏切触控板并 return，挂在后面的两个确认框永远到不了组合；两个确认框提到 early return 之前，盖在触控板之上。
@@ -146,7 +146,7 @@ git log --oneline -1   # 应为 a9436b1
 - **触控板页视觉重排（`a8491ae`，用户追加）**：只改视觉，不动行为。TouchpadScreen 按 LinkSpaceTheme 重排（标题 titleLarge + 在线绿点、“结束控制”改危险红描边按钮、字号/间距进 token、触控区包 DarkStreamScheme 深色、“按住拖拽”激活态改品牌深蓝 BrandPressed）；MainActivity 把触控板包进 LinkSpaceTheme（early return 在 AppNavShell 的主题之外，触控板此前一直吃默认 M3 紫色；只包主题，不动 early return 的条件与 return 逻辑）；LinkSpaceTheme 的 LightScheme 补 secondary/secondaryContainer 为品牌浅蓝（#EAF0FF）。真机截屏目视确认品牌蓝全套；Esc 键注入桌面 vk=27 正常；单测 111 项 0 失败；clean 编译警告仅基线 4 条，改动文件 0 警告。
 - **2.6 走查部分结果（2026-11-03，真机）**：反向流 E2E 已打通（反向输入控制已建立，input.state='active'）。通过：10.1 单击、10.4 拖拽/滑动、10.6 右键返回、10.7 中键 Home、键盘英文（"hello"、退格、Ctrl+A）、B2 成品输入、C 粘贴、剪贴板平板→桌面、桌面→平板同步、断开恢复。混合/未定论：B1 拼音直通（URL 地址栏里候选栏跟随不可靠、空格不选词；纯文本字段未测）。失败：Ctrl+V 粘贴（反向输入的 Ctrl+V 组合键不触发平板粘贴）。**新发现的重大阻塞项：反向流画面冻结——反向窗口 canvas 只解出首帧（framesDecoded 恒为 1），bytesReceived 持续增长到 102MB；桌面 ffmpeg 无报错、droppedBytes=0；故障在平板编码输出还是桌面 ffmpeg 未定位，需 h264 落盘 + 离线解码定论。**
 - **验证基线（分支头 `a8491ae`）**：桌面 build + typecheck 0 + verify:input/binding/extend 全过 + verify:protocol 128 项 0 失败 4 警告；Android builder（`/data/home/linkspace-build-ls3b`，头 87aa546）BUILD SUCCESSFUL（35s），11 套件 111 项单测 0 失败，APK 42,202,292 字节；Windows 本地 clean 编译警告仅基线 4 条。最新 APK（触控板重排）：Windows 本地 42,552,063 字节（2026-11-03 17:56）。
-- **仍阻塞**：2.6 剩余项、反向流画面冻结 bug、PC 锁屏抓屏应用级验证（ffmpeg 级 gdigrab error 5 已复现，应用级锁屏/解锁各一次待用户解锁配合）、线 3 的 3.3（热插拔/睡眠恢复/驱动卸载/attestation）与 3.4 联动验证、软编软解优化。attestation 尚未走通（需 EV 代码签名证书与硬件开发人员中心账号，均未采购/注册）；Secure Boot 阻塞（当前机器 Secure Boot 开 + testsigning 关，驱动无法加载）。
+- **仍阻塞**：2.6 剩余项、反向流画面冻结 bug、PC 锁屏抓屏应用级验证（ffmpeg 级 gdigrab error 5 已复现，应用级锁屏/解锁各一次待用户解锁配合）、线 3 的 3.3（热插拔/睡眠恢复/驱动卸载，按 VDD 能力重验）与 3.4 联动验证、软编软解优化。线 3 驱动路线（2026-11-03 用户定）：复用开源 VDD（MIT，25.7.23，SignPath 签名），不买 EV 证书、不走 attestation，attestation 路线已弃；VDD 已在 zero 上验证可用（Secure Boot 开、testsigning 关，未改基线、未重启）。
 
 ---
 
@@ -171,7 +171,7 @@ git log --oneline -1   # 应为 a9436b1
 - **2.4-2 断线恢复**：控制链路断开后平板侧恢复本机输入、不卡键、不残留注入状态；断网/息屏/锁屏后恢复本机输入正常。入口：`ControlledInputSession.kt` + `LinkSpaceService.kt` 断连路径；验收：`verify:heartbeat` 级别的断线用例有无头或真机记录。**2026-11-03 已验**：点“断开”后反向窗口关闭、平板发 screen.stream.stop + session.stop、桌面日志“反向投屏已停：本机停止反向投屏”，平板恢复本机输入（Chrome 地址栏内容完整）。断网/息屏/重启/长挂机恢复仍未测。
 - **2.4-3 剪贴板防回环**：电脑与平板两套剪贴板同步不互推回环（scrcpy 与 LinkSpace 两套同步并存时的风险见 `docs/scrcpy-manual-checklist.md` §3.6）。验收：双向各复制一次，内容各到对端一次，不循环放大；超 512 KiB 按线 1 口径处理。**2026-11-03 已验**：平板→桌面（桌面剪贴板收到 SYNCCHECK999）、桌面→平板同步（桌面日志“剪贴板已同步到 1 台设备”）；回环未见（桌面剪贴板只收到一次，未循环放大）。Ctrl+V 粘贴键未生效是输入问题，不是同步问题。
 - **PC 锁屏抓屏（应用级验证，待用户解锁配合）**：ffmpeg 级已复现——会话 0 下 `ffmpeg -f gdigrab -i desktop` 报 `Failed to capture image (error 5)`（无可抓桌面时 Access Denied，锁屏同理）；应用级锁屏停流/解锁恢复代码已在 `97c5c9f`（`handleSessionLock`/`handleSessionUnlock`，powerMonitor lock-screen/unlock-screen 接线）。真机锁屏/解锁各一次尚未验证：**锁屏测试放 zero 侧工作末尾，需用户自己解锁（无法远程解锁），通过 parent 请用户解锁配合**。
-- **线 3 的 3.3/3.4**：热插拔/睡眠恢复/驱动卸载/attestation/联动验证均未做，均被 Secure Boot 阻塞（当前机器 Secure Boot 开 + testsigning 关，IddSampleDriver 无法加载，SWD-DISPLAY-APPEARED 未出现）。attestation 尚未走通（需 EV 代码签名证书与硬件开发人员中心账号，均未采购/注册）；测试签名 + 关 Secure Boot 只是验证手段，不是发行方案。
+- **线 3 的 3.3/3.4**：热插拔/睡眠恢复/驱动卸载/联动验证均未做（3.3 按 VDD 能力重验；自研 IddSampleDriver 路线已弃，SWD-DISPLAY-APPEARED 未出现的问题随路线切换不再适用）。2026-11-03 用户定复用开源 VDD（MIT，25.7.23，SignPath 签名），不买 EV 证书、不走 attestation。
 
 ## 4. 构建与验证手册
 
@@ -262,10 +262,10 @@ ANDROID_HOME=/data/home/android-sdk GRADLE_USER_HOME=/data/home/.gradle \
 | **前台服务停止超时根因——已修（2026-11-03，`126012d`）** | `LinkSpaceForegroundService` 是 START_STICKY 且永不停，系统后台重起后限时要求停止 → `ForegroundServiceDidNotStopInTimeException` → 进程被杀 → 无障碍服务跟着死、dumpsys 进 Crashed 列表。已修为 START_NOT_STICKY + onTaskRemoved 停服务 + null-intent 守卫 + onDestroy 停前台；平板复核 dumpsys 三项标准（Bound 含服务、Crashed 为空、accessibility_enabled=1）已通过 |
 | **无障碍假阳性检测——已修（2026-11-03，`126012d`）** | 应用横条只读已启用列表判断，无障碍服务崩了也显示“已开启”。`isEnabled()` 改以实际绑定状态为准（`instance != null` 或 `AccessibilityManager.getEnabledAccessibilityServiceList` 含本服务）。每次重装 APK、重启应用或系统杀进程后，都要重新核对 dumpsys 的真实绑定状态，不要只信应用横条 |
 | **平板端口是临时双栈通配符（2026-11-03 已核实）** | TransferServer 用端口 0（临时）+ 通配符绑定，走 IPv6 `::` 双栈；/proc/net/tcp（IPv4 表）里没有是正常的，/proc/net/tcp6 里有 `::` 监听；端口每次服务重起都变（39547 是重启前的旧端口）。日志已改印实际绑定地址 |
-| **attestation 签名未走通（线 3 阻塞项）** | 需 EV 代码签名证书与硬件开发人员中心账号，均未采购/注册；`technical-validation.md` §3.3.1 称 attestation 经微软硬件开发者中心提交、免费、无 EV 证书要求，EV 仅走不通时备选。测试签名 + 关 Secure Boot 只是验证手段，不是发行方案 |
-| **Secure Boot 阻塞线 3 真机验证** | 当前机器 Secure Boot 开 + testsigning 关，IddSampleDriver 无法加载，SWD-DISPLAY-APPEARED 未出现；3.3（热插拔/睡眠恢复/驱动卸载）与 3.4 联动验证均被阻塞 |
+| **线 3 驱动路线已定为 VDD（2026-11-03）** | 复用开源 VDD（MIT，25.7.23，SignPath 签名，见 `docs/line3-vdd.md`），不买 EV 证书、不走 attestation；attestation 路线已弃。`technical-validation.md` §3.3.1 称 attestation 免费、无 EV 证书要求，与实测对不上（该说法已作废）。自研 IddSampleDriver 留仓备查 |
+| **Secure Boot 不再阻塞线 3（VDD 路线已验证）** | VDD 已在 zero 上验证可用（Secure Boot 开、testsigning 关，未改基线、未重启；监视器枚举 2→3，Generic Monitor (VDD by MTT) 出现后恢复原状）。3.3（热插拔/睡眠恢复/驱动卸载）与 3.4 联动验证待按 VDD 能力重验 |
 | **中文输入通道已定 + 已实现** | 2026-11-03 合进分支（`8b36ed4`）：B1/B2/C 三通道 + `input.error`；B1 能否成立待 2.6 真机走查 | 已实现，见 §2 新增 |
-| **信任设备自动放行未定** | 无人值守的 opt-in 形态，是否做/何时做，需用户以后定 | 不在本批动手 |
+| **信任设备清单——已实现（2026-11-03，`7adbb45`）** | 用户定加信任清单（受信设备跳过确认、可撤销，默认永久有效），替代每次手动确认；确认框加「信任此设备，以后不再询问」，设置页可查看/撤销单个/一键清空；系统 MediaProjection 授权框仍要用户点 | 已实现，真机验证待平板无线调试恢复后做 |
 | **from 绑定与 id 去重已实现** | 2026-11-03 合进分支（`f5a9af7`）：fail-closed 绑定 + 每连接 1024 条去重；protocol.md §3 缺口已关闭 | 已实现，见 §2 新增 |
 | **mvp-acceptance.md 线 2 验收组已补** | 2026-11-03 合进分支（`d71c45d`）：第 10 组 10.1–10.16 | 已实现，见 §2 新增 |
 
