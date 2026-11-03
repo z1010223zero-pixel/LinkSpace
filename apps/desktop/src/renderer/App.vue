@@ -980,6 +980,11 @@ const VDD_INSTALL_ERRORS: Record<string, { title: string; advice: string; showDe
     title: '安装后复核未通过',
     advice: '安装命令返回成功，但驱动库里没有期望版本，安装未生效，请重试。',
     showDetail: true
+  },
+  'node-create-failed': {
+    title: '设备节点创建失败',
+    advice: '驱动已装进系统驱动库，但虚拟显示器节点没建起来；请重试安装，仍失败请检查设备管理器或重启后再试。',
+    showDetail: true
   }
 }
 
@@ -1021,7 +1026,7 @@ async function installVddDriver(): Promise<void> {
     const st = vddStatus.value
     const nodeNote =
       st && !st.devicePresent
-        ? '设备节点尚未创建：驱动已装好，但虚拟显示器节点还需另一步创建（开发中），扩展屏暂不可用。'
+        ? '注意：安装返回成功，但复核未检测到设备节点，请点「刷新状态」确认；仍无节点请重试安装。'
         : ''
     vddMessage.value = {
       text:
@@ -1718,8 +1723,7 @@ onBeforeUnmount(() => {
                 </div>
               </dl>
               <p v-if="vddStatus && vddStatus.installed && !vddStatus.devicePresent" class="vdd-note">
-                设备节点尚未创建：驱动已装好，但虚拟显示器节点还需另一步创建（开发中，见
-                docs/line3-vdd.md「已知缺口」），扩展屏暂不可用。
+                设备节点不存在：驱动已装好，但虚拟显示器节点尚未创建（例如由旧版本装的驱动）；再点一次「安装虚拟显示器驱动」即可创建节点。
               </p>
               <div class="settings-row">
                 <div class="settings-row__text">

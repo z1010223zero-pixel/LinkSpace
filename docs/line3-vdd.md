@@ -127,8 +127,7 @@
   剩余活体验证见下“⑥ 实现”。
   - 别用 winget 的 `VirtualDrivers.Virtual-Display-Driver`：那只是控制应用的便携包，**不装驱动**。
   - 别用仓库里的社区脚本安装：有杀软误报先例，只用官方 driver-only 包。
-- **待补：全新机器上的设备节点创建**：`pnputil /add-driver` 只暂存驱动包，从未装过 VDD 的机器上
-  设备节点（硬件 ID `Root\MttVDD`）还需另一步创建（devcon 或 SwDeviceCreate 小助手）；`create` 失败文案已能识别并指明，未实现。
+- **全新机器上的设备节点创建**（已实现，见下「⑥ 实现」一节）：`ensureInstalled()` 在驱动暂存后调随包 SetupDi 助手创建节点并复核 `devicePresent=true`；活体验证待用户（全新机器真安装、重跑幂等、是否需重启）。
 
 ## 复现命令（zero，管理员 PowerShell）
 
@@ -180,7 +179,7 @@ Disable-PnpDevice -InstanceId 'ROOT\DISPLAY\0001' -Confirm:$false
   启动与会话流程里都不调安装；渲染层 UI（设置页接线）见下「设置页接线」一节。
 - `apps/desktop/resources/vdd/`——随包驱动：官方 driver-only zip
   （已验大小 + SHA-256）、上游 MIT `LICENSE.txt` 全文、README
-  （来源 URL、版本、哈希、信任前提、已知缺口）。`package.json`
+  （来源 URL、版本、哈希、信任前提、设备节点创建）。`package.json`
   `extraResources` 已接线（`resources/vdd` → `vdd`）。
 
 ### 信任方法（选定：从 .cat 实时取签名者证书）
@@ -257,12 +256,13 @@ reason（`not-admin` / `package-missing` / `hash-mismatch` /
   证书进本机 TrustedPublisher（仅发布者信任，不改 Secure Boot、
   不开测试签名）、需要管理员权限；非管理员运行时按钮禁用并提示以
   管理员身份重启。已安装时再次点击由管理器按钉死版本检查（相符直接
-  返回、不重装）。安装后若 `devicePresent=false`，卡片内提示设备节点
-  尚未创建（⑤ 已知缺口），不是安装失败的误报。
+  返回、不重装）。安装成功时管理器已复核节点存在；卡片内另有提示：
+  若驱动已装但节点不存在（例如由旧版本装的驱动），再点一次安装即可
+  创建节点。
 - 失败翻译（渲染层，`translateVddInstallError`）：IPC 失败文案是
   `<reason>：<detail>`，reason（`not-admin` / `package-missing` /
   `hash-mismatch` / `extract-failed` / `trust-failed` / `install-failed` /
-  `verify-failed`）译成中文标题 + 做法；技术类失败另附管理器返回的
+  `verify-failed` / `node-create-failed`）译成中文标题 + 做法；技术类失败另附管理器返回的
   detail 当诊断信息；未知 reason 直接显示 detail，不甩英文错误码。
 - `apps/desktop/src/renderer/style.css`：新增 `.vdd-note` / `.vdd-message`
   （成功走 `--ok-soft`，失败走 `--danger-soft`）。
@@ -286,8 +286,8 @@ reason（`not-admin` / `package-missing` / `hash-mismatch` /
 ### 行为
 
 - `create(preferred)`：先查 driver `status()`，未安装直接返回可操作失败，**会话创建时绝不自动安装驱动**
-  （安装只在设置页显式触发）；已装但 `devicePresent=false` 返回覆盖⑤已知缺口的文案
-  （设备节点未创建，需另一步创建根设备）；`ensureSettings(1, preferred)`；记录会话前设备是否已启用；
+  （安装只在设置页显式触发）；已装但 `devicePresent=false`（节点被手动删除或由旧版本装的驱动）
+  返回可操作失败，提示回设置页重装一次创建节点；`ensureSettings(1, preferred)`；记录会话前设备是否已启用；
   未启用时 `setDeviceEnabled(true)`；轮询 `listDisplays()` 差分等新显示器出现（默认 30s 超时，
   按最接近 preferred 挑一块）；超时失败时若本次会话启用过节点，恢复回禁用，不留残留。
 - `destroy()`：只有本次会话是我们启用了节点时才发禁用（fire-and-forget，失败只记日志）；
@@ -322,7 +322,7 @@ reason（`not-admin` / `package-missing` / `hash-mismatch` /
   happy path、驱动未装时 create 失败且未尝试 enable、设备节点未建时失败文案点出缺口、
   会话前已启用时不重复 enable 且 destroy 不禁用、destroy 空操作零驱动命令、超时后恢复禁用；
   开头一条 bonjour `Service name is already in use` 是 E2E 段的既有环境噪音，测试本身全绿）。
-- `npm run verify:vdd-driver` 全部通过（⑤ 的 51 项断言未动）。
+- `npm run verify:vdd-driver` 全部通过（⑥ 实施后 66 项断言，见上）。
 - 全程未做真实设备 Enable/Disable，未碰平板；zero 上 VDD 节点真实状态未动。
 
 ### 仍阻塞的活体验证

@@ -19,10 +19,10 @@
 //   - 本文件不直接碰 Enable/Disable-PnpDevice：启用/禁用全部经
 //     VddDriverManager.setDeviceEnabled()，命令执行层由它注入。
 //
-// 已知缺口（⑤ 留下的，见 docs/line3-vdd.md）：全新机器上 pnputil
-// /add-driver 只暂存驱动包，设备节点（硬件 ID Root\MttVDD）还需另一步
-// 创建（devcon 或 SwDeviceCreate 小助手），本版本不含。create 里
-// installed=true 但 devicePresent=false 即此情况，返回可操作的 reason，
+// 设备节点创建已于 ⑥ 实现（自研 SetupDi 助手，随安装流程创建节点；
+// 见 docs/line3-vdd.md「⑥ 实现」）。create 里 installed=true 但
+// devicePresent=false（例如节点被手动删除，或由旧版本装的驱动）
+// 仍返回可操作的 reason，提示用户回设置页重装一次创建节点，
 // 不当成安装失败误报。
 //
 // 依赖可注入（driver、listDisplays、超时时间），供 fake 测试。
@@ -125,12 +125,12 @@ export class VddVirtualDisplayManager {
         }
       }
       if (!st.devicePresent) {
-        // ⑤ 的已知缺口：驱动包已暂存，但设备节点未建（硬件 ID Root\MttVDD）。
-        // 不是安装失败，是待补的“创建根设备”一步，别让用户重装驱动。
+        // 设备节点缺失：驱动已装，但节点不存在（例如被手动删除，或由旧版本
+        // 装的驱动）；节点创建是安装流程的一部分，回设置页重装一次即可。
         return {
           ok: false,
           reason:
-            'VDD 驱动已安装，但设备节点未创建（硬件 ID Root\\MttVDD）：需另一步创建根设备（devcon 或 SwDeviceCreate 小助手），见 docs/line3-vdd.md 已知缺口'
+            'VDD 驱动已安装，但设备节点未创建（硬件 ID Root\\MttVDD）：请回设置页点一次「安装虚拟显示器驱动」，安装流程会创建节点'
         }
       }
 
