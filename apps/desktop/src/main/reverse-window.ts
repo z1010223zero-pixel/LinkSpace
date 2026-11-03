@@ -36,17 +36,22 @@ export class ReverseWindowManager {
   private win: BrowserWindow | null = null
   private peerId: string | null = null
   private displayName = ''
+  private lastFrame: ReverseStreamFrame | null = null
 
   constructor(deps: ReverseWindowDeps) {
     this.host = deps.host
     this.deps = deps
     // 帧直通：Host 解出一帧就发窗口；窗口不存在时丢弃（不攒、不重放）
-    this.host.on('reverseStreamFrame', (frame) => this.sendFrame(frame))
+    this.host.on('reverseStreamFrame', (frame) => {
+      this.lastFrame = frame
+      this.sendFrame(frame)
+    })
     this.host.on('reverseStreamChanged', () => {
       const st = this.host.reverseStreamStatus()
       if (!st.peerId) {
         // 会话在别处结束（对端停流/断连/撤销/重连失败）→ 窗口跟随关闭
         const wasOpen = this.isOpen
+        this.lastFrame = null
         const reason = this.host.reverseStreamEndReason()
         this.close()
         // 流非用户主动结束且有明确原因（平板拒绝/超时/断连）：让主窗口
@@ -110,13 +115,17 @@ export class ReverseWindowManager {
       void shell.openExternal(url)
       return { action: 'deny' }
     })
-    const hash = `reverse-stream?peer=${encodeURIComponent(peerId)}&name=${encodeURIComponent(displayName)}`
+    const hash = `#/reverse-stream?peer=${encodeURIComponent(peerId)}&name=${encodeURIComponent(displayName)}`
     const devUrl = this.deps.rendererUrl()
     if (devUrl) {
       void win.loadURL(`${devUrl}#/${hash}`)
     } else {
       void win.loadFile(this.deps.rendererFile(), { hash })
     }
+    win.webContents.once('did-finish-load', () => {
+      // 静态画面可能不会再推新帧；窗口打开/刷新时立刻补绘最近一帧。
+      if (this.lastFrame) this.sendFrame(this.lastFrame)
+    })
     win.on('closed', () => {
       const peer = this.peerId
       this.win = null
