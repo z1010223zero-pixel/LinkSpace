@@ -116,33 +116,24 @@ class LinkSpaceAccessibilityService : AccessibilityService(), InputInjector {
          */
         fun isEnabled(context: Context): Boolean {
             // 主判据：AccessibilityService 只有系统开启并绑定后才会有实例；
-            // 注入也必须依赖这个实例。某些 ROM 的 Settings/API 列表会不可靠，
-            // 因此实例存在时直接认为服务可用。
+            // 注入也必须依赖这个实例。实例存在时直接认为服务可用。
             if (instance != null) return true
-            // 本 ROM 的 AccessibilityManager 列表会出现“dumpsys 显示已绑定、
-            // getEnabledAccessibilityServiceList 不含本服务”的情况。这里以
-            // Settings.Secure 为准；真正的安全兜底是 inject() 必须拿到
-            // 已连接服务实例，未连接时仍会失败。
-            val enabledSetting = runCatching {
-                android.provider.Settings.Secure.getString(
-                    context.contentResolver,
-                    android.provider.Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
-                )
-            }.getOrNull()
-            if (!enabledSetting.isNullOrBlank()) {
-                val enabled = enabledSetting.split(':').any { raw ->
-                    ComponentName.unflattenFromString(raw) ==
-                        ComponentName(context, LinkSpaceAccessibilityService::class.java)
-                }
-                if (enabled) return true
-            }
+            // 第二判据：AccessibilityManager 的已绑定列表（只含当前已
+            // 绑定、活着的服务）。Settings.Secure 的 ENABLED_ACCESSIBILITY_
+            // SERVICES 只是“用户曾经开启”的持久记录，不能再当充分条件：
+            // 2026-11-03 真机踩到的假阳性——进程被前台服务停止超时杀掉
+            // 后，服务仍在该列表里、横条随之消失，但 dumpsys 显示服务
+            // 在 Crashed 列表、Bound services 为空、accessibility_enabled
+            // 为 0；会话按“已开启”放行后注入全失败，看着像功能坏了。
+            // 本 ROM 曾出现“已绑定但该列表不含本服务”的假阴性，但那种
+            // 情况下 instance 非空，已被第一条覆盖，不会误判。
             val am = context.getSystemService(Context.ACCESSIBILITY_SERVICE)
                 as? AccessibilityManager ?: return false
             val id = ComponentName(context, LinkSpaceAccessibilityService::class.java)
             // 不同 ROM / Android 版本里 AccessibilityServiceInfo.id 可能是
             // flattenToString 或 flattenToShortString 形态。按组件名归一后
             // 比较，避免“服务已绑定但 App 状态仍为关闭”的假阴性。
-            return runCatching {
+            val bound = runCatching {
                 am.getEnabledAccessibilityServiceList(AccessibilityServiceInfo.FEEDBACK_ALL_MASK)
                     .any {
                         ComponentName.unflattenFromString(it.id) == id ||
@@ -151,6 +142,26 @@ class LinkSpaceAccessibilityService : AccessibilityService(), InputInjector {
                             } == id
                     }
             }.getOrDefault(false)
+            if (!bound) {
+                // 诊断用：只记日志，不再把“在已启用列表里”当成可用。
+                // 出现这行 = 服务已开启但未绑定（进程被杀/崩溃后常见），
+                // 界面应显示未开启并引导用户重开，而不是报“已开启”。
+                val inSetting = runCatching {
+                    android.provider.Settings.Secure.getString(
+                        context.contentResolver,
+                        android.provider.Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+                    )?.split(':')?.any { raw ->
+                        ComponentName.unflattenFromString(raw) == id
+                    } == true
+                }.getOrDefault(false)
+                if (inSetting) {
+                    Log.w(
+                        "LinkSpace/A11y",
+                        "无障碍服务在已启用列表里但未绑定（进程被杀/崩溃后常见），按未开启处理"
+                    )
+                }
+            }
+            return bound
         }
 
         /** 会话层注入入口：服务未连接时直接回失败，不静默丢掉。 */

@@ -115,7 +115,11 @@ class TransferServer(
             isDaemon = true
             start()
         }
-        Log.i(TAG, "文件传输服务已监听 0.0.0.0:$port")
+        // 注意：createServerSocket(0, 64) 绑的是双栈通配符（::），不是
+        // 0.0.0.0——监听只会出现在 /proc/net/tcp6 里，/proc/net/tcp
+        // 查不到是正常的，别误判为没起监听。端口是临时的，每次服务
+        // 重起都会变，排障务必用概览页/日志里的当前端口号。
+        Log.i(TAG, "文件传输服务已监听 ${socket.localSocketAddress}（端口=$port，双栈通配符）")
         return port
     }
 

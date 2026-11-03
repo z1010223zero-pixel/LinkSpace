@@ -24,13 +24,25 @@ import java.util.concurrent.atomic.AtomicBoolean
  *     （控制会话、传输、剪贴板同步全部终止），前台服务随之停止；
  *   - 用户从最近任务划掉 / 系统杀进程 → 进程连同服务一起消失，
  *     对端按断连处理。不存在「界面没了但连接还在」的中间态。
+ *     （onTaskRemoved 里显式 stopSelf；START_NOT_STICKY，死后不
+ *     由系统在后台重起——2026-11-03 之前是 START_STICKY，后台重起
+ *     触发了 ForegroundServiceDidNotStopInTimeException，系统杀进程、
+ *     同进程的无障碍服务跟着死。）
  */
 class LinkSpaceForegroundService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_EXIT) {
+        // intent 为空 = 系统在进程死后重起服务（START_STICKY 残留或
+        // 其他系统触发）。本服务只应在应用前台启动时存在，后台重起
+        // 正是 DidNotStopInTimeException 的温床：直接停掉，不重新
+        // 前台化。用户重开应用时会重新 start()。
+        if (intent == null) {
+            stopSelf()
+            return START_NOT_STICKY
+        }
+        if (intent.action == ACTION_EXIT) {
             LinkSpaceService.get(this).stopAll()
             stopSelf()
             return START_NOT_STICKY
@@ -66,7 +78,33 @@ class LinkSpaceForegroundService : Service() {
         }
         startForeground(NOTIFICATION_ID, notification, types)
         mediaProjectionReady.set(isMediaProjection)
-        return START_STICKY
+        // START_NOT_STICKY（2026-11-03 真机踩到的根因）：START_STICKY
+        // 让进程被杀后由系统在后台重起本服务；Android 14 起后台重起的
+        // 前台服务会被限时要求停止，本服务没有任何停止逻辑，于是系统
+        // 抛 ForegroundServiceDidNotStopInTimeException 再杀一次进程，
+        // 同进程的无障碍服务跟着死、dumpsys 进 Crashed 列表（00:21:50
+        // 崩溃日志，pid 6226）。不重起才是对的：会话本就随进程死亡而
+        // 终结，用户重开应用时 MainActivity.onCreate 会重新 start()。
+        return START_NOT_STICKY
+    }
+
+    /**
+     * 用户从最近任务划掉应用：按本类文档的退出语义，进程连同服务
+     * 一起消失，不留“界面没了但连接还在”的中间态。显式 stopSelf
+     * 让停止走正常流程，而不是等系统限时来收——后者正是上面那次
+     * DidNotStopInTimeException 的另一条触发路径。注意：只是切到
+     * 后台不触发这里，保活意图不受影响。
+     */
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        stopSelf()
+        super.onTaskRemoved(rootIntent)
+    }
+
+    override fun onDestroy() {
+        // 停止时把前台状态与通知一起清掉，别让系统以为服务还以前
+        // 台身份活着而掐表。ACTION_EXIT 路径 stopSelf 后也会走到这里。
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        super.onDestroy()
     }
 
     companion object {
