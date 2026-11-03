@@ -1,6 +1,7 @@
 package cn.linkspace.client.ui
 
 import android.content.Context
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -11,7 +12,9 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
@@ -37,10 +40,8 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import cn.linkspace.client.service.InputController
 import cn.linkspace.client.service.LinkSpaceService
@@ -48,12 +49,21 @@ import cn.linkspace.client.service.LinkSpaceService
 /**
  * 触控板模式：Android 作为键鼠控制端（协议 4.6）。
  * 从 MainActivity.kt 原样搬移（docs/ui-redesign-android.md §5），
- * 逻辑与手势语义不动；B 线只做三处表现层改动：
- * 1. 触控板区保证最小高度 240dp（审计 §2 问题 15：横屏下纵向堆叠
- *    会把 weight(1f) 的触控板压得很小），见下方 Surface 的 defaultMinSize；
- * 2. 两处硬编码 Color.Gray 占位色改主题色 onSurfaceVariant（审计问题 22）；
- * 3. 多显示器选择弹窗移出标题行 Row 作用域，挂到屏根部（审计问题 16）。
+ * 逻辑与手势语义不动。
  *
+ * 视觉重排（2026-11-03，用户两次说平板是“旧 UI”后追加）：
+ * 只改视觉，不动行为。按 LinkSpaceTheme 走——品牌色 #2F6BFF、
+ * 浅色主调、token 字号/间距/圆角，与概览页同一套；大面积触控区
+ * 保留深色（DarkStreamScheme，与投屏画面同款）。具体：
+ * 1. 顶栏：标题进 titleLarge（20sp）、加在线绿点、“结束控制”
+ *    改危险红描边按钮；
+ * 2. 按键行/输入框/灵敏度：字号进 token（bodyLarge/bodySmall）、
+ *    间距进 LinkSpaceSpacing；
+ * 3. 触控板区：包 DarkStreamScheme 深色、圆角 large（12dp）；
+ * 4. “按住拖拽”激活态：默认 M3 tertiary（紫，不在主题内）改
+ *    品牌深蓝 BrandPressed。
+ * 确认弹窗逻辑（eb3ea7a 的 early return）不在本文件，别碰。
+ * 多显示器 AlertDialog 行为不动。
  * 交互约定：
  *   - 单指拖动 = 相对移动光标（本地虚拟光标按灵敏度累积，跨手势保持——
  *     抬起再按不跳点；协议仍发绝对坐标，桌面端零改动）
@@ -118,23 +128,36 @@ fun TouchpadScreen(service: LinkSpaceService) {
     // 原先嵌在下方标题行的 Row 作用域里，位置隐蔽；现挂到屏根部，行为不变。
     val displayChoices by service.streamDisplays.collectAsStateWithLifecycle()
 
-    Column(Modifier.fillMaxSize().padding(12.dp)) {
+    Column(Modifier.fillMaxSize().padding(LinkSpaceSpacing.md)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
+            // 在线状态点（概览页同款）：控制会话进行中 = 绿
+            Box(
+                Modifier
+                    .size(8.dp)
+                    .background(LinkSpaceStatusColors.Online, CircleShape)
+            )
+            Spacer(Modifier.width(LinkSpaceSpacing.sm))
             Column(Modifier.weight(1f)) {
-                Text("正在控制电脑", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                Text("正在控制电脑", style = MaterialTheme.typography.titleLarge)
                 Text(
                     "单指移动 · 轻点单击 · 双指滚动 · 下方输入文字",
-                    fontSize = 12.sp,
+                    style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
-            Button(onClick = {
-                if (dragLeft) {
-                    send(listOf(InputController.up("left")))
-                    dragLeft = false
-                }
-                controller.stop()
-            }) { Text("结束控制") }
+            // 结束控制是危险操作：红字描边按钮（ui-redesign-android.md §2.1）
+            OutlinedButton(
+                onClick = {
+                    if (dragLeft) {
+                        send(listOf(InputController.up("left")))
+                        dragLeft = false
+                    }
+                    controller.stop()
+                },
+                colors = ButtonDefaults.outlinedButtonColors(
+                    contentColor = LinkSpaceStatusColors.Danger
+                )
+            ) { Text("结束控制") }
 
             // 屏幕投屏：桌面画面流到本机全屏显示，触点按画面比例直接
             // 映射成绝对坐标事件（寄生在当前键鼠会话内）
@@ -142,13 +165,13 @@ fun TouchpadScreen(service: LinkSpaceService) {
         }
 
         // ---------- 特殊按键行 ----------
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(vertical = 6.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(LinkSpaceSpacing.sm), modifier = Modifier.padding(vertical = LinkSpaceSpacing.sm)) {
             FilledTonalButton(onClick = { send(listOf(InputController.key(0x1B, true), InputController.key(0x1B, false))) }) { Text("Esc") }
             FilledTonalButton(onClick = { send(InputController.tap(0x09)) }) { Text("Tab") }
             FilledTonalButton(onClick = { send(InputController.tap(0x0D)) }) { Text("Enter") }
             FilledTonalButton(onClick = { send(InputController.tap(0x08)) }) { Text("退格") }
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(LinkSpaceSpacing.sm)) {
             FilledTonalButton(onClick = { send(InputController.tap(0x25)) }) { Text("←") }
             FilledTonalButton(onClick = { send(InputController.tap(0x26)) }) { Text("↑") }
             FilledTonalButton(onClick = { send(InputController.tap(0x28)) }) { Text("↓") }
@@ -242,8 +265,8 @@ fun TouchpadScreen(service: LinkSpaceService) {
                 altSticky = false
                 send(events)
             },
-            modifier = Modifier.fillMaxWidth().height(44.dp).padding(vertical = 4.dp),
-            textStyle = TextStyle(fontSize = 15.sp),
+            modifier = Modifier.fillMaxWidth().height(44.dp).padding(vertical = LinkSpaceSpacing.xs),
+            textStyle = TextStyle(fontSize = MaterialTheme.typography.bodyLarge.fontSize),
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
             decorationBox = { inner ->
                 Surface(shape = MaterialTheme.shapes.small, color = MaterialTheme.colorScheme.surfaceVariant) {
@@ -251,7 +274,7 @@ fun TouchpadScreen(service: LinkSpaceService) {
                         if (text.isEmpty()) {
                             Text(
                                 "在此输入文字（英文），将键入到电脑",
-                                fontSize = 13.sp,
+                                style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
@@ -263,7 +286,7 @@ fun TouchpadScreen(service: LinkSpaceService) {
 
         // ---------- 灵敏度调节（相对移动倍率，持久化） ----------
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("灵敏度", fontSize = 12.sp)
+            Text("灵敏度", style = MaterialTheme.typography.bodySmall)
             Slider(
                 value = sensitivity,
                 onValueChange = {
@@ -273,16 +296,19 @@ fun TouchpadScreen(service: LinkSpaceService) {
                 valueRange = 0.5f..5f,
                 modifier = Modifier.weight(1f).padding(horizontal = 10.dp)
             )
-            Text("%.1fx".format(sensitivity), fontSize = 12.sp, modifier = Modifier.width(44.dp))
+            Text("%.1fx".format(sensitivity), style = MaterialTheme.typography.bodySmall, modifier = Modifier.width(44.dp))
         }
 
         // ---------- 触控板 ----------
         // 横屏下纵向堆叠会把触控板压小：weight(1f) 占剩余高度之外，
         // 再保一个 240dp 最小高度（docs/ui-redesign-android.md §4.3 建议值）。
         // 目标机横屏高约 800dp 级时，自绘键盘展开也仍有约 300dp 触控区。
+        // 视觉：大面积触控区保留深色（投屏画面同款 DarkStreamScheme），
+        // 与浅色主调的按键/顶栏/底栏形成区分；手势逻辑一字不动。
+        MaterialTheme(colorScheme = DarkStreamScheme) {
         Surface(
-            shape = MaterialTheme.shapes.medium,
-            color = MaterialTheme.colorScheme.surfaceVariant,
+            shape = MaterialTheme.shapes.large,
+            color = DarkStreamScheme.surfaceVariant,
             modifier = Modifier
                 .weight(1f)
                 .defaultMinSize(minHeight = 240.dp)
@@ -368,12 +394,13 @@ fun TouchpadScreen(service: LinkSpaceService) {
                 }
         ) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text("触控板", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("触控板", color = DarkStreamScheme.onSurfaceVariant)
             }
         }
+        } // MaterialTheme(DarkStreamScheme) — 触控区深色包围结束
 
         // ---------- 鼠标键 ----------
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(LinkSpaceSpacing.sm)) {
             Button(
                 modifier = Modifier.weight(1f),
                 onClick = { send(listOf(InputController.down("left"), InputController.up("left"))) }
@@ -381,7 +408,7 @@ fun TouchpadScreen(service: LinkSpaceService) {
             Button(
                 modifier = Modifier.weight(1f),
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = if (dragLeft) MaterialTheme.colorScheme.tertiary
+                    containerColor = if (dragLeft) LinkSpaceColors.BrandPressed
                     else MaterialTheme.colorScheme.primary
                 ),
                 onClick = {

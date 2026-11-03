@@ -64,6 +64,13 @@ private val LightScheme: ColorScheme = lightColorScheme(
     onPrimary = Color.White,
     primaryContainer = LinkSpaceColors.BrandSoft,
     onPrimaryContainer = LinkSpaceColors.BrandOnSoft,
+    // 2026-11-03 触控板重排补记：secondaryContainer 是 FilledTonalButton
+    //（触控板按键、KeyCap 等）的底色，默认 M3 紫会让按键发紫；与主色
+    // 同系，改品牌浅蓝，与 primaryContainer 一致。
+    secondary = LinkSpaceColors.Brand,
+    onSecondary = Color.White,
+    secondaryContainer = LinkSpaceColors.BrandSoft,
+    onSecondaryContainer = LinkSpaceColors.BrandOnSoft,
     error = LinkSpaceStatusColors.Danger,
 )
 

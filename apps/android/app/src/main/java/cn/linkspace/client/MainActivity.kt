@@ -334,13 +334,18 @@ fun MainScreen(service: LinkSpaceService, onClipboardToggle: (Boolean) -> Unit) 
 
     // 控制会话激活时整屏切到触控板；投屏流就绪再切到投屏画面。
     // 画面窗口是 B 线范围，原样保留不动。
+    // 触控板包 LinkSpaceTheme（2026-11-03 视觉重排补记）：early return
+    // 在 AppNavShell 的 LinkSpaceTheme 之外，触控板此前一直吃默认
+    // M3 紫色主题；只包主题，不动本段的条件与 return 逻辑。
     val screenStreamInfo by service.screenStream.collectAsStateWithLifecycle()
     if (inputState.phase == "active") {
         val ss = screenStreamInfo
         if (ss != null) {
             ScreenMirrorScreen(service, ss, clipboardEnabled, onClipboardToggle)
         } else {
-            TouchpadScreen(service)
+            LinkSpaceTheme {
+                TouchpadScreen(service)
+            }
         }
         return
     }
