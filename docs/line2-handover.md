@@ -1,7 +1,7 @@
 # 线 2 交接文档：`decision/line2-accessibility-first`
 
 > 面向接手者：用户本地 Windows 工作区（`d:\test\testforai\LinkSpace`）的 agent。
-> 写于 2026-11-02，2026-11-03 更新至分支头 `a9436b1`。目标：**只读本文 + 文中引用的文档，不用再问，就能开工。**
+> 写于 2026-11-02，2026-11-03 更新至分支头 `a8491ae`。目标：**只读本文 + 文中引用的文档，不用再问，就能开工。**
 >
 > 与 `docs/HANDOVER.md` 的关系：那份是 **2026-10-29 的旧快照**（阶段 3 合并前，文件头自己标了过时），里面的许可证说法（GPL）已被 2026-10-30 的路线 B 推翻、阶段 3 状态、验证脚本数量都过期了。**不要用它接手线 2**，线 2 的交接只认本文。
 
@@ -13,7 +13,7 @@
 
 | 项 | 值 |
 |---|---|
-| 开发分支（只动它） | `decision/line2-accessibility-first`，头 `a9436b1`（2026-11-03） |
+| 开发分支（只动它） | `decision/line2-accessibility-first`，头 `a8491ae`（2026-11-03） |
 | master（不动，不合并） | `73a61fa`，与本分支的共同祖先；本分支的全部工作都不在 master 上 |
 | 线 2 的含义 | 电脑控平板/手机：电脑窗口里看到平板画面并用键鼠操作 |
 
@@ -30,7 +30,7 @@ git pull --ff-only origin decision/line2-accessibility-first
 git log --oneline -1   # 应为 a9436b1
 ```
 
-切完先核对：`git log --oneline -1` 为 `a9436b1`；`git log --oneline 73a61fa..HEAD` 自 9726dcd 起又多了 UI 重设计、未阻塞项两波与若干合并提交，不再是 9 个。
+切完先核对：`git log --oneline -1` 为 `a8491ae`；`git log --oneline 73a61fa..HEAD` 自 9726dcd 起又多了 UI 重设计、未阻塞项两波、线 3 接线、反向流修复、h264 核实与触控板重排，不再是 9 个。
 
 ### 0.3 先读文档的顺序
 
@@ -133,6 +133,21 @@ git log --oneline -1   # 应为 a9436b1
 - **合并树验证（分支头 `a9436b1`，协调人独立重跑）**：a1：`npm run build` 通过、typecheck 0、`verify:input` / `verify:binding` 全部通过、`verify:protocol` **112 项 0 失败 4 警告**。builder 合并树（`/data/home/linkspace-build-final`，头 a9436b1）：`:app:assembleDebug` BUILD SUCCESSFUL，APK **42,188,968 字节**，单测 **100 项 0 失败**。最新 APK 就在这个目录：`/data/home/linkspace-build-final/apps/android/app/build/outputs/apk/debug/app-debug.apk`。
 - 注意：builder 上 `/data/home/linkspace-build-coord2` 的检出还停在 9726dcd（旧 APK），不要用它；合并树在 `linkspace-build-final`。builder `/` 根分区已约 99–100% 满（仅剩约 0.1 GiB），构建走 `/data` + `TMPDIR=/data/home/tmp`。
 
+### 线 3 接线 + 反向流修复 + h264 核实 + 触控板重排（2026-11-03，头 `a8491ae`，已推决策分支，master 未动）
+
+> 本批在未阻塞项两波之后，同一位线 3 开发员接手做完。提交：`3c6f2f1`（dd-capture/swd-host 入仓）、`97c5c9f`（VirtualDisplayManager + DD 帧源接线 + 锁屏暂停投屏）、`edc414f`（Android 扩展屏画面流接线）、`eb3ea7a`（反向流确认框修复）、`126012d`（FGS 根因 + 无障碍假阳性检测 + 端口日志）、`87aa546`（h264 注释 A/B）、`a8491ae`（触控板页视觉重排）。详见任务清单 §完成状态 ⑨–⑬。
+
+- **dd-capture/swd-host（3.2-1 半成品已接完）**：`native/dd-capture/`（Desktop Duplication 取帧，stdout 原始 BGRA）与 `native/swd-host/`（SwDeviceCreate 建 IddSampleDriver 设备）只入源码/README/build.cmd。swd-host 修了一个真 bug：`SnapshotOutputCount` 在 EnumOutputs 返回 `DXGI_ERROR_NOT_CURRENTLY_AVAILABLE`（会话 0）时对空指针调 GetDesc，直接 AV。验证：dd-capture 交互会话出帧（2 帧 = 21,659,168 字节，退出 0）；swd-host 会话 0 修复后 SWD-READY → SWD-DISPLAY-TIMEOUT → SWD-CLOSED 退出 0，交互会话 SwDeviceCreate 报 0x80070005（需管理员）。**SWD-DISPLAY-APPEARED 至今未在真机上出现**（Secure Boot 开 + testsigning 关，驱动无法加载）。
+- **VirtualDisplayManager + DD 帧源接线（3.2-1，`97c5c9f`）**：`VirtualDisplayManager`（spawn swd-host，等 SWD-READY 10s / SWD-DISPLAY-APPEARED 25s，显示器差分挑屏）+ `screen-stream.ts` 的 `startDd`（DD 帧 → ffmpeg rawvideo BGRA → 编码 → WS）+ 锁屏停流/解锁恢复（`handleSessionLock`/`handleSessionUnlock`，powerMonitor lock-screen/unlock-screen 接线）+ `LINKSPACE_STREAM_ENCODER` 排障覆盖。桌面验证：typecheck 0 + verify:extend/input/binding/transfer/pairing/heartbeat/clipboard/net/layout 全过 + verify:protocol 128 项 0 失败 4 警告 + build 通过。诚实缺口：打包 extraResources 未补；startDd 的真实 DD 帧 → ffmpeg 编码管道端到端未跑。
+- **Android 扩展屏画面流接线（3.2-3，`edc414f`）**：`requestScreenStream` 加 source/force 参数；displayExtend 会话一建立就自动请求虚拟显示器画面流；扩展屏流断线重连；换档不切回镜像流。触控映射链无需改 tablet 侧代码（`streamRegion=virtualScreen` 是关键）。限制：扩展屏画面本身不需要 input 会话，但画面上的触控回传要经过 input 会话，点按需先建立键鼠控制。
+- **反向流确认框修复（`eb3ea7a`）**：MainScreen 在 input active 时整屏切触控板并 return，挂在后面的两个确认框永远到不了组合；两个确认框提到 early return 之前，盖在触控板之上。
+- **FGS 根因 + 无障碍假阳性检测 + 端口日志（`126012d`）**：`LinkSpaceForegroundService` 由 START_STICKY 改 START_NOT_STICKY + onTaskRemoved 停服务 + null-intent 守卫 + onDestroy 停前台（根因：后台重起的前台服务被限时要求停止 → `ForegroundServiceDidNotStopInTimeException` → 进程被杀 → 无障碍服务跟着死、dumpsys 进 Crashed 列表）。`isEnabled()` 不再把 Settings 的已启用列表当充分条件，改以 `instance != null` 或 `AccessibilityManager.getEnabledAccessibilityServiceList` 含本服务为准。TransferServer 日志由错的 `0.0.0.0:$port` 改印实际绑定地址（双栈通配符 `::`，端口临时、每次服务重起都变）。**每次重装 APK、重启应用或系统杀进程后，都要重新核对 dumpsys 的真实绑定状态，不要只信应用横条。**
+- **h264 A/B 核实（`87aa546`）**：2026-11-03 真机 A/B（小新平板 Pro GT，正向投屏，3841x2160 → 1920p/8Mbps）：libx264 画面干净锐利、无绿块、无下半帧全零；h264_mf 能出流、无绿块，但同等设置下明显比 libx264 软。2026-10-31 记录称“MF 全绿、libx264 下半帧全零”在当前构建上双向均未复现，该记录作废；代码默认 libx264 是对的，注释已改一致。
+- **触控板页视觉重排（`a8491ae`，用户追加）**：只改视觉，不动行为。TouchpadScreen 按 LinkSpaceTheme 重排（标题 titleLarge + 在线绿点、“结束控制”改危险红描边按钮、字号/间距进 token、触控区包 DarkStreamScheme 深色、“按住拖拽”激活态改品牌深蓝 BrandPressed）；MainActivity 把触控板包进 LinkSpaceTheme（early return 在 AppNavShell 的主题之外，触控板此前一直吃默认 M3 紫色；只包主题，不动 early return 的条件与 return 逻辑）；LinkSpaceTheme 的 LightScheme 补 secondary/secondaryContainer 为品牌浅蓝（#EAF0FF）。真机截屏目视确认品牌蓝全套；Esc 键注入桌面 vk=27 正常；单测 111 项 0 失败；clean 编译警告仅基线 4 条，改动文件 0 警告。
+- **2.6 走查部分结果（2026-11-03，真机）**：反向流 E2E 已打通（反向输入控制已建立，input.state='active'）。通过：10.1 单击、10.4 拖拽/滑动、10.6 右键返回、10.7 中键 Home、键盘英文（"hello"、退格、Ctrl+A）、B2 成品输入、C 粘贴、剪贴板平板→桌面、桌面→平板同步、断开恢复。混合/未定论：B1 拼音直通（URL 地址栏里候选栏跟随不可靠、空格不选词；纯文本字段未测）。失败：Ctrl+V 粘贴（反向输入的 Ctrl+V 组合键不触发平板粘贴）。**新发现的重大阻塞项：反向流画面冻结——反向窗口 canvas 只解出首帧（framesDecoded 恒为 1），bytesReceived 持续增长到 102MB；桌面 ffmpeg 无报错、droppedBytes=0；故障在平板编码输出还是桌面 ffmpeg 未定位，需 h264 落盘 + 离线解码定论。**
+- **验证基线（分支头 `a8491ae`）**：桌面 build + typecheck 0 + verify:input/binding/extend 全过 + verify:protocol 128 项 0 失败 4 警告；Android builder（`/data/home/linkspace-build-ls3b`，头 87aa546）BUILD SUCCESSFUL（35s），11 套件 111 项单测 0 失败，APK 42,202,292 字节；Windows 本地 clean 编译警告仅基线 4 条。最新 APK（触控板重排）：Windows 本地 42,552,063 字节（2026-11-03 17:56）。
+- **仍阻塞**：2.6 剩余项、反向流画面冻结 bug、PC 锁屏抓屏应用级验证（ffmpeg 级 gdigrab error 5 已复现，应用级锁屏/解锁各一次待用户解锁配合）、线 3 的 3.3（热插拔/睡眠恢复/驱动卸载/attestation）与 3.4 联动验证、软编软解优化。attestation 尚未走通（需 EV 代码签名证书与硬件开发人员中心账号，均未采购/注册）；Secure Boot 阻塞（当前机器 Secure Boot 开 + testsigning 关，驱动无法加载）。
+
 ---
 
 ## 3. 下一步任务（按顺序，含依赖）
@@ -141,8 +156,9 @@ git log --oneline -1   # 应为 a9436b1
 
 ### 3.1 人工走查 2.6（真机：联想小新平板 Pro GT）——下一步第一优先
 
-- **底版**：任务清单 2.6 + W7 新增 7 条 + mvp-acceptance.md 第 10 组 10.1–10.16，**全部未打勾**。以 `docs/scrcpy-manual-checklist.md` 为底版逐项走查。
-- **先走的顺序**：W5 的注入落点（单击/双击/长按/拖拽/滑动/右键返回/中键 Home/滚轮）→ W7 的画面窗口（入口出现、确认框、系统录屏授权框、换档位、断开/关窗口）→ 中文输入三通道（B1 候选栏跟随是最大不确定性：平板自带输入法是否响应 `sendKeyEvent` 组字）→ W6 的码率自适应与延迟 → 断网/息屏/重启/长挂机 → 多设备不串流。
+- **底版**：任务清单 2.6 + W7 新增 7 条 + mvp-acceptance.md 第 10 组 10.1–10.16。**2026-11-03 已跑部分**（见 §2 新增小节与任务清单 ⑭）：通过 10.1 单击、10.4 拖拽/滑动、10.6 右键返回、10.7 中键 Home、键盘英文、B2、C、剪贴板双向同步、断开恢复；B1 混合/未定论（纯文本字段待复测）；Ctrl+V 粘贴失败（组合键不触发）。**剩余未跑**：双击/长按/滚轮/回车/组合键（除 Ctrl+A/V 外）/特殊字符、切窗口不乱、断网/息屏/重启/长挂机恢复、多设备不串流、换分辨率档位、退后台录屏。
+- **新发现的重大阻塞项（2026-11-03）**：反向流画面冻结——反向窗口 canvas 只解出首帧（framesDecoded 恒为 1），bytesReceived 持续增长到 102MB；桌面 ffmpeg 无报错、droppedBytes=0。定位方法：给桌面 receiver 加临时环境变量门控的 h264 落盘（不提交），重编桌面、重建反向流、抓流后离线 ffprobe/ffmpeg 解码，定故障在平板编码输出还是桌面 ffmpeg。**此 bug 下 2.6 手势仍可用平板截屏验证，不必等修好。**
+- **先走的顺序**：W5 的注入落点（单击/双击/长按/拖拽/滑动/右键返回/中键 Home/滚轮）→ W7 的画面窗口（入口出现、确认框、系统录屏授权框、换档位、断开/关窗口）→ 中文输入三通道（B1 候选栏跟随是最大不确定性：平板自带输入法是否响应 `sendKeyEvent` 组字；**B1 复测换纯文本字段，别再用 URL 地址栏**）→ W6 的码率自适应与延迟 → 断网/息屏/重启/长挂机 → 多设备不串流。
 - **真机调试现成工具**（见 `docs/agent-division.md` §3.1，仍有效）：
   - 平板无线调试端口随重连变化：`adb connect <ip>:<当前端口>`。
   - debug 广播链：`am broadcast -a cn.linkspace.DEBUG_REQUEST_CONTROL`（发起控制）→ 桌面确认 → `am broadcast -a cn.linkspace.DEBUG_SCREEN_STREAM`（发起投屏）→ `adb exec-out screencap -p > cap.png` 验画面。
@@ -152,8 +168,10 @@ git log --oneline -1   # 应为 a9436b1
 
 ### 3.2 其余未完成项（同属线 2，不要漏）
 
-- **2.4-2 断线恢复**：控制链路断开后平板侧恢复本机输入、不卡键、不残留注入状态；断网/息屏/锁屏后恢复本机输入正常。入口：`ControlledInputSession.kt` + `LinkSpaceService.kt` 断连路径；验收：`verify:heartbeat` 级别的断线用例有无头或真机记录。
-- **2.4-3 剪贴板防回环**：电脑与平板两套剪贴板同步不互推回环（scrcpy 与 LinkSpace 两套同步并存时的风险见 `docs/scrcpy-manual-checklist.md` §3.6）。验收：双向各复制一次，内容各到对端一次，不循环放大；超 512 KiB 按线 1 口径处理。
+- **2.4-2 断线恢复**：控制链路断开后平板侧恢复本机输入、不卡键、不残留注入状态；断网/息屏/锁屏后恢复本机输入正常。入口：`ControlledInputSession.kt` + `LinkSpaceService.kt` 断连路径；验收：`verify:heartbeat` 级别的断线用例有无头或真机记录。**2026-11-03 已验**：点“断开”后反向窗口关闭、平板发 screen.stream.stop + session.stop、桌面日志“反向投屏已停：本机停止反向投屏”，平板恢复本机输入（Chrome 地址栏内容完整）。断网/息屏/重启/长挂机恢复仍未测。
+- **2.4-3 剪贴板防回环**：电脑与平板两套剪贴板同步不互推回环（scrcpy 与 LinkSpace 两套同步并存时的风险见 `docs/scrcpy-manual-checklist.md` §3.6）。验收：双向各复制一次，内容各到对端一次，不循环放大；超 512 KiB 按线 1 口径处理。**2026-11-03 已验**：平板→桌面（桌面剪贴板收到 SYNCCHECK999）、桌面→平板同步（桌面日志“剪贴板已同步到 1 台设备”）；回环未见（桌面剪贴板只收到一次，未循环放大）。Ctrl+V 粘贴键未生效是输入问题，不是同步问题。
+- **PC 锁屏抓屏（应用级验证，待用户解锁配合）**：ffmpeg 级已复现——会话 0 下 `ffmpeg -f gdigrab -i desktop` 报 `Failed to capture image (error 5)`（无可抓桌面时 Access Denied，锁屏同理）；应用级锁屏停流/解锁恢复代码已在 `97c5c9f`（`handleSessionLock`/`handleSessionUnlock`，powerMonitor lock-screen/unlock-screen 接线）。真机锁屏/解锁各一次尚未验证：**锁屏测试放 zero 侧工作末尾，需用户自己解锁（无法远程解锁），通过 parent 请用户解锁配合**。
+- **线 3 的 3.3/3.4**：热插拔/睡眠恢复/驱动卸载/attestation/联动验证均未做，均被 Secure Boot 阻塞（当前机器 Secure Boot 开 + testsigning 关，IddSampleDriver 无法加载，SWD-DISPLAY-APPEARED 未出现）。attestation 尚未走通（需 EV 代码签名证书与硬件开发人员中心账号，均未采购/注册）；测试签名 + 关 Secure Boot 只是验证手段，不是发行方案。
 
 ## 4. 构建与验证手册
 
@@ -239,7 +257,13 @@ ANDROID_HOME=/data/home/android-sdk GRADLE_USER_HOME=/data/home/.gradle \
 | **AccessibilityService 没有 `dispatchKeyEvent`** | 查过 android-35 的 `android.jar`，对照过 RustDesk InputService 源码。按键分三档：系统键走 `performGlobalAction`，其余走 API 33+ 输入连接 `sendKeyEvent`（只在有获得焦点的输入框时才有连接），音量键等走全局动作。**非文本场景的通用按键不在公开 API 能力内**，全量按键须走 scrcpy/adb（B 路线） | 选 A 已知的短板；中文输入不能靠按键注入（见 §3.1）；线 2 的键盘故事比线 1 窄 |
 | **`screen.stream.stop` 方向位已实现** | 2026-11-03 合进分支（`9488134`）：stop 加 `direction`，协议 §4.7 已登记；并发停流行为待 2.6 真机走查 | 已实现，见 §2 新增 |
 | **左右键已映射** | 2026-11-03 合进分支（`b175615`）：右键返回、中键 Home；真机语义待 2.6 走查 | 已实现，见 §2 新增 |
-| **h264_mf 注释与 libx264 代码漂移** | `screen-stream.ts` 的注释称 2026-10-31 真机排障定论“换 h264_mf 绕开 libx264 与该 ROM 解码器的相性问题”，但代码里编码器仍是 `-c:v libx264`。二者必有一处过时 | 待 Windows 真机核实；**不要凭猜测改编码器** |
+| **h264_mf 注释与 libx264 代码漂移——已核实（2026-11-03，`87aa546`）** | 真机 A/B：libx264 画面干净锐利、无绿块、无下半帧全零；h264_mf 能出流、无绿块，但同等设置下明显比 libx264 软。2026-10-31 记录称“MF 全绿、libx264 下半帧全零”在当前构建上双向均未复现，该记录作废；代码默认 libx264 是对的，注释已改一致；h264_mf 只留作排障覆盖（`LINKSPACE_STREAM_ENCODER=h264_mf`） |
+| **反向流画面冻结（新发现的重大阻塞项，2026-11-03）** | 反向窗口 canvas 只解出首帧（framesDecoded 恒为 1），bytesReceived 持续增长到 102MB；桌面 ffmpeg 无报错、droppedBytes=0。故障在平板编码输出还是桌面 ffmpeg 未定位，需 h264 落盘 + 离线解码定论。输入通道独立可用，手势改用平板截屏验证 |
+| **前台服务停止超时根因——已修（2026-11-03，`126012d`）** | `LinkSpaceForegroundService` 是 START_STICKY 且永不停，系统后台重起后限时要求停止 → `ForegroundServiceDidNotStopInTimeException` → 进程被杀 → 无障碍服务跟着死、dumpsys 进 Crashed 列表。已修为 START_NOT_STICKY + onTaskRemoved 停服务 + null-intent 守卫 + onDestroy 停前台；平板复核 dumpsys 三项标准（Bound 含服务、Crashed 为空、accessibility_enabled=1）已通过 |
+| **无障碍假阳性检测——已修（2026-11-03，`126012d`）** | 应用横条只读已启用列表判断，无障碍服务崩了也显示“已开启”。`isEnabled()` 改以实际绑定状态为准（`instance != null` 或 `AccessibilityManager.getEnabledAccessibilityServiceList` 含本服务）。每次重装 APK、重启应用或系统杀进程后，都要重新核对 dumpsys 的真实绑定状态，不要只信应用横条 |
+| **平板端口是临时双栈通配符（2026-11-03 已核实）** | TransferServer 用端口 0（临时）+ 通配符绑定，走 IPv6 `::` 双栈；/proc/net/tcp（IPv4 表）里没有是正常的，/proc/net/tcp6 里有 `::` 监听；端口每次服务重起都变（39547 是重启前的旧端口）。日志已改印实际绑定地址 |
+| **attestation 签名未走通（线 3 阻塞项）** | 需 EV 代码签名证书与硬件开发人员中心账号，均未采购/注册；`technical-validation.md` §3.3.1 称 attestation 经微软硬件开发者中心提交、免费、无 EV 证书要求，EV 仅走不通时备选。测试签名 + 关 Secure Boot 只是验证手段，不是发行方案 |
+| **Secure Boot 阻塞线 3 真机验证** | 当前机器 Secure Boot 开 + testsigning 关，IddSampleDriver 无法加载，SWD-DISPLAY-APPEARED 未出现；3.3（热插拔/睡眠恢复/驱动卸载）与 3.4 联动验证均被阻塞 |
 | **中文输入通道已定 + 已实现** | 2026-11-03 合进分支（`8b36ed4`）：B1/B2/C 三通道 + `input.error`；B1 能否成立待 2.6 真机走查 | 已实现，见 §2 新增 |
 | **信任设备自动放行未定** | 无人值守的 opt-in 形态，是否做/何时做，需用户以后定 | 不在本批动手 |
 | **from 绑定与 id 去重已实现** | 2026-11-03 合进分支（`f5a9af7`）：fail-closed 绑定 + 每连接 1024 条去重；protocol.md §3 缺口已关闭 | 已实现，见 §2 新增 |
