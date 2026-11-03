@@ -22,7 +22,8 @@ import type {
   TransferInfo,
   TransferTaskView,
   TrustedDevice,
-  Unsubscribe
+  Unsubscribe,
+  VddDriverStatus
 } from '../shared/types'
 
 function subscribe(channel: string, cb: () => void): Unsubscribe {
@@ -131,6 +132,15 @@ const api: LinkSpaceApi = {
 
   setDeviceEdge: (deviceId: string, edge: DeviceEdge | null) =>
     ipcRenderer.invoke('input:setEdge', deviceId, edge) as Promise<IpcResult<void>>,
+
+  // ---------- VDD 驱动生命周期（线 3，⑤） ----------
+  // install 是用户显式动作，不设自动调用点。
+
+  vddDriverStatus: () =>
+    ipcRenderer.invoke('vdd-driver:status') as Promise<VddDriverStatus>,
+
+  installVddDriver: () =>
+    ipcRenderer.invoke('vdd-driver:install') as Promise<IpcResult<{ alreadyInstalled: boolean }>>,
 
   // ---------- 反向投屏：平板画面窗口（线 2 W7，2.3-2） ----------
 

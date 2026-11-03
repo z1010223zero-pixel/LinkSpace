@@ -12,6 +12,7 @@
 
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
+import { VDD_ZIP_NAME } from './extend/vdd-driver'
 
 export interface Binaries {
   scrcpy: string
@@ -136,6 +137,7 @@ function guessAdbBeside(scrcpyPath: string): string | null {
 export function resetBinaryCache(): void {
   cached = null
   cachedNative = null
+  cachedVddZip = undefined
 }
 
 // ---------- 虚拟显示器原生二进制（线 3，3.2-1） ----------
@@ -184,4 +186,49 @@ export function locateVirtualDisplayBinaries(): NativeDisplayBinaries {
 /** 清除原生二进制缓存（与 resetBinaryCache 同口径，便于测试） */
 export function resetNativeBinaryCache(): void {
   cachedNative = null
+}
+
+// ---------- VDD 驱动包（线 3，⑤） ----------
+//
+// 查找顺序：
+//   1. 环境变量 LINKSPACE_VDD_ZIP（测试与调试用）
+//   2. 打包资源目录 <resourcesPath>/vdd/<zip>
+//      （electron-builder extraResources 须把 resources/vdd 打进去，
+//      否则打包后此路查不到）
+//   3. 开发期仓内 resources/vdd/<zip>（cwd 在 apps/desktop 或仓根）
+//
+// 找不到时返回 null，不抛错：VddDriverManager 的 status() 报
+// packageBundled=false，ensureInstalled() 以 package-missing 拒绝，
+// 其余功能不受影响。
+let cachedVddZip: string | null | undefined = undefined
+
+export function locateVddPackageZip(): string | null {
+  if (cachedVddZip !== undefined) return cachedVddZip
+  const envPath = process.env.LINKSPACE_VDD_ZIP
+  if (envPath && existsSync(envPath)) {
+    cachedVddZip = envPath
+    return cachedVddZip
+  }
+  const resourcesPath = (process as { resourcesPath?: string }).resourcesPath
+  if (resourcesPath) {
+    const p = join(resourcesPath, 'vdd', VDD_ZIP_NAME)
+    if (existsSync(p)) {
+      cachedVddZip = p
+      return cachedVddZip
+    }
+  }
+  for (const dir of [join(process.cwd(), 'resources', 'vdd'), join(process.cwd(), 'apps', 'desktop', 'resources', 'vdd')]) {
+    const p = join(dir, VDD_ZIP_NAME)
+    if (existsSync(p)) {
+      cachedVddZip = p
+      return cachedVddZip
+    }
+  }
+  cachedVddZip = null
+  return cachedVddZip
+}
+
+/** 清除 VDD 驱动包缓存（与 resetBinaryCache 同口径，便于测试） */
+export function resetVddPackageCache(): void {
+  cachedVddZip = undefined
 }

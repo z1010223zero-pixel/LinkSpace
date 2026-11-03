@@ -230,6 +230,24 @@ export interface InputStateView {
 }
 
 /** preload 暴露给渲染进程的 API 形状 */
+/** VDD 驱动状态快照（线 3，⑤；见 src/main/extend/vdd-driver.ts） */
+export interface VddDriverStatus {
+  /** 驱动包是否已在驱动库（mttvdd.inf） */
+  installed: boolean
+  /** 已装驱动版本（期望 11.30.4.434），未装时 null */
+  installedVersion: string | null
+  /** 已发布 INF 名（如 oem116.inf），未装时 null */
+  oemInf: string | null
+  /** 设备节点 ROOT\DISPLAY\0001 是否启用 */
+  deviceEnabled: boolean
+  /** 设备节点是否存在 */
+  devicePresent: boolean
+  /** 随包的驱动 zip 是否就位 */
+  packageBundled: boolean
+  /** 当前进程是否有管理员权限 */
+  isAdmin: boolean
+}
+
 export interface LinkSpaceApi {
   listDevices(): Promise<DeviceView[]>
   refreshDevices(): Promise<IpcResult<DeviceView[]>>
@@ -281,6 +299,10 @@ export interface LinkSpaceApi {
   exitInputControl(): Promise<IpcResult<void>>
   /** 设置设备位于本机哪一侧（7.3），null 清除 */
   setDeviceEdge(deviceId: string, edge: DeviceEdge | null): Promise<IpcResult<void>>
+  /** VDD 驱动状态快照（线 3，⑤，只读） */
+  vddDriverStatus(): Promise<VddDriverStatus>
+  /** 安装 VDD 驱动（线 3，⑤，用户显式动作：设置页按钮）。已装且版本符合时直接返回 */
+  installVddDriver(): Promise<IpcResult<{ alreadyInstalled: boolean }>>
   /** 反向投屏（线 2 W7）：请求看对端平板画面并打开画面窗口 */
   requestReverseControl(peerId: string, scaleWidth?: number): Promise<IpcResult<void>>
   /** 反向投屏状态快照（画面窗口轮询/推送用） */

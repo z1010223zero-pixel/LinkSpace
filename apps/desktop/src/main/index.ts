@@ -5,8 +5,9 @@ import { join } from 'node:path'
 import { DeviceManager } from './device-manager'
 import { ScrcpyAdapter } from './scrcpy-adapter'
 import { registerIpc } from './ipc'
-import { locateBinaries, locateVirtualDisplayBinaries } from './platform'
+import { locateBinaries, locateVirtualDisplayBinaries, locateVddPackageZip } from './platform'
 import { VirtualDisplayManager } from './extend/virtual-display'
+import { VddDriverManager } from './extend/vdd-driver'
 import { log } from './log'
 import { Host } from './host'
 import { ReverseWindowManager } from './reverse-window'
@@ -103,6 +104,11 @@ const virtualDisplayManager = new VirtualDisplayManager({
   swdHostPath: nativeDisplayBins.swdHost,
   listDisplays: listPhysicalDisplays
 })
+
+// VDD 驱动生命周期（线 3，⑤）：安装/启用/卸载由用户在设置页显式触发
+// （IPC vdd-driver:install），本处只构造管理器、不自动安装。
+// zip 缺失时 status() 报 packageBundled=false，安装以 package-missing 拒绝。
+const vddDriverManager = new VddDriverManager({ zipPath: locateVddPackageZip() })
 
 const host = new Host({
   displayName: 'LinkSpace Desktop',
@@ -388,7 +394,7 @@ app.whenReady().then(async () => {
   log.info(`LinkSpace 启动，scrcpy=${b.scrcpy}（来源 ${b.source}）`)
 
   buildAppMenu()
-  registerIpc(() => mainWindow, devices, adapter, host, runtime, reverseWindows)
+  registerIpc(() => mainWindow, devices, adapter, host, runtime, reverseWindows, vddDriverManager)
   createWindow()
 
   // 7.4 退出快捷键：任何时候可退出控制，无需对端同意。未在控制时

@@ -139,3 +139,80 @@ Get-CimInstance Win32_PnPEntity | Where-Object { $_.PNPClass -eq 'Monitor' } | S
 Enable-PnpDevice -InstanceId 'ROOT\DISPLAY\0001' -Confirm:$false
 Disable-PnpDevice -InstanceId 'ROOT\DISPLAY\0001' -Confirm:$false
 ```
+
+## ⑤ 实现：驱动生命周期进桌面应用（2026-11-03）
+
+> 分支 `decision/line2-accessibility-first`。实现文件见下；验证全部走
+> fake 命令执行器，不动真实设备状态（zero 上驱动已装好，也不需要动）。
+
+### 文件
+
+- `apps/desktop/src/main/extend/vdd-driver.ts`——`VddDriverManager`：
+  钉死常量（版本 25.7.23、SHA-256 `E24210…B3A`、132,118 字节、官方直链、
+  `ROOT\DISPLAY\0001`、`mttvdd.inf`、驱动版本 11.30.4.434、
+  `C:\VirtualDisplayDriver\vdd_settings.xml`）；命令执行层可注入
+  （`CommandRunner`，默认 execFile，测试用 fake）；`status()` /
+  `ensureInstalled()` / `setDeviceEnabled()` / `ensureSettings()` /
+  `uninstall()`；全程经 `log.ts` 打日志（只记 basename，不记全路径）。
+- `apps/desktop/src/main/verify-vdd-driver.ts`——无头测试（`npm run verify:vdd-driver`）：
+  status 解析（英文/中文 pnputil 标签各一、已装/未装）、哈希不符与
+  非管理员拒绝安装（且不发出任何安装命令）、安装 happy path（fake，
+  断言 Expand-Archive → 信任导出 → certutil → pnputil /add-driver →
+  复核的每一步命令）、已装直接 ok、enable/disable 命令、settings
+  读/写（临时目录）、uninstall 门禁。共 51 项断言，全部通过。
+- `apps/desktop/src/main/platform.ts`——`locateVddPackageZip()`：
+  环境变量 `LINKSPACE_VDD_ZIP` → 打包资源 `<resourcesPath>/vdd/` →
+  开发期仓内 `resources/vdd/`；找不到返回 null，不抛错。
+- `apps/desktop/src/main/index.ts`——构造管理器并传给 `registerIpc`；
+  只构造，不自动安装。
+- `apps/desktop/src/main/ipc.ts`——新增 `vdd-driver:status`（只读快照）
+  与 `vdd-driver:install`（用户显式动作）；`src/shared/types.ts` 与
+  `src/preload/index.ts` 按现有模式补暴露。**不设任何自动调用点**，
+  启动与会话流程里都不调安装；渲染层 UI（设置页按钮）待后续接。
+- `apps/desktop/resources/vdd/`——随包驱动：官方 driver-only zip
+  （已验大小 + SHA-256）、上游 MIT `LICENSE.txt` 全文、README
+  （来源 URL、版本、哈希、信任前提、已知缺口）。`package.json`
+  `extraResources` 已接线（`resources/vdd` → `vdd`）。
+
+### 信任方法（选定：从 .cat 实时取签名者证书）
+
+安装流程：已装且版本符合直接 ok → 管理员检查 → 随包 zip 验大小 +
+SHA-256 → `Expand-Archive` 解到临时目录 → 信任 → `pnputil /add-driver
+<inf> /install` → 再查 `status()` 复核版本。每步失败返回可操作的
+reason（`not-admin` / `package-missing` / `hash-mismatch` /
+`extract-failed` / `trust-failed` / `install-failed` / `verify-failed` 等）。
+
+信任步骤选了**从 `.cat` 实时取签名者证书**，不用随包附带 `.cer`：
+
+1. 上游 driver-only 包里只有 `.inf` / `.dll` / `.cat`，没有 `.cer`——
+   证书只能从包里现取；现取还把信任锚定在刚验过哈希的同一份包上，
+   不存在“附带的 .cer 与驱动包漂移”的风险。
+2. 只导叶子证书（签名者本人）：`Get-AuthenticodeSignature -LiteralPath
+   mttvdd.cat` → 验 `Status -eq Valid` 且 `SignerCertificate.Subject`
+   含 `SignPath Foundation` → `Export('Cert')` 写临时 `.cer` →
+   `certutil -addstore -f TrustedPublisher <cer>`。
+   整条链的根（SignPath → GlobalSign R45）早已在 Windows 受信根里
+   （TwinDesk issue #14 实测佐证：链构建 OK、根在 LocalMachine\Root），
+   本步只需补“发布者可信”这一环；绝不往 Root 里加任何东西。
+3. 机制是微软官方文档的做法：非 WHQL 的 Authenticode 签名驱动，发布者
+   进了 TrustedPublisher 即可静默预装（Microsoft Learn《Digital
+   Signatures and PnP Device Installation》）；上游同类讨论见
+   Virtual-Display-Driver issue #315。
+4. 不碰 Secure Boot、不开 test signing、不装自签测试证书。
+   卸载时不清理 TrustedPublisher 里的 SignPath 证书（整机维度的发布者
+   信任，其他 SignPath 签名驱动也可能依赖；卸载只拆驱动包）。
+
+### 已知缺口：新机器上的设备节点创建
+
+`pnputil /add-driver` 只把驱动包暂存进驱动库并装到已存在的匹配设备上；
+在一台从未装过 VDD 的机器上，设备节点本身（INF 硬件 ID `Root\MttVDD`，
+见 `MttVDD.inf` 的 `[Standard.NTamd64]` 节）还需另一步创建
+（`devcon install MttVDD.inf Root\MttVDD`，或 SwDeviceCreate 小助手，
+如 TwinDesk 的 `macshare-winhelper --add-root-device`）。本版本不自带
+devcon、不写 P/Invoke 助手——`ensureInstalled()` 成功后若 `status()` 仍
+报 `devicePresent=false`，即节点未建，属待补的后续工作，不是安装失败的
+误报。zero 上节点 2026-10-28 前后已建好，不受影响。
+
+另：ARM64 Windows 只接受微软签名的驱动包，VDD 25.7.23 是 SignPath 签名，
+装不上（`0x800B0109`，见 TwinDesk issue #14 / 上游 #465）；管理器在
+`install-failed` 的 detail 里会点出这一可能。zero 是 x64，不受影响。

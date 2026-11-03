@@ -18,6 +18,7 @@ import type { ReverseWindowManager } from './reverse-window'
 import type { DiscoveredService } from './discovery'
 import type { PendingPairing } from './pairing'
 import type { TransferTask } from './transfer/manager'
+import type { VddDriverManager } from './extend/vdd-driver'
 import { log } from './log'
 
 export interface EnvInfo {
@@ -75,6 +76,8 @@ const CHANNELS = [
   'extend:approve',
   'extend:deny',
   'extend:terminate',
+  'vdd-driver:status',
+  'vdd-driver:install',
   'reverse-control:start',
   'reverse-stream:status',
   'reverse-stream:setQuality',
@@ -118,7 +121,8 @@ export function registerIpc(
   adapter: ScrcpyAdapter,
   host: Host,
   runtime: RuntimeSource,
-  reverseWindows: ReverseWindowManager
+  reverseWindows: ReverseWindowManager,
+  vddDriver: VddDriverManager
 ): void {
   const invoke = <T>(channel: string, handler: () => Promise<T> | T): void => {
     ipcMain.handle(channel, async () => {
@@ -479,6 +483,18 @@ export function registerIpc(
     host.terminateExtendControl()
     broadcast(getWindow, 'extend:changed')
     return { ok: true as const }
+  })
+
+  // ---------- VDD 驱动生命周期（线 3，⑤） ----------
+  // status 是只读快照；install 是用户显式动作（设置页按钮触发），
+  // 本模块不设任何自动调用点，不在启动/会话流程里调用。
+  invoke('vdd-driver:status', () => vddDriver.status())
+
+  ipcMain.handle('vdd-driver:install', async () => {
+    const r = await vddDriver.ensureInstalled()
+    return r.ok
+      ? { ok: true as const, value: { alreadyInstalled: r.alreadyInstalled } }
+      : fail(`${r.reason}：${r.detail}`)
   })
 
   // 控制端退出（7.4）。与被控端拔掉是两条独立路径，不能混用：
