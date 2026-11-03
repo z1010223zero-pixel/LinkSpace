@@ -30,7 +30,8 @@ import cn.linkspace.client.service.ReverseScreenStreamer
  *   显示当前档位 + 说明切换位置，不做一点就报“没有到桌面的控制连接”
  *   的假下拉（requestScreenStream 在无会话时会写 inputMessage）。
  * - 反向流分辨率由请求方（电脑）定档位，本机无设置入口，只显示状态。
- * - 扩展屏是线 3 内容：只做“研制中”占位，Mirror / Extend 不可点。
+ * - 扩展屏是线 3 内容：会话与画面流已接线（设备详情页入口），本页
+ *   只做说明，不放可点的 Mirror / Extend 按钮。
  */
 @Composable
 fun ScreenPage(
@@ -116,11 +117,11 @@ fun ScreenPage(
         ) {
             Column(Modifier.padding(LinkSpaceSpacing.lg)) {
                 Text(
-                    "研制中",
+                    "扩展屏（线 3）",
                     style = MaterialTheme.typography.bodyMedium,
                 )
                 Text(
-                    "把平板当电脑的第二块屏幕（扩展 / 镜像）是线 3 的内容，当前版本不可用。",
+                    "在设备详情里点「扩展屏」发起，电脑端确认后本机显示扩展屏画面。画面上的触控要点按需先建立键鼠控制（只看画面不用）。镜像仍走投屏入口。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -129,6 +130,12 @@ fun ScreenPage(
                     Spacer(Modifier.padding(horizontal = LinkSpaceSpacing.xs))
                     OutlinedButton(onClick = {}, enabled = false) { Text("扩展") }
                 }
+                Text(
+                    "本页按钮仅作说明，入口在设备详情页。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = LinkSpaceSpacing.sm),
+                )
             }
         }
 

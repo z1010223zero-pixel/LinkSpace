@@ -854,7 +854,21 @@ class LinkSpaceService private constructor(private val appContext: Context) {
             listener = object : DisplayExtendController.Listener {
                 override fun onSessionActive(peerId: String, sessionId: String, virtualScreen: DisplayExtendController.VirtualScreen) {
                     _extendState.value = ExtendState("active", peerId, virtualScreen)
-                    _inputMessage.value = "扩展屏会话已建立（${virtualScreen.w}×${virtualScreen.h}），画面流接线后可用"
+                    _inputMessage.value = "扩展屏会话已建立（${virtualScreen.w}×${virtualScreen.h}），正在请求扩展屏画面…"
+                    // 3.2-3：会话一建立就请求虚拟显示器画面流（source =
+                    // virtual-display，前置为本扩展屏会话，不要求 input
+                    // 会话）。流 start 回来后 MainActivity 按 screenStream
+                    // 状态弹出与镜像流同一套观看页；触控映射走同一条链
+                    // （letterbox + ownScreen → 桌面 streamRegion =
+                    // virtualScreen），落点进虚拟显示器坐标空间。
+                    // 注意：扩展屏画面本身不需要 input 会话，但画面上的
+                    // 触控回传要经过 input 会话（InputController 无会话
+                    // 时 sendEvents 是安全空操作），只看画面不点按时不
+                    // 建 input 会话也行，点按需先建立键鼠控制。
+                    requestScreenStream(
+                        source = Protocol.STREAM_SOURCE_VIRTUAL_DISPLAY,
+                        force = true
+                    )
                 }
 
                 override fun onSessionEnded(reason: String) {
@@ -1403,6 +1417,13 @@ class LinkSpaceService private constructor(private val appContext: Context) {
     private var lastStreamScaleWidth = 1920
 
     /**
+     * 上次投屏帧源（协议 4.7，线 3）：'screen'（线 1 镜像）或
+     * 'virtual-display'（线 3 扩展屏）。自动重连与画质换档时沿用，
+     * 换档不得把扩展屏流悄悄切回镜像流。
+     */
+    private var lastStreamSource: String = Protocol.STREAM_SOURCE_SCREEN
+
+    /**
      * 观看页的渲染视图（弱引用防泄漏）。解码器每帧回调后主线程
      * submit；观看页销毁时置空，解码出的帧自然丢弃。
      */
@@ -1424,6 +1445,13 @@ class LinkSpaceService private constructor(private val appContext: Context) {
      * 下线时 65s 后停手交给用户。
      */
     private fun scheduleStreamReconnect(peerFullId: String) {
+        // 扩展屏流不断线重连：断连时 display-extend 会话已结束（对端
+        // onPeerDisconnected），流的前置已不在，重连只会先弹 input 确
+        // 认再报“需要先建立扩展屏会话”；用户从设备详情重发扩展屏请求即可。
+        if (lastStreamSource == Protocol.STREAM_SOURCE_VIRTUAL_DISPLAY) {
+            Log.i(TAG, "扩展屏连接断开，不自动重连（扩展屏会话已结束，需用户重发请求）")
+            return
+        }
         Log.i(TAG, "投屏连接断开，5s 后开始自动重连（最多 4 次）")
         CoroutineScope(Dispatchers.IO).launch {
             val backoffs = longArrayOf(5000, 10000, 20000, 30000)
@@ -1510,26 +1538,50 @@ class LinkSpaceService private constructor(private val appContext: Context) {
     /** 视频块缓冲：WS 二进制帧到达早于渲染面就绪时暂存（含流头 SPS/PPS） */
     private val pendingVideo = java.util.ArrayDeque<ByteArray>()
 
-    fun requestScreenStream(displayIndex: Int = -1, scaleWidth: Int = 1920) {
+    /**
+     * 请求投屏流（线 1 镜像 + 线 3 扩展屏共用）。
+     *
+     * @param source 帧源（协议 4.7）：null = 沿用上次（自动重连与画质
+     *   换档时传 null，不得把扩展屏流悄悄切回镜像流）；'virtual-display'
+     *   时 display 参数无意义（虚拟显示器只有一块），直接按虚拟显示器
+     *   尺寸开流，不弹显示器清单。
+     * @param force true = 跳过“同分辨率重复请求忽略”的去重（扩展屏会
+     *   话建立时自动请求用：镜像流可能正在跑同档位，去重会把扩展屏
+     *   请求吞掉，桌面继续推镜像流）。
+     */
+    fun requestScreenStream(
+        displayIndex: Int = -1,
+        scaleWidth: Int = 1920,
+        source: String? = null,
+        force: Boolean = false
+    ) {
         val out = outbound ?: run {
             _inputMessage.value = "没有到桌面的控制连接"
             return
         }
+        val resolvedSource = source ?: lastStreamSource
         // 同一分辨率重复请求直接忽略；换分辨率则允许重建推流
-        if (streamDecoder != null && scaleWidth == lastStreamScaleWidth) return
-        // 换分辨率时如果不指定显示器，沿用当前选屏，避免再次弹显示器清单
-        val resolvedDisplayIndex = if (displayIndex >= 0) displayIndex else lastStreamDisplayIndex
+        if (!force && streamDecoder != null && scaleWidth == lastStreamScaleWidth &&
+            resolvedSource == lastStreamSource
+        ) return
+        // 换分辨率时如果不指定显示器，沿用当前选屏，避免再次弹显示器清单；
+        // 扩展屏源不选屏（虚拟显示器只有一块）
+        val resolvedDisplayIndex =
+            if (resolvedSource == Protocol.STREAM_SOURCE_VIRTUAL_DISPLAY) -1
+            else if (displayIndex >= 0) displayIndex else lastStreamDisplayIndex
         lastStreamDisplayIndex = resolvedDisplayIndex
         lastStreamScaleWidth = scaleWidth
+        lastStreamSource = resolvedSource
         _streamScaleWidth.value = scaleWidth
         pendingVideo.clear()
         val text = envelope(Protocol.TYPE_SCREEN_STREAM_REQUEST, out.peerId) {
             // 带 display 的请求直接选屏；不带则被控端回显示器清单
             if (resolvedDisplayIndex >= 0) put("display", resolvedDisplayIndex)
             put("scaleWidth", scaleWidth)
+            put("source", resolvedSource)
         }.toString()
         outboundWriter.execute { runCatching { client.sendText(out.conn, text) } }
-        Log.i(TAG, "投屏请求已发（display=$resolvedDisplayIndex, scaleWidth=$scaleWidth）")
+        Log.i(TAG, "投屏请求已发（display=$resolvedDisplayIndex, scaleWidth=$scaleWidth, source=$resolvedSource）")
     }
 
     /**
