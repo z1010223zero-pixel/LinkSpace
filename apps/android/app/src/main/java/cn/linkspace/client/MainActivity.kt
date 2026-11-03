@@ -344,6 +344,14 @@ fun MainScreen(service: LinkSpaceService, onClipboardToggle: (Boolean) -> Unit) 
         }
     }
 
+    /** 线 3：请求把桌面用作扩展屏（display-extend 会话，画面流接线在 3.2-1） */
+    fun requestExtend(peer: DiscoveredService) {
+        scope.launch {
+            service.requestDisplayExtend(peer = peer)
+                .onFailure { board.danger(it.message ?: "请求失败") }
+        }
+    }
+
     fun revoke(deviceId: String, displayName: String) {
         service.revokeTrust(deviceId)
         selectedDevice = null
@@ -402,6 +410,7 @@ fun MainScreen(service: LinkSpaceService, onClipboardToggle: (Boolean) -> Unit) 
                                 selected = selectedDevice,
                                 onSelect = { selectedDevice = it },
                                 onControl = ::requestControl,
+                                onExtend = ::requestExtend,
                                 onSendFiles = { peer ->
                                     sendTarget = peer
                                     pickFiles.launch(arrayOf("*/*"))
@@ -410,6 +419,7 @@ fun MainScreen(service: LinkSpaceService, onClipboardToggle: (Boolean) -> Unit) 
                                 onEndControl = { service.input.stop() },
                                 onTerminateControl = { service.terminateControl() },
                                 onStopStream = { service.stopReverseStream() },
+                                onStopExtend = { service.stopDisplayExtend() },
                             )
                             NavPage.SCREEN -> ScreenPage(service = service)
                             NavPage.FILES -> FilesPage(service = service, board = board)
@@ -445,6 +455,7 @@ fun MainScreen(service: LinkSpaceService, onClipboardToggle: (Boolean) -> Unit) 
                     info = info,
                     onDismiss = { selectedDevice = null },
                     onControl = ::requestControl,
+                    onExtend = ::requestExtend,
                     onSendFiles = { peer ->
                         selectedDevice = null
                         sendTarget = peer
@@ -454,6 +465,7 @@ fun MainScreen(service: LinkSpaceService, onClipboardToggle: (Boolean) -> Unit) 
                     onEndControl = { service.input.stop() },
                     onTerminateControl = { service.terminateControl() },
                     onStopStream = { service.stopReverseStream() },
+                    onStopExtend = { service.stopDisplayExtend() },
                 )
             }
 

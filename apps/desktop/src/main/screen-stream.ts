@@ -72,6 +72,18 @@ export const STREAM_DIRECTION_REVERSE = 'reverse'
 export type ScreenStreamDirection = 'forward' | 'reverse'
 
 /**
+ * screen.stream.request 的帧源（协议 4.7 [PROTOCOL] 2026-11-03 登记，线 3）：
+ * screen = 线 1 镜像投屏（gdigrab 抓真实桌面，默认）；virtual-display =
+ * 扩展屏（虚拟显示器 DD 帧，前置为活动 display-extend 会话，3.2-1 实现）。
+ * 与 Android 端 Protocol.kt 的 STREAM_SOURCE_* 同值，约束见
+ * protocol.json constraints.streamSources。
+ */
+export const STREAM_SOURCE_SCREEN = 'screen'
+export const STREAM_SOURCE_VIRTUAL_DISPLAY = 'virtual-display'
+/** screen.stream.request payload.source 的取值 */
+export type ScreenStreamSource = 'screen' | 'virtual-display'
+
+/**
  * 解析 screen.stream.stop 的停流方向（与 Android 端 Protocol.kt 的
  * resolveStreamStopDirection 同规则，两端必须一致）：
  * - direction 明确给出 forward/reverse：直接采用；

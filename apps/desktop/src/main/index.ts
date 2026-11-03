@@ -404,6 +404,14 @@ app.whenReady().then(async () => {
         refreshEdgeLayout()
         broadcast('input:changed')
       })
+      .on('extendRequested', () => {
+        // 9.1：扩展屏请求改动本机显示拓扑，同样必须让用户看到，
+        // 渲染层据此弹确认条（extend:state 取待确认请求）。
+        broadcast('extend:changed')
+      })
+      .on('extendChanged', () => {
+        broadcast('extend:changed')
+      })
   } catch (err) {
     log.error(`主机启动失败: ${String(err)}`)
   }

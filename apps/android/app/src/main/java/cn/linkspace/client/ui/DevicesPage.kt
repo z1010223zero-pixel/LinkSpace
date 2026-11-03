@@ -44,16 +44,19 @@ fun DevicesPage(
     selected: DeviceDetailInfo?,
     onSelect: (DeviceDetailInfo) -> Unit,
     onControl: (DiscoveredService) -> Unit,
+    onExtend: (DiscoveredService) -> Unit,
     onSendFiles: (DiscoveredService) -> Unit,
     onRevoke: (deviceId: String, displayName: String) -> Unit,
     onEndControl: () -> Unit,
     onTerminateControl: () -> Unit,
     onStopStream: () -> Unit,
+    onStopExtend: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val discovered by service.discovered.collectAsStateWithLifecycle()
     val trusted by service.trusted.collectAsStateWithLifecycle()
     val inputState by service.inputState.collectAsStateWithLifecycle()
+    val extendState by service.extendState.collectAsStateWithLifecycle()
     val controlledBy by service.controlledBy.collectAsStateWithLifecycle()
     val reverseStatus by service.reverseStreamStatus.collectAsStateWithLifecycle()
 
@@ -77,6 +80,7 @@ fun DevicesPage(
         inputPeerId = inputState.peerId,
         controlledByName = controlledBy,
         streamingPeerId = reverseStatus?.active?.peerId,
+        extendPeerId = extendState.peerId,
         now = now,
     )
     fun detailOfTrusted(t: TrustStore.Entry): DeviceDetailInfo {
@@ -88,6 +92,7 @@ fun DevicesPage(
             inputPeerId = inputState.peerId,
             controlledByName = controlledBy,
             streamingPeerId = reverseStatus?.active?.peerId,
+            extendPeerId = extendState.peerId,
             now = now,
         )
     }
@@ -133,11 +138,13 @@ fun DevicesPage(
                             DeviceDetailContent(
                                 info = selected,
                                 onControl = onControl,
+                                onExtend = onExtend,
                                 onSendFiles = onSendFiles,
                                 onRevoke = onRevoke,
                                 onEndControl = onEndControl,
                                 onTerminateControl = onTerminateControl,
                                 onStopStream = onStopStream,
+                                onStopExtend = onStopExtend,
                             )
                         }
                     }

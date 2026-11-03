@@ -116,6 +116,14 @@
 
 > **[PROTOCOL] 2026-11-02 登记**（线 2 W4）：`sessionType: 'input'` 的被控方向新增 Android 端：`ControlledInputSession`（`apps/android/.../service/ControlledInputSession.kt`）与桌面端 `InputSessionCoordinator` 对称——pending/active 双态、30s 请求 TTL、approve/deny、会话匹配校验先行。**W5 已接完**：AccessibilityService 注入（`LinkSpaceAccessibilityService`，`dispatchGesture`/`dispatchKeyEvent`，`AndroidManifest` 已声明）+ 确认 UI（MainActivity 确认弹窗，30s 超时自动拒绝）+ 无障碍服务未开启时控制请求直接回 `session.reject`（reason `accessibility disabled`）并引导授权；注入失败带明确原因上报，不静默丢掉。`input.event` 解码与坐标映射与桌面端同口径（非法批次整批拒绝，move 按两端屏幕比例映射）。桌面端控制端复用现有 `InputController`，`host.ts` 的 `requestInputControl` 只校验在线与已配对、无设备类型限制，对 Android 被控端同样生效。`display-extend` 不在本批动。
 
+> **[PROTOCOL] 2026-11-03 登记**（线 3，3.2-2）：`sessionType: 'display-extend'` 从占位变成真正会话类型，与 `input` 会话解耦。发起方是平板（控制端，想把桌面扩展出一块虚拟显示器给自己当第二屏），被控方是桌面（拥有虚拟显示器的一方，须用户确认——扩展屏改动本机显示拓扑，同样走 9.1「每次请求都有明确提示」）。
+> - **生命周期**：与 `input` 会话同构、槽位独立——pending/active 双态、30s 请求 TTL、approve/deny、会话匹配校验先行；桌面端 `DisplayExtendSessionCoordinator`（`apps/desktop/src/main/extend/session.ts`）与平板端 `DisplayExtendController`（`apps/android/.../service/DisplayExtendController.kt`）各一。同一时刻至多一个挂起/活动扩展会话（虚拟显示器只有一块）；重复请求回 `resource busy`。
+> - **`session.start` 参数**：`{ sessionType: 'display-extend', sessionId, params: { width?, height?, scaleWidth?, displayName } }`。`width/height` 是平板希望的虚拟显示器尺寸（1..32768 的整数，成对出现，缺一不可；省略时由桌面按 INF 预置模式选）；`scaleWidth` 是希望的推流宽度档位（1280/1920/2560/3840，省略默认 1920）；`displayName` 仅用于被控端确认弹窗展示。`sessionId` 限定 `[A-Za-z0-9_-]{1,64}`，与 `input` 同规则。
+> - **`session.accept` 回执**：`{ sessionId, virtualScreen: { x, y, w, h } }`——虚拟显示器在虚拟屏坐标系里的矩形（x/y 可为负，w/h ≥ 1），是平板触控映射与推流尺寸的基准；`virtualScreen` 缺失或非法时控制端拒绝本次请求。`input` 的 accept 仍为 `{ sessionId, screen }`，两者不混用。
+> - **虚拟显示器是会话级资源**：桌面 approve 成功时创建（`VirtualDisplayManager`，3.2），会话结束（stop / 断连 / 撤销 / 本机终止）的任何路径都销毁，不留残留设备；创建失败时会话不建立，回 `session.reject`（reason 为创建失败原因，如 `virtual display unavailable`），绝不先 accept 再补建。
+> - **解耦点（3.2-2 验收口径）**：无活动 `input` 会话时也能开扩展屏；`input` 会话结束不终止扩展屏推流；扩展屏结束也不动 `input` 会话。两类会话的 sessionId 各自独立，`session.stop` 按 sessionId 各自匹配。
+> - **仍未验证（无真机）**：虚拟显示器创建须测试签名 + 关 Secure Boot（attestation 未落地，见任务清单 3.3-4）；平板侧扩展画面的实际延迟/画质、触控落点，待用户在小新平板 Pro GT 上走查。
+
 ### 4.4 剪贴板
 
 | 类型 | 方向 | payload | 说明 |
@@ -192,13 +200,18 @@
 > - **背压与重连（复用线 1 口径）**：发送积压超 3MB 丢到最近关键帧（与线 1 解码端同值）；码率自适应 2s 采样，>1MB 计分 +1、<100KB 计分 -1，连续 3 次拥塞降档、连续 -8 升档；断线重连退避 5/10/20/30s×4——观看方（桌面）重发 `screen.stream.request`，4 次未成功停手；解码端关键帧恢复（丢到最近 SPS）与线 1 相同。
 > - **[PROTOCOL] 2026-11-02 登记**（线 2 W7）：录屏授权 UI 已接线——MainActivity 弹确认框，同意后弹系统录屏授权框，授权后调 `LinkSpaceService.startReverseStreamWithProjection()`；拒绝/取消回 `screen.stream.error`（理由 `denied by user` / `failed to start screen capture`），桌面窗口显示原因后关闭；30s 无人确认由 `ReverseScreenStreamer` TTL 自动拒绝。targetSdk 35 下退后台承接已补：AndroidManifest 前台服务加 `foregroundServiceType="dataSync|mediaProjection"` + `FOREGROUND_SERVICE_MEDIA_PROJECTION` 权限，授权后前台服务升级为双类型。
 > - **[PROTOCOL] 2026-11-03 登记**（线 2 未阻塞项 2）：`screen.stream.stop` 的方向位已落地（见下表 `direction`），双向并发时各停各的；混用版本时按上表矩阵退化（旧端仍会双停，须两端都升级才完整）。**仍未验证（无真机）**：并发双向流的停流行为待用户在小新平板 Pro GT 上走查；MediaCodec 在该 ROM 上的实际编码表现、Annex-B/AVCC 形态、画面延迟、码率自适应效果；退后台后录屏是否持续；系统授权框的实际表现。
+>
+> **[PROTOCOL] 2026-11-03 登记**（线 3，3.2-1/3.2-2）：`screen.stream.*` 的**扩展屏源**——虚拟显示器画面 → 平板。`screen.stream.request` 加 `source?: 'screen' | 'virtual-display'`（省略默认 `'screen'`，即线 1 镜像投屏口径，不变）：
+> - `source: 'virtual-display'` 时前置改为：活动 `display-extend` 会话存在且 peerId 匹配（**不要求活动 `input` 会话**，与 input 会话解耦）；帧源是虚拟显示器的 DD 帧（3.2-1），不是 gdigrab 抓真实桌面；`display` 参数此时无意义（虚拟显示器只有一块），忽略；`screen.stream.start` 的 `w/h` 是虚拟显示器的尺寸（触控映射基准，见 §4.3 登记的 `virtualScreen`）。
+> - `screen.stream` 镜像（gdigrab 抓真实桌面）是**降级兜底**，不是已交付的扩展屏：文档与 UI 中明确标为“降级方案”，不与真实扩展屏混用同一入口/文案。
+> - 帧源切换本身（DD 抓帧 → 编码 → WS）见 3.2-1 实现；本登记只定会话门与参数语义。
 
 | 类型 | 方向 | payload | 说明 |
 |---|---|---|---|
-| `screen.stream.request` | 控制端 → 被控端 | `{ display?: number, scaleWidth?: number }` | 请求开始投屏。前置：活动键鼠会话存在且 peerId 匹配、被控端 ffmpeg 可用，否则回 `error`。**`display` 省略时**：被控端单显示器直接按 0 号屏开流（免选择器）；多显示器回 `screen.stream.displays` 清单，由用户挑选后再带 `display` 重发本消息（自动重连带记住的索引时同样直连）。**`scaleWidth`**：目标视频宽度档位（1280/1920/2560/3840），省略时默认 1920；换分辨率会重启推流。**[PROTOCOL] 2026-11-01 登记**（用户要求画质/延迟可切换）。**[PROTOCOL] 2026-11-02 登记**（线 2 W6，反向）：桌面看平板时同一条消息反向使用——请求方是桌面、源端是平板；此时**不要求活动 input 会话**（与 input 会话解耦），前置改为：对端已配对 + 平板端 MediaProjection 系统录屏授权；`display` 参数反向时无意义（平板单屏），忽略。 |
+| `screen.stream.request` | 控制端 → 被控端 | `{ display?: number, scaleWidth?: number, source?: 'screen' \| 'virtual-display' }` | 请求开始投屏。前置：活动键鼠会话存在且 peerId 匹配、被控端 ffmpeg 可用，否则回 `error`。**`display` 省略时**：被控端单显示器直接按 0 号屏开流（免选择器）；多显示器回 `screen.stream.displays` 清单，由用户挑选后再带 `display` 重发本消息（自动重连带记住的索引时同样直连）。**`scaleWidth`**：目标视频宽度档位（1280/1920/2560/3840），省略时默认 1920；换分辨率会重启推流。**[PROTOCOL] 2026-11-01 登记**（用户要求画质/延迟可切换）。**[PROTOCOL] 2026-11-02 登记**（线 2 W6，反向）：桌面看平板时同一条消息反向使用——请求方是桌面、源端是平板；此时**不要求活动 input 会话**（与 input 会话解耦），前置改为：对端已配对 + 平板端 MediaProjection 系统录屏授权；`display` 参数反向时无意义（平板单屏），忽略。**[PROTOCOL] 2026-11-03 登记**（线 3，3.2-1/3.2-2）：`source: 'virtual-display'` 时前置改为活动 `display-extend` 会话存在且 peerId 匹配（不要求活动 input 会话），帧源是虚拟显示器 DD 帧；`display` 此时无意义，忽略；省略 `source` 默认 `'screen'`（线 1 镜像投屏口径）。 |
 | `screen.stream.displays` | 被控端 → 控制端 | `{ displays: [{ x, y, w, h }] }` | 多显示器清单（虚拟屏坐标），控制端弹选择器。**[PROTOCOL] 2026-10-31 登记**（ToDesk 式多屏选择，用户提出） |
 | `screen.cursor` | 被控端 → 控制端 | `{ x, y, w, h }` | 物理光标坐标广播（region-local 像素 + 区域尺寸，33ms 限流），控制端本地绘制光标覆盖层（采集 draw_mouse=0 不含光标）。**[PROTOCOL] 2026-10-31 登记**（开源方案同款：光标本地画，与采集解耦） |
-| `screen.stream.start` | 被控端 → 控制端 | `{ w, h, scaleWidth }` | 推流开始。`w/h` 是被控端虚拟屏全景尺寸（触控换算基准之一；实际流分辨率以流内 SPS 为准，平板按其 letterbox 等比渲染）；`scaleWidth` 是当前档位。**[PROTOCOL] 2026-11-01 登记**。**[PROTOCOL] 2026-11-02 登记**（线 2 W6，反向）：平板作源端时同一条消息反向使用——`w/h` 是平板编码后的实际流尺寸（桌面接收端据此切 RGBA 帧），`scaleWidth` 是当前档位。 |
+| `screen.stream.start` | 被控端 → 控制端 | `{ w, h, scaleWidth }` | 推流开始。`w/h` 是被控端虚拟屏全景尺寸（触控换算基准之一；实际流分辨率以流内 SPS 为准，平板按其 letterbox 等比渲染）；`scaleWidth` 是当前档位。**[PROTOCOL] 2026-11-01 登记**。**[PROTOCOL] 2026-11-02 登记**（线 2 W6，反向）：平板作源端时同一条消息反向使用——`w/h` 是平板编码后的实际流尺寸（桌面接收端据此切 RGBA 帧），`scaleWidth` 是当前档位。**[PROTOCOL] 2026-11-03 登记**（线 3）：`source: 'virtual-display'` 时 `w/h` 是虚拟显示器的尺寸（与 `session.accept` 的 `virtualScreen` 一致）。 |
 | `screen.stream.stop` | 双向 | `{ direction?: "forward" \| "reverse" }` | 停止投屏（控制端取消 / 被控端 ffmpeg 意外退出时通知对端清 UI）。`direction` 标识停的是哪一路流：`forward` = 线 1（桌面 → 平板），`reverse` = 反向（平板 → 桌面）。会话结束（session.stop/断连）隐式终止投流，不发本消息。**[PROTOCOL] 2026-11-03 登记**（线 2 未阻塞项 2）：`direction` 缺失 = 旧版本对端——接收方按本端状态解析：单路在跑时停那一路；双向都在跑时只停 `forward`（本消息最初的语义），绝不顺手停掉另一路；两路都没跑则忽略。`direction` 非法值忽略，不回声。回声规则：接收方只在确实停掉一路流时才回发带同 `direction` 的 stop 确认，避免来回 ping-pong。混用版本矩阵：新+新精确分流；新接收+旧发送时单路场景正确、双向并发时反向流会继续跑直到平板侧停流/断连/撤销；旧接收+新发送时旧端忽略该字段、仍会双停——完整修复需两端都升级。`request`/`start` 不带 `direction`：`start` 的发送方角色本身已区分方向（源端发、观看方收），无歧义。 |
 | `screen.stream.error` | 被控端 → 控制端 | `{ message }` | 投屏失败回告（无会话 / 缺 ffmpeg / 启动失败） |
 

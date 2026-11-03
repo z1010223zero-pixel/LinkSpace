@@ -20,7 +20,8 @@
 - **⑥ from-to 身份绑定 + id 去重**：已实现（`f5a9af7`）：from 绑定 fail-closed（丢弃 + 记告警，不断连；首条 announce 登记后固定）+ id 去重每连接最近 1024 条；protocol.md §3 缺口已关闭；端到端行为待 2.6 走查。
 - **验证基线（合并树 a9436b1，协调人独立重跑）**：桌面 build + typecheck 0 + verify:input/binding 全过 + verify:protocol 112 项 0 失败 4 警告；Android builder assembleDebug 成功、单测 100 项 0 失败、APK 42,188,968 字节（`/data/home/linkspace-build-final`）。
 - **⑦ 线 3 PoC 入库（3.1）**：已收进仓（2026-11-03）：`native/virtual-display/` 收到 IddCx PoC 全套源码（驱动 8 文件与上游微软示例 SHA-256 逐文件一致、零改动；App 侧 `main.cpp` + 新增 `capture.cpp/h`）+ `evidence/capture-report-2026-10-30.jsonl`；README 重写（构建方法、签名方式、与主进程的接线点、2026-10-30 验证结果全表），状态改为“已收进仓”；仓内 EWDK 28000.2526 复跑 Release x64 构建成功（0 错误，22 秒）。诚实缺口：DISPLAY10 首帧全黑（`lumMin=lumMax=0`，原因未定位，见 README §4）；`.zwork/a/poc/` 的 10-29 草稿副本未采用，以 10-30 验证版为准。3.1-2 解耦已满足：驱动构建不进主构建（独立 EWDK 构建，产物由 .gitignore 排除）。
-- **仍阻塞**：2.6 真机联调、线 3（display-extend、Windows 收尾、联动验证）、PC 锁屏抓屏、h264_mf 注释漂移、软编软解优化。
+- **⑧ 线 3 display-extend 真会话类型（3.2-2）**：已实现（2026-11-03）：协议 §4.3 + §4.7 + protocol.json 登记（sessionTypes / streamSources / `source?`）；桌面端 `extend/session.ts`（被控端 Coordinator + 控制端 Controller，与 input 同构、槽位独立）+ host 路由（session.start 按类型分流，accept/reject/stop 按 sessionId 各自匹配）+ ipc `extend:state/approve/deny/terminate` + `extend:changed` 广播；Android 端 `DisplayExtendController.kt` + LinkSpaceService 接线（双分发环路 fan-out、requestDisplayExtend、stopDisplayExtend、stopAll、断连清理）+ 设备详情“扩展屏”入口（EXTENDING 状态 + 结束扩展按钮）；check-protocol 新增第 10 节钉死三处一致。验证：`verify:extend`（纯逻辑 + 双 Host 环路，含 input 并行/结束不影响扩展）+ verify 全套；Android 单测 `DisplayExtendControllerTest` 12 项待 builder 跑。诚实缺口：桌面主动发起的 extend（extend:request/exit IPC）本批不暴露——平板侧尚无被控端扩展状态机，桌面发起会被平板以 'bad request' 拒绝，待 Android 补被控端分支后再开；虚拟显示器创建出口缺省为不可用（3.2 的 VirtualDisplayManager 接线后才真建屏）；真机行为（创建/触控/画面）待 3.2-1 + 2.6 走查。
+- **仍阻塞**：2.6 真机联调、线 3（帧源切换、Windows 收尾、联动验证）、PC 锁屏抓屏、h264_mf 注释漂移、软编软解优化。
 
 ---
 

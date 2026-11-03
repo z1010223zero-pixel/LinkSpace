@@ -50,7 +50,7 @@ import java.util.Locale
  *（MainActivity.kt:467-470）并入此处；行内不再塞两个 Button。
  */
 
-enum class ControlState { NONE, CONTROLLING, CONTROLLED_BY, STREAMING_TO }
+enum class ControlState { NONE, CONTROLLING, CONTROLLED_BY, STREAMING_TO, EXTENDING }
 
 /** 详情页的展示数据（服务层字段的只读投影，不含任何新状态）。 */
 data class DeviceDetailInfo(
@@ -85,6 +85,7 @@ fun detailFor(
     inputPeerId: String?,
     controlledByName: String?,
     streamingPeerId: String?,
+    extendPeerId: String? = null,
     now: Long,
 ): DeviceDetailInfo {
     val fullId = discovered?.let { service.fullPeerIdOf(it.idPrefix) } ?: trusted?.deviceId
@@ -93,6 +94,9 @@ fun detailFor(
         inputPeerId != null && fullId != null &&
             (inputPeerId == fullId || (discovered != null && inputPeerId.startsWith(discovered.idPrefix))) ->
             ControlState.CONTROLLING
+        extendPeerId != null && fullId != null &&
+            (extendPeerId == fullId || (discovered != null && extendPeerId.startsWith(discovered.idPrefix))) ->
+            ControlState.EXTENDING
         streamingPeerId != null && fullId != null && streamingPeerId == fullId ->
             ControlState.STREAMING_TO
         controlledByName != null && controlledByName == displayName ->
@@ -121,21 +125,25 @@ fun DeviceDetailSheet(
     info: DeviceDetailInfo,
     onDismiss: () -> Unit,
     onControl: (DiscoveredService) -> Unit,
+    onExtend: (DiscoveredService) -> Unit,
     onSendFiles: (DiscoveredService) -> Unit,
     onRevoke: (deviceId: String, displayName: String) -> Unit,
     onEndControl: () -> Unit,
     onTerminateControl: () -> Unit,
     onStopStream: () -> Unit,
+    onStopExtend: () -> Unit,
 ) {
     ModalBottomSheet(onDismissRequest = onDismiss) {
         DeviceDetailContent(
             info = info,
             onControl = onControl,
+            onExtend = onExtend,
             onSendFiles = onSendFiles,
             onRevoke = onRevoke,
             onEndControl = onEndControl,
             onTerminateControl = onTerminateControl,
             onStopStream = onStopStream,
+            onStopExtend = onStopExtend,
             modifier = Modifier.padding(
                 start = LinkSpaceSpacing.lg,
                 end = LinkSpaceSpacing.lg,
@@ -150,11 +158,13 @@ fun DeviceDetailSheet(
 fun DeviceDetailContent(
     info: DeviceDetailInfo,
     onControl: (DiscoveredService) -> Unit,
+    onExtend: (DiscoveredService) -> Unit,
     onSendFiles: (DiscoveredService) -> Unit,
     onRevoke: (deviceId: String, displayName: String) -> Unit,
     onEndControl: () -> Unit,
     onTerminateControl: () -> Unit,
     onStopStream: () -> Unit,
+    onStopExtend: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var showRevokeConfirm by remember { mutableStateOf(false) }
@@ -197,6 +207,11 @@ fun DeviceDetailContent(
                             style = MaterialTheme.typography.bodySmall,
                             color = LinkSpaceStatusColors.Online,
                         )
+                        ControlState.EXTENDING -> Text(
+                            " · 扩展屏",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = LinkSpaceStatusColors.Online,
+                        )
                         ControlState.NONE -> Unit
                     }
                 }
@@ -224,13 +239,13 @@ fun DeviceDetailContent(
                 onClick = { info.discovered?.let(onSendFiles) },
                 modifier = Modifier.weight(1f),
             )
-            // 扩展屏：线 3 未完成，只做“研制中”占位，不可点进假功能
+            // 扩展屏：线 3 会话类型已落地（3.2-2），画面流接线在 3.2-1；
+            // 会话建立后桌面创建虚拟显示器，画面流到后进 Screen 页观看。
             DetailAction(
                 icon = { Icon(Icons.Filled.Cast, contentDescription = null) },
                 label = "扩展屏",
-                subLabel = "研制中",
-                enabled = false,
-                onClick = {},
+                enabled = info.paired && canReach,
+                onClick = { info.discovered?.let(onExtend) },
                 modifier = Modifier.weight(1f),
             )
             DetailAction(
@@ -271,6 +286,13 @@ fun DeviceDetailContent(
                 onClick = onStopStream,
                 modifier = Modifier.fillMaxWidth().padding(top = LinkSpaceSpacing.md),
             ) { Text("停止推流") }
+            ControlState.EXTENDING -> OutlinedButton(
+                onClick = onStopExtend,
+                colors = ButtonDefaults.outlinedButtonColors(
+                    contentColor = LinkSpaceStatusColors.Danger,
+                ),
+                modifier = Modifier.fillMaxWidth().padding(top = LinkSpaceSpacing.md),
+            ) { Text("结束扩展") }
             ControlState.NONE -> Unit
         }
 

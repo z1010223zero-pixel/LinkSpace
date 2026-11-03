@@ -47,6 +47,25 @@ object Protocol {
     const val TYPE_INPUT_EVENT = "input.event"
 
     /**
+     * 会话类型（协议 4.3）：与桌面端 extend/session.ts 的
+     * sessionType 取值一致，约束见 protocol.json constraints.sessionTypes。
+     * display-extend 的发起方是平板（控制端），被控方是桌面。
+     */
+    const val SESSION_TYPE_SCRCPY = "scrcpy"
+    const val SESSION_TYPE_INPUT = "input"
+    const val SESSION_TYPE_DISPLAY_EXTEND = "display-extend"
+
+    /**
+     * screen.stream.request 的帧源（协议 4.7 [PROTOCOL] 2026-11-03 登记）：
+     * screen = 线 1 镜像投屏（gdigrab 抓真实桌面，默认）；virtual-display =
+     * 线 3 扩展屏（虚拟显示器 DD 帧，前置为活动 display-extend 会话）。
+     * 与桌面端 screen-stream.ts 的 STREAM_SOURCE_* 同值，
+     * 约束见 protocol.json constraints.streamSources。
+     */
+    const val STREAM_SOURCE_SCREEN = "screen"
+    const val STREAM_SOURCE_VIRTUAL_DISPLAY = "virtual-display"
+
+    /**
      * 屏幕投屏（寄生在键鼠会话内，[PROTOCOL] 新增）：
      * request 由平板发（需同 peer 的 active 会话）；start/stop/error 由
      * 桌面回。start 携带推流 TCP 端口与虚拟屏物理尺寸（触控映射基准）。

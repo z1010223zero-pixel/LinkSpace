@@ -100,6 +100,8 @@ const tsClipboard = read(resolve(DESKTOP, 'clipboard.ts'))
 const tsTransferServer = read(resolve(DESKTOP, 'transfer/server.ts'))
 const tsChunker = read(resolve(DESKTOP, 'transfer/chunker.ts'))
 const tsHost = read(resolve(DESKTOP, 'host.ts'))
+const tsExtend = read(resolve(DESKTOP, 'extend/session.ts'))
+const ktExtend = read(resolve(ANDROID, 'DisplayExtendController.kt'))
 
 const jsonTypes = protocol.messageTypes.map((m) => m.type)
 const jsonTypeSet = new Set(jsonTypes)
@@ -327,6 +329,49 @@ check('Android commitText 入口', true, ktA11y.includes('commitText'), 'LinkSpa
 mustContain('桌面 input.text 发送', tsSession, "'input.text'", 'input/session.ts')
 mustContain('桌面 input.error 接收', tsHost, "'input.error'", 'host.ts')
 mustContain('桌面 screen.paste 发送', tsHost, "'screen.paste'", 'host.ts')
+
+// ---------- 10. 扩展屏 display-extend（协议 4.3 / 4.7，线 3，3.2-2） ----------
+// 会话类型三值与帧源二值在三处一致；session.start 按类型路由，
+// 扩展会话的创建/销毁出口真实存在，不只常量对齐。
+check('sessionTypes', ['scrcpy', 'input', 'display-extend'], C.sessionTypes, 'protocol.json constraints')
+check('streamSources', ['screen', 'virtual-display'], C.streamSources, 'protocol.json constraints')
+check(
+  'sessionType display-extend（桌面）',
+  true,
+  tsExtend.includes("'display-extend'"),
+  'extend/session.ts'
+)
+check(
+  'sessionType display-extend（Android）',
+  true,
+  ktConst(kt, 'SESSION_TYPE_DISPLAY_EXTEND').replace(/^"|"$/g, '') === 'display-extend',
+  'Protocol.kt SESSION_TYPE_DISPLAY_EXTEND'
+)
+check(
+  'sessionType input（Android）',
+  true,
+  ktConst(kt, 'SESSION_TYPE_INPUT').replace(/^"|"$/g, '') === 'input',
+  'Protocol.kt SESSION_TYPE_INPUT'
+)
+check(
+  'sessionType scrcpy（Android）',
+  true,
+  ktConst(kt, 'SESSION_TYPE_SCRCPY').replace(/^"|"$/g, '') === 'scrcpy',
+  'Protocol.kt SESSION_TYPE_SCRCPY'
+)
+check('streamSources（桌面）', C.streamSources, ['STREAM_SOURCE_SCREEN', 'STREAM_SOURCE_VIRTUAL_DISPLAY']
+  .map((n) => tsConst(tsStream, n).replace(/^['"]|['"]$/g, '')), 'screen-stream.ts STREAM_SOURCE_*')
+check('streamSources（Android）', C.streamSources, ['STREAM_SOURCE_SCREEN', 'STREAM_SOURCE_VIRTUAL_DISPLAY']
+  .map((n) => ktConst(kt, n).replace(/^"|"$/g, '')), 'Protocol.kt STREAM_SOURCE_*')
+const startEntry = protocol.messageTypes.find((m) => m.type === 'session.start')
+check('session.start payload', ['sessionType', 'params'], startEntry?.payload ?? null, 'protocol.json messageTypes')
+check('protocol.md 登记 display-extend', true, md.includes('display-extend') && md.includes('virtualScreen') && md.includes('DisplayExtendSessionCoordinator'), 'docs/protocol.md §4.3')
+check('protocol.md 登记扩展屏帧源', true, md.includes("source?: 'screen' | 'virtual-display'") && md.includes('virtual-display'), 'docs/protocol.md §4.7')
+mustContain('桌面 session.start 按类型路由', tsHost, "sessionType === 'display-extend'", 'host.ts')
+mustContain('桌面 extend approve 入口', tsHost, 'approveExtendControl', 'host.ts')
+mustContain('桌面 extend 创建出口', tsHost, 'extendCreateVirtualDisplay', 'host.ts')
+mustContain('Android 扩展控制器发 display-extend', ktExtend, 'SESSION_TYPE_DISPLAY_EXTEND', 'DisplayExtendController.kt')
+mustContain('Android 扩展控制器收 virtualScreen', ktExtend, 'virtualScreen', 'DisplayExtendController.kt')
 
 // ---------- 汇总 ----------
 console.log(`\n通过 ${passed} 项，失败 ${failures.length} 项，警告 ${warnings.length} 项。`)

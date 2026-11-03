@@ -185,6 +185,7 @@ class LinkSpaceService private constructor(private val appContext: Context) {
             announcedConnections.remove(peerId)
             input.onPeerDisconnected(peerId)
             controlledInput.onPeerDisconnected(peerId)
+            displayExtend.onPeerDisconnected(peerId)
             reverseScreen.onPeerDisconnected(peerId)
         }
 
@@ -438,11 +439,20 @@ class LinkSpaceService private constructor(private val appContext: Context) {
             }
 
             // ---------- 安卓→电脑远控（4.6，控制端半边） ----------
-            Protocol.TYPE_SESSION_ACCEPT -> input.onAccepted(from, payload)
-            Protocol.TYPE_SESSION_REJECT -> input.onRejected(from, payload)
+            // session.accept/reject/stop 按 sessionId 各自匹配：input 与
+            // display-extend 控制器各认自己的挂起/活动会话，不匹配的安全忽略。
+            Protocol.TYPE_SESSION_ACCEPT -> {
+                input.onAccepted(from, payload)
+                displayExtend.onAccepted(from, payload)
+            }
+            Protocol.TYPE_SESSION_REJECT -> {
+                input.onRejected(from, payload)
+                displayExtend.onRejected(from, payload)
+            }
             Protocol.TYPE_SESSION_STOP -> {
                 input.onStopped(from, payload)
                 controlledInput.onStop(from, payload)
+                displayExtend.onStopped(from, payload)
             }
 
             // ---------- 电脑→安卓远控（4.6，被控端半边，线 2 W4 骨架） ----------
@@ -742,6 +752,19 @@ class LinkSpaceService private constructor(private val appContext: Context) {
     private val _inputState = MutableStateFlow(InputState())
     val inputState: StateFlow<InputState> = _inputState
 
+    // ---------- 平板当扩展屏（协议 4.3，控制端半边，线 3） ----------
+
+    /** 扩展屏会话的界面状态：idle / waiting / active */
+    data class ExtendState(
+        val phase: String = "idle",
+        val peerId: String? = null,
+        /** 虚拟显示器在虚拟屏坐标系里的矩形（触控映射与推流尺寸基准） */
+        val virtualScreen: DisplayExtendController.VirtualScreen? = null
+    )
+
+    private val _extendState = MutableStateFlow(ExtendState())
+    val extendState: StateFlow<ExtendState> = _extendState
+
     /** 会话结束原因（一次性提示，界面读后可清空） */
     private val _inputMessage = MutableStateFlow("")
     val inputMessage: StateFlow<String> = _inputMessage
@@ -815,6 +838,32 @@ class LinkSpaceService private constructor(private val appContext: Context) {
 
                 override fun onWaiting(peerId: String) {
                     _inputState.value = InputState("waiting", peerId)
+                }
+            }
+        )
+    }
+
+    /**
+     * 扩展屏会话（线 3，控制端半边）：向桌面发起 display-extend 请求，
+     * 与 input 会话解耦——各占独立槽位，互不感知。accept 里带回的
+     * virtualScreen 是触控映射与推流尺寸的基准（3.2-3 / 3.2-1）。
+     */
+    val displayExtend: DisplayExtendController by lazy {
+        DisplayExtendController(
+            send = { peerId, type, payloadFn -> sendControlMessage(peerId, type, payloadFn) },
+            listener = object : DisplayExtendController.Listener {
+                override fun onSessionActive(peerId: String, sessionId: String, virtualScreen: DisplayExtendController.VirtualScreen) {
+                    _extendState.value = ExtendState("active", peerId, virtualScreen)
+                    _inputMessage.value = "扩展屏会话已建立（${virtualScreen.w}×${virtualScreen.h}），画面流接线后可用"
+                }
+
+                override fun onSessionEnded(reason: String) {
+                    _inputMessage.value = reason
+                    _extendState.value = ExtendState()
+                }
+
+                override fun onWaiting(peerId: String) {
+                    _extendState.value = ExtendState("waiting", peerId)
                 }
             }
         )
@@ -1015,6 +1064,11 @@ class LinkSpaceService private constructor(private val appContext: Context) {
         controlledInput.terminate()
     }
 
+    /** 本端主动收起扩展屏（线 3）。幂等 */
+    fun stopDisplayExtend() {
+        displayExtend.stop()
+    }
+
     /** 刷新无障碍授权状态（界面回到前台时调用；开关在系统设置里改） */
     fun refreshAccessibilityState() {
         _accessibilityEnabled.value = LinkSpaceAccessibilityService.isEnabled(appContext)
@@ -1069,6 +1123,38 @@ class LinkSpaceService private constructor(private val appContext: Context) {
                 input.request(peerId = fullId, screen = screen, displayName = displayName)
             }.onFailure { err ->
                 Log.w(TAG, "发起键鼠控制失败: ${err.message}")
+            }
+        }
+    }
+
+    /**
+     * 确保到对端的出站控制连接已建立，然后发起扩展屏请求（线 3）。
+     * 与 requestInputControl 同口径：配对预检、建链复用、失败时界面
+     * 拿原因；UI 状态统一由 DisplayExtendController 回调维护。
+     * preferred 为 null 时由桌面按 INF 预置模式选虚拟显示器尺寸。
+     */
+    suspend fun requestDisplayExtend(
+        peer: DiscoveredService,
+        preferred: DisplayExtendController.PreferredSize? = null,
+        scaleWidth: Int = 1920
+    ): Result<Unit> {
+        val fullId = trust.fullDeviceIdOf(peer.idPrefix)
+            ?: return Result.failure(IllegalStateException("设备 ${peer.displayName} 未配对，请先配对"))
+        val expectedFp = trust.fingerprintOf(fullId)
+            ?.let { normalizeFingerprint(it) }
+            ?: return Result.failure(IllegalStateException("设备 ${peer.displayName} 未配对，请先配对"))
+
+        return withContext(Dispatchers.IO) {
+            runCatching {
+                ensureOutboundControl(peer, fullId, expectedFp)
+                displayExtend.request(
+                    peerId = fullId,
+                    preferred = preferred,
+                    scaleWidth = scaleWidth,
+                    displayName = displayName
+                )
+            }.onFailure { err ->
+                Log.w(TAG, "发起扩展屏失败: ${err.message}")
             }
         }
     }
@@ -1182,11 +1268,18 @@ class LinkSpaceService private constructor(private val appContext: Context) {
                 }
                 val payload = msg.optJSONObject("payload") ?: JSONObject()
                 when (msg.optString("type")) {
-                    Protocol.TYPE_SESSION_ACCEPT -> input.onAccepted(from, payload)
-                    Protocol.TYPE_SESSION_REJECT -> input.onRejected(from, payload)
+                    Protocol.TYPE_SESSION_ACCEPT -> {
+                        input.onAccepted(from, payload)
+                        displayExtend.onAccepted(from, payload)
+                    }
+                    Protocol.TYPE_SESSION_REJECT -> {
+                        input.onRejected(from, payload)
+                        displayExtend.onRejected(from, payload)
+                    }
                     Protocol.TYPE_SESSION_STOP -> {
                         input.onStopped(from, payload)
                         controlledInput.onStop(from, payload)
+                        displayExtend.onStopped(from, payload)
                     }
                     // ---------- 电脑→安卓远控（4.6，被控端半边，线 2 W4 骨架） ----------
                     Protocol.TYPE_SESSION_START -> controlledInput.onStart(from, payload)
@@ -1255,6 +1348,7 @@ class LinkSpaceService private constructor(private val appContext: Context) {
                 val wasStreaming = _screenStream.value != null || streamDecoder != null
                 input.onPeerDisconnected(fullId)
                 controlledInput.onPeerDisconnected(fullId)
+                displayExtend.onPeerDisconnected(fullId)
                 reverseScreen.onPeerDisconnected(fullId)
                 // 投屏中连接断开：自动重连一次（读循环死亡 = WS 帧解析失
                 // 同步等瞬态故障，重建链路常可自愈；连续失败由用户重试）
@@ -1631,6 +1725,7 @@ class LinkSpaceService private constructor(private val appContext: Context) {
      */
     fun stopAll() {
         input.stop("stopped by user")
+        displayExtend.stop("stopped by user")
         controlledInput.terminate()
         reverseScreen.stop()
         stop()

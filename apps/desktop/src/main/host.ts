@@ -34,6 +34,12 @@ import {
   type InputControlRequest,
   type ActiveInputSession
 } from './input/session'
+import {
+  DisplayExtendSessionCoordinator,
+  DisplayExtendController,
+  type ExtendControlRequest,
+  type ExtendPreferredSize
+} from './extend/session'
 import type { InputEvent, ScreenSize } from './input/protocol'
 import { InputLayoutStore } from './input/layout'
 import { ScreenStreamService, ScreenStreamReceiver, STREAM_QUALITY_PRESETS, STREAM_RECONNECT_BACKOFFS_MS, STREAM_DIRECTION_FORWARD, STREAM_DIRECTION_REVERSE, resolveStreamStopDirection, type ReverseStreamFrame, type ReverseStreamStatus } from './screen-stream'
@@ -84,6 +90,16 @@ export interface HostOptions {
   screenFfmpegPath?: string
   /** 虚拟屏 bounds（投屏采集范围，物理像素）。与注入 normalizeAbsolute 同基准 */
   inputVirtualScreen?: () => { x: number; y: number; w: number; h: number }
+  /**
+   * 虚拟显示器创建/销毁出口（线 3，display-extend 会话 accept 时调用）。
+   * 正常路径由 3.2 的 VirtualDisplayManager 接线；缺省为「不可用」——
+   * 创建失败时扩展请求回 session.reject，绝不先 accept 再补建。
+   */
+  extendCreateVirtualDisplay?: (
+    preferred: ExtendPreferredSize | null
+  ) => { ok: true; screen: { x: number; y: number; w: number; h: number } } | { ok: false; reason: string }
+  /** 虚拟显示器销毁出口。缺省为空操作 */
+  extendDestroyVirtualDisplay?: () => void
 }
 
 export interface HostEvents {
@@ -109,6 +125,10 @@ export interface HostEvents {
   inputRequested: [InputControlRequest]
   /** 键鼠共享状态变化（请求到达/确认/结束），UI 刷新 */
   inputChanged: []
+  /** 收到扩展屏请求，UI 应展示确认弹窗（9.1 授权可见，线 3） */
+  extendRequested: [ExtendControlRequest]
+  /** 扩展屏会话状态变化（请求到达/确认/结束），UI 刷新 */
+  extendChanged: []
   /** 反向投屏（平板画面）解出一帧：W7 的平板画面窗口订阅此事件渲染 */
   reverseStreamFrame: [ReverseStreamFrame]
   /** 反向投屏状态变化（开始/结束/失败/重连），UI 刷新 */
@@ -156,6 +176,9 @@ export class Host {
   /** 键鼠共享：被控端状态机 + 控制端状态机（阶段 3） */
   private inputCoordinator: InputSessionCoordinator | null = null
   private inputController: InputController | null = null
+  /** 扩展屏：被控端状态机 + 控制端状态机（线 3，与 input 会话解耦） */
+  private extendCoordinator: DisplayExtendSessionCoordinator | null = null
+  private extendController: DisplayExtendController | null = null
   private readonly screenStream = new ScreenStreamService()
   /** 码率自适应状态（B-3）：拥塞计分与当前档位。正数=连续拥塞采样，
    *  负数=连续空闲采样（恢复升档）；探测清零换挡 */
@@ -311,6 +334,7 @@ export class Host {
     this.wireTransferBridge()
     this.wireClipboardBridge()
     this.wireRenameBridge()
+    this.wireExtendBridge()
     this.wireInputBridge()
 
     log.info(`LinkSpace 主机已启动，id=${this.deviceId}，端口=${port}`)
@@ -390,6 +414,8 @@ export class Host {
     if (!survivor) {
       this.inputCoordinator?.onPeerDisconnected(pid)
       this.inputController?.onPeerDisconnected(pid)
+      this.extendCoordinator?.onPeerDisconnected(pid)
+      this.extendController?.onPeerDisconnected(pid)
       // 投流跟着连接走：会话失效钩子（onChanged）正常会停流，但断连
       // 清理链路多级间接，实测有漏网（ffmpeg 在对端重装后仍推流 20s+，
       // 挡死下一次 start）——这里直接兜底，stop 幂等
@@ -1074,19 +1100,36 @@ export class Host {
 
     control.on('session.start', (conn, msg) => {
       if (!conn.peerId) return
+      // 按 sessionType 路由：input 与 display-extend 各走自己的状态机，
+      // 互不感知（3.2-2 解耦点）。未知类型直接回绝，不进任何状态机。
+      const sessionType = (msg.payload as { sessionType?: unknown } | null)?.sessionType
+      if (sessionType === 'display-extend') {
+        this.extendCoordinator!.onStart(conn.peerId, msg.payload)
+        return
+      }
+      if (sessionType === 'input') {
+        this.inputCoordinator!.onStart(conn.peerId, msg.payload)
+        return
+      }
+      // 未知类型：沿用旧口径，由 input 状态机回 'bad request' 拒绝，
+      // 不进任何状态机、不弹 UI。
       this.inputCoordinator!.onStart(conn.peerId, msg.payload)
     })
 
     control.on('session.accept', (conn, msg) => {
-      const p = msg.payload as { sessionId?: unknown; screen?: unknown }
+      const p = msg.payload as { sessionId?: unknown; screen?: unknown; virtualScreen?: unknown }
       if (typeof p?.sessionId !== 'string') return
+      // accept 按 sessionId 各自匹配：input 与 extend 控制器各认自己的
+      // 挂起请求，不匹配的安全忽略（UUID 碰撞可忽略，peerId 也须一致）
       this.inputController!.onAccepted(conn.peerId, p.sessionId, p.screen)
+      this.extendController!.onAccepted(conn.peerId, p.sessionId, p.virtualScreen)
     })
 
     control.on('session.reject', (conn, msg) => {
       const p = msg.payload as { sessionId?: unknown; reason?: unknown }
       if (typeof p?.sessionId !== 'string') return
       this.inputController!.onRejected(conn.peerId, p.sessionId, String(p.reason ?? ''))
+      this.extendController!.onRejected(conn.peerId, p.sessionId, String(p.reason ?? ''))
     })
 
     control.on('session.stop', (conn, msg) => {
@@ -1097,6 +1140,8 @@ export class Host {
       // 不匹配的就是别人的会话，安全忽略
       this.inputController!.onStopped(conn.peerId, p.sessionId)
       this.inputCoordinator!.onStop(conn.peerId, msg.payload)
+      this.extendController!.onStopped(conn.peerId, p.sessionId)
+      this.extendCoordinator!.onStop(conn.peerId, msg.payload)
     })
 
     control.on('input.event', (conn, msg) => {
@@ -1391,8 +1436,65 @@ export class Host {
     this.on('revoked', (deviceId) => {
       this.inputCoordinator?.onTrustRevoked(deviceId)
       this.inputController?.onPeerDisconnected(deviceId)
+      this.extendCoordinator?.onTrustRevoked(deviceId)
+      this.extendController?.onPeerDisconnected(deviceId)
       if (this.reverseStreamPeerId === deviceId) this.stopReverseReceiver('信任已被撤销')
       this.emit('inputChanged')
+      this.emit('extendChanged')
+    })
+  }
+
+  /**
+   * 扩展屏桥（线 3，协议 4.3，sessionType: 'display-extend'）。
+   *
+   * 与 wireInputBridge 同构：Host 只做「消息 ↔ 状态机」的搬运，
+   * 授权判定与会话状态集中在 DisplayExtendSessionCoordinator（被控端）
+   * 与 DisplayExtendController（控制端），两者都是可无头测试的纯逻辑。
+   * 扩展屏会话与 input 会话各占独立槽位，互不感知——无活动 input
+   * 会话也能开扩展屏；input 会话结束不终止扩展屏推流。
+   *
+   * **虚拟显示器创建出口**：缺省（未接 VirtualDisplayManager，
+   * 3.2 之前）为「不可用」——approve 时创建失败，回 session.reject，
+   * 绝不先 accept 再补建。
+   */
+  private wireExtendBridge(): void {
+    const sendTo = (peerId: string, type: string, payload: Record<string, unknown>): void => {
+      this.peers.get(peerId)?.send(type, payload)
+    }
+
+    this.extendCoordinator = new DisplayExtendSessionCoordinator({
+      callbacks: {
+        isPeerAuthorized: (peerId) => this.trust.isKnown(peerId),
+        createVirtualDisplay: (preferred) =>
+          this.opts.extendCreateVirtualDisplay?.(preferred) ?? {
+            ok: false as const,
+            reason: 'virtual display unavailable'
+          },
+        destroyVirtualDisplay: () => this.opts.extendDestroyVirtualDisplay?.(),
+        send: sendTo,
+        log: (msg) => log.info(msg),
+        onChanged: () => this.emit('extendChanged'),
+        onRequest: (req) => {
+          // 走查自动批准：LINKSPACE_AUTO_APPROVE=1 时跳过人工确认（与
+          // input 会话同口径，仅显式环境变量开启，真机走查用）。
+          if (process.env.LINKSPACE_AUTO_APPROVE === '1') {
+            log.info(`[walkthrough] 自动批准 ${req.peerId} 的扩展屏请求`)
+            this.approveExtendControl(req.sessionId)
+            return
+          }
+          this.emit('extendRequested', req)
+        }
+      }
+    })
+
+    this.extendController = new DisplayExtendController({
+      callbacks: {
+        send: sendTo,
+        log: (msg) => log.info(msg),
+        onAccepted: () => this.emit('extendChanged'),
+        onRejected: () => this.emit('extendChanged'),
+        onEnded: () => this.emit('extendChanged')
+      }
     })
   }
 
@@ -1609,6 +1711,21 @@ export class Host {
     return this.inputController?.controlling ?? null
   }
 
+  /** 被控端：待确认的扩展屏请求（线 3） */
+  pendingExtendRequest(): ExtendControlRequest | null {
+    return this.extendCoordinator?.pendingRequest ?? null
+  }
+
+  /** 被控端：本机正把扩展屏给谁（peerId，线 3） */
+  extendedForPeer(): string | null {
+    return this.extendCoordinator?.extendedFor ?? null
+  }
+
+  /** 控制端：本机正在扩展到谁（peerId，线 3） */
+  extendingToPeer(): string | null {
+    return this.extendController?.extendingTo ?? null
+  }
+
   /** UI（控制端）：请求控制对端。对端必须已连接且已配对 */
   async requestInputControl(
     peerId: string
@@ -1637,6 +1754,55 @@ export class Host {
   /** UI（被控端）：随时拔掉正在进行的控制 */
   terminateInputControl(): void {
     this.inputCoordinator?.terminate()
+  }
+
+  /**
+   * UI（控制端，线 3）：本机请求把对端用作扩展屏。返回的 ok 只表示
+   * 「请求已发出、等对端确认」，最终结果走 extendChanged。
+   * 与 input 会话独立：已有 input 会话不影响扩展请求，反之亦然。
+   */
+  requestExtendControl(
+    peerId: string,
+    preferred: ExtendPreferredSize | null = null,
+    scaleWidth = 1920
+  ): Promise<{ ok: true; sessionId: string } | { ok: false; error: string }> {
+    if (!this.extendController) return Promise.resolve({ ok: false, error: '主机未启动' })
+    if (!this.peers.has(peerId)) return Promise.resolve({ ok: false, error: '设备不在线' })
+    if (!this.trust.isKnown(peerId)) return Promise.resolve({ ok: false, error: '设备未配对' })
+    return this.extendController.request(peerId, preferred, scaleWidth, this.displayName)
+  }
+
+  /** UI（控制端）：本机主动收起扩展屏。幂等 */
+  stopExtendControl(reason = 'stopped by user'): void {
+    this.extendController?.stop(reason)
+  }
+
+  /** UI（被控端）：同意扩展屏请求。同意即创建虚拟显示器，失败不建会话 */
+  approveExtendControl(sessionId: string): { ok: boolean; error?: string } {
+    return this.extendCoordinator?.approve(sessionId) ?? { ok: false, error: '主机未启动' }
+  }
+
+  /** UI（被控端）：拒绝扩展屏请求 */
+  denyExtendControl(sessionId: string, reason = 'denied by user'): void {
+    this.extendCoordinator?.deny(sessionId, reason)
+  }
+
+  /** UI（被控端）：随时收回正在提供的扩展屏（虚拟显示器随之销毁） */
+  terminateExtendControl(): void {
+    this.extendCoordinator?.terminate()
+  }
+
+  /** 扩展屏会话状态（UI 状态行用）：活动会话的对端与虚拟显示器矩形 */
+  extendStatus(): {
+    state: 'none' | 'pending' | 'active'
+    peerId: string | null
+    virtualScreen: { x: number; y: number; w: number; h: number } | null
+  } {
+    const active = this.extendCoordinator?.activeSession
+    if (active) return { state: 'active', peerId: active.peerId, virtualScreen: { ...active.virtualScreen } }
+    const pending = this.extendCoordinator?.pendingRequest
+    if (pending) return { state: 'pending', peerId: pending.peerId, virtualScreen: null }
+    return { state: 'none', peerId: null, virtualScreen: null }
   }
 
   /** 控制端事件外发（采集层调用）。非活动会话时是安全空操作 */
@@ -1670,6 +1836,9 @@ export class Host {
     // 而不是等心跳超时，本机的按住状态也一并抬起
     this.inputController?.stop('app shutdown')
     this.inputCoordinator?.terminate()
+    // 扩展屏会话同样先收尾：虚拟显示器随之销毁，不留残留设备
+    this.extendController?.stop('app shutdown')
+    this.extendCoordinator?.terminate()
     this.clearReverseStreamReconnectTimer()
     this.reverseStreamReceiver.stop()
     this.reverseStreamPeerId = null

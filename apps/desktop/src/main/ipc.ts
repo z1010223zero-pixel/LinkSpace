@@ -71,6 +71,10 @@ const CHANNELS = [
   'input:terminate',
   'input:exit',
   'input:setEdge',
+  'extend:state',
+  'extend:approve',
+  'extend:deny',
+  'extend:terminate',
   'reverse-control:start',
   'reverse-stream:status',
   'reverse-stream:setQuality',
@@ -393,6 +397,34 @@ export function registerIpc(
     }
   })
 
+  // ---------- 扩展屏会话状态（线 3，display-extend） ----------
+  // 与 input:state 同口径：待确认请求 + 活动会话的对端与虚拟显示器矩形。
+  // 渲染层据此弹确认弹窗、展示扩展状态；虚拟显示器未接线（3.2 之前）
+  // 时 approve 会回失败，弹窗展示原因。
+  invoke('extend:state', () => {
+    const pending = host.pendingExtendRequest()
+    const trusted = host.trustedDevices()
+    const nameOf = (id: string): string =>
+      trusted.find((t) => t.deviceId === id)?.displayName ?? id
+    const status = host.extendStatus()
+    const extendingTo = host.extendingToPeer()
+    return {
+      pending: pending
+        ? {
+            sessionId: pending.sessionId,
+            peerId: pending.peerId,
+            displayName: pending.displayName,
+            preferred: pending.preferred,
+            scaleWidth: pending.scaleWidth,
+            expiresAt: pending.expiresAt
+          }
+        : null,
+      extendedFor: status.peerId && status.state === 'active' ? nameOf(status.peerId) : null,
+      extendingTo: extendingTo ? nameOf(extendingTo) : null,
+      virtualScreen: status.virtualScreen
+    }
+  })
+
   ipcMain.handle('input:request', async (_e, peerId: unknown) => {
     if (typeof peerId !== 'string' || !peerId) return fail('缺少对端 ID')
     const r = await host.requestInputControl(peerId)
@@ -417,6 +449,34 @@ export function registerIpc(
   ipcMain.handle('input:terminate', () => {
     host.terminateInputControl()
     broadcast(getWindow, 'input:changed')
+    return { ok: true as const }
+  })
+
+  // ---------- 扩展屏会话（线 3，display-extend） ----------
+  // 被控端侧（本机被请求提供扩展屏）：approve/deny/terminate。
+  // 控制端侧（本机主动请求对端当扩展屏）本批不暴露 IPC：平板侧尚无
+  // 被控端扩展状态机（只有控制端 DisplayExtendController），桌面发
+  // 起的 session.start 会被平板以 'bad request' 拒绝；待 Android
+  // 补被控端分支后再开 extend:request/exit。Host 层的
+  // requestExtendControl/stopExtendControl 已就绪（无头环路覆盖），
+  // 只等对端。
+  ipcMain.handle('extend:approve', (_e, sessionId: unknown) => {
+    if (typeof sessionId !== 'string' || !sessionId) return fail('缺少会话 ID')
+    const r = host.approveExtendControl(sessionId)
+    broadcast(getWindow, 'extend:changed')
+    return r.ok ? { ok: true as const } : fail(r.error ?? '批准失败')
+  })
+
+  ipcMain.handle('extend:deny', (_e, sessionId: unknown) => {
+    if (typeof sessionId !== 'string' || !sessionId) return fail('缺少会话 ID')
+    host.denyExtendControl(sessionId)
+    broadcast(getWindow, 'extend:changed')
+    return { ok: true as const }
+  })
+
+  ipcMain.handle('extend:terminate', () => {
+    host.terminateExtendControl()
+    broadcast(getWindow, 'extend:changed')
     return { ok: true as const }
   })
 
