@@ -297,6 +297,41 @@ fun MainScreen(service: LinkSpaceService, onClipboardToggle: (Boolean) -> Unit) 
         }
     }
 
+    // 对端请求确认框必须挂在 early return 之前（线 2 走查 2026-11-03
+    // 踩到的 bug）：控制会话激活时下面整屏切到触控板并 return，挂在
+    // 后面的确认框永远到不了组合——反向投屏请求在触控板页等 90 秒
+    // 过去直接 expired，桌面窗口只看到“反向投屏失败：expired”。
+    // 两个框都是 Dialog（独立窗口），放这里一样盖在触控板之上。
+    // ---------- 反向投屏请求：电脑想看本机屏幕（线 2 W7） ----------
+    // 每次请求都要过这道确认 + 系统录屏授权框；拒绝/取消都明确回绝，
+    // 桌面窗口显示原因。90 秒无人确认由服务侧 TTL 自动拒绝
+    //（覆盖 LinkSpace 同意框 + 系统录屏授权框两次确认）。
+    reverseRequest?.let { req ->
+        ReverseStreamRequestDialog(
+            req = req,
+            onApprove = {
+                captureRequest = req
+                val manager =
+                    context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as android.media.projection.MediaProjectionManager
+                screenCapture.launch(manager.createScreenCaptureIntent())
+            },
+            onDeny = { service.denyReverseStream(req, "denied by user") }
+        )
+    }
+
+    // ---------- 电脑请求控制本机：确认弹窗（协议 9.1） ----------
+    // 30s 内未确认由会话层自动拒绝；弹窗被划掉按拒绝处理——
+    // 确认 UI 未弹出时不放行任何输入。同上，控制会话激活时
+    // early return 会跳过挂在后面的框，一并提到前面。
+    if (controlRequest != null) {
+        val req = controlRequest!!
+        ControlRequestDialog(
+            req = req,
+            onApprove = { service.approveControl(req.sessionId) },
+            onDeny = { service.denyControl(req.sessionId) }
+        )
+    }
+
     // 控制会话激活时整屏切到触控板；投屏流就绪再切到投屏画面。
     // 画面窗口是 B 线范围，原样保留不动。
     val screenStreamInfo by service.screenStream.collectAsStateWithLifecycle()
@@ -532,24 +567,8 @@ fun MainScreen(service: LinkSpaceService, onClipboardToggle: (Boolean) -> Unit) 
                 WaitingControlDialog(onCancel = { service.input.stop() })
             }
 
-            // ---------- 反向投屏请求：电脑想看本机屏幕（线 2 W7） ----------
-            // 每次请求都要过这道确认 + 系统录屏授权框；拒绝/取消都明确回绝，
-            // 桌面窗口显示原因。90 秒无人确认由服务侧 TTL 自动拒绝
-            //（覆盖 LinkSpace 同意框 + 系统录屏授权框两次确认）。
-            // 反向投屏请求弹窗（B 线：补 90 秒倒计时与“单次有效”文案）
-            reverseRequest?.let { req ->
-                ReverseStreamRequestDialog(
-                    req = req,
-                    onApprove = {
-                        captureRequest = req
-                        val manager =
-                            context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as android.media.projection.MediaProjectionManager
-                        screenCapture.launch(manager.createScreenCaptureIntent())
-                    },
-                    onDeny = { service.denyReverseStream(req, "denied by user") }
-                )
-            }
-
+            // 反向投屏请求确认框已提到 early return 之前（见上），
+            // 控制会话激活时触控板页也能弹出；此处不再重复挂载。
             // ---------- 本机改名对话框（5.4） ----------
             if (showRenameDialog) {
                 AlertDialog(
@@ -588,18 +607,8 @@ fun MainScreen(service: LinkSpaceService, onClipboardToggle: (Boolean) -> Unit) 
                 )
             }
 
-            // ---------- 电脑请求控制本机：确认弹窗（协议 9.1） ----------
-            // 30s 内未确认由会话层自动拒绝；弹窗被划掉按拒绝处理——
-            // 确认 UI 未弹出时不放行任何输入。
-            // 电脑请求控制本机弹窗（B 线：补 30 秒倒计时与“单次有效”文案）
-            if (controlRequest != null) {
-                val req = controlRequest!!
-                ControlRequestDialog(
-                    req = req,
-                    onApprove = { service.approveControl(req.sessionId) },
-                    onDeny = { service.denyControl(req.sessionId) }
-                )
-            }
+            // 电脑请求控制本机确认框已提到 early return 之前（见上），
+            // 此处不再重复挂载。
         }
     }
 }
