@@ -865,8 +865,12 @@ class ReverseScreenStreamer(
     companion object {
         private const val TAG = "LinkSpace/ReverseStream"
 
-        /** 挂起的反向投屏请求多久无人处理即自动拒绝，与键鼠控制 30s TTL 一致 */
-        const val REQUEST_TTL_MS = 30_000L
+        /**
+         * 挂起的反向投屏请求多久无人处理即自动拒绝。这里必须覆盖两次
+         * 用户确认：LinkSpace 同意框 + 系统 MediaProjection 授权框。真机
+         * 实测 30s 会把“用户正在点系统框”的合法请求提前判为 expired。
+         */
+        const val REQUEST_TTL_MS = 90_000L
 
         const val DEFAULT_SCALE_WIDTH = 1920
         const val STREAM_FPS = 30

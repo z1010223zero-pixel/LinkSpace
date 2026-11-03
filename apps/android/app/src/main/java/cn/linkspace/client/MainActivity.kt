@@ -30,6 +30,7 @@ import cn.linkspace.client.service.InputController
 import cn.linkspace.client.service.LinkSpaceService
 import cn.linkspace.client.service.OutgoingFile
 import cn.linkspace.client.service.ReverseScreenStreamer
+import cn.linkspace.client.service.LinkSpaceForegroundService
 import cn.linkspace.client.ui.AppNavShell
 import cn.linkspace.client.ui.ControlledByBanner
 import cn.linkspace.client.ui.DeviceDetailInfo
@@ -49,6 +50,8 @@ import cn.linkspace.client.ui.formatBytes
 import cn.linkspace.client.ui.isOnline
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
     /**
@@ -258,17 +261,28 @@ fun MainScreen(service: LinkSpaceService, onClipboardToggle: (Boolean) -> Unit) 
         if (req == null) return@rememberLauncherForActivityResult
         val data = result.data
         if (result.resultCode == android.app.Activity.RESULT_OK && data != null) {
-            val projectionManager =
-                context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as android.media.projection.MediaProjectionManager
-            val projection = runCatching {
-                // 官方顺序：先升前台服务类型，再 getMediaProjection
+            scope.launch {
+                // getMediaProjection 要求 mediaProjection 类型的前台服务已生效；
+                // startForegroundService 是异步的，必须等升级完成再取 token。
                 service.prepareReverseStreamCapture()
-                projectionManager.getMediaProjection(result.resultCode, data)
-            }.getOrNull()
-            if (projection != null) {
-                service.startReverseStreamWithProjection(projection)
+                val ready = withContext(Dispatchers.IO) {
+                    LinkSpaceForegroundService.awaitMediaProjectionReady(1000L)
+                }
+                val projectionManager =
+                    context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as android.media.projection.MediaProjectionManager
+                val projection = if (ready) {
+                    runCatching { projectionManager.getMediaProjection(result.resultCode, data) }.getOrNull()
             } else {
-                service.denyReverseStream(req, "failed to start screen capture")
+                    null
+            }
+                if (projection != null) {
+                    service.startReverseStreamWithProjection(projection)
+                } else {
+                    service.denyReverseStream(
+                        req,
+                        if (ready) "failed to get media projection" else "foreground service not ready"
+                    )
+                }
             }
         } else {
             service.denyReverseStream(req, "denied by user")
@@ -508,7 +522,8 @@ fun MainScreen(service: LinkSpaceService, onClipboardToggle: (Boolean) -> Unit) 
 
             // ---------- 反向投屏请求：电脑想看本机屏幕（线 2 W7） ----------
             // 每次请求都要过这道确认 + 系统录屏授权框；拒绝/取消都明确回绝，
-            // 桌面窗口显示原因。30 秒无人确认由服务侧 TTL 自动拒绝。
+            // 桌面窗口显示原因。90 秒无人确认由服务侧 TTL 自动拒绝
+            //（覆盖 LinkSpace 同意框 + 系统录屏授权框两次确认）。
             // 反向投屏请求弹窗（B 线：补 30 秒倒计时与“单次有效”文案）
             reverseRequest?.let { req ->
                 ReverseStreamRequestDialog(

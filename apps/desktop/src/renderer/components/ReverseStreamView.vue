@@ -487,7 +487,7 @@ onBeforeUnmount(() => {
         <div class="empty__title">暂无画面</div>
         <div class="empty__hint">
           已向平板发起录屏请求。请在平板上点「同意」并在系统录屏授权框里点「允许」。
-          30 秒内无人确认会自动取消。
+          90 秒内无人确认会自动取消。
         </div>
       </div>
     </div>

@@ -207,7 +207,7 @@ export function reverseEndReasonText(reason: string): string {
     case 'denied by user':
       return '平板拒绝了录屏请求：对方在确认框点了拒绝'
     case 'expired':
-      return '平板 30 秒内未确认录屏请求，请求已过期'
+      return '平板 90 秒内未确认录屏请求，请求已过期'
     case 'not trusted':
       return '平板拒绝了录屏请求：设备未配对'
     case 'resource busy':

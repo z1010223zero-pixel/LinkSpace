@@ -10,20 +10,8 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.IBinder
 import cn.linkspace.client.MainActivity
+import java.util.concurrent.atomic.AtomicBoolean
 
-/**
- * 前台服务：持有 LinkSpace 服务的运行声明。
- *
- * 没有它，应用切后台后进程随时被系统回收，局域网里的对端会看到本机
- * 「随时消失」——发现、配对、传输、键鼠会话全部中断，与「随时可被
- * 发现」的产品意图矛盾（全项目审查 P2、分工文档 B-任务③）。
- *
- * 退出语义（用户可预期）：
- *   - 用户在界面上点「退出」→ [LinkSpaceService.stopAll] 断开所有连接
- *     （控制会话、传输、剪贴板同步全部终止），前台服务随之停止；
- *   - 用户从最近任务划掉 / 系统杀进程 → 进程连同服务一起消失，
- *     对端按断连处理。不存在「界面没了但连接还在」的中间态。
- */
 class LinkSpaceForegroundService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -43,7 +31,8 @@ class LinkSpaceForegroundService : Service() {
             }
         )
         val contentIntent = PendingIntent.getActivity(
-            this, 0,
+            this,
+            0,
             Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
@@ -54,17 +43,16 @@ class LinkSpaceForegroundService : Service() {
             .setContentIntent(contentIntent)
             .setOngoing(true)
             .build()
-        // 前台服务类型：平时只有 dataSync（局域网传输与控制会话）；
-        // 反向投屏授权后升级为 dataSync|mediaProjection（线 2 W7）——
-        // targetSdk 35 下录屏退后台必须由该类型承接，否则录屏即停。
-        // 升级只在用户同意录屏后发生（见 startMediaProjection），平时不占该类型。
-        val types = if (intent?.action == ACTION_START_MEDIA_PROJECTION) {
+
+        val isMediaProjection = intent?.action == ACTION_START_MEDIA_PROJECTION
+        val types = if (isMediaProjection) {
             ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC or
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
         } else {
             ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
         }
         startForeground(NOTIFICATION_ID, notification, types)
+        mediaProjectionReady.set(isMediaProjection)
         return START_STICKY
     }
 
@@ -72,27 +60,32 @@ class LinkSpaceForegroundService : Service() {
         private const val CHANNEL_ID = "linkspace-service"
         private const val NOTIFICATION_ID = 1
         private const val ACTION_EXIT = "cn.linkspace.client.EXIT"
-        private const val ACTION_START_MEDIA_PROJECTION = "cn.linkspace.client.START_MEDIA_PROJECTION"
+        private const val ACTION_START_MEDIA_PROJECTION =
+            "cn.linkspace.client.START_MEDIA_PROJECTION"
 
-        /** 界面 onCreate 时调用：随应用启动即进入前台保活 */
+        private val mediaProjectionReady = AtomicBoolean(false)
+
+        /** Activity 拿到系统授权后，等前台服务完成 mediaProjection 升级再取 token */
+        fun awaitMediaProjectionReady(timeoutMs: Long = 1000L): Boolean {
+            val deadline = System.currentTimeMillis() + timeoutMs
+            while (System.currentTimeMillis() < deadline) {
+                if (mediaProjectionReady.get()) return true
+                Thread.sleep(10)
+            }
+            return mediaProjectionReady.get()
+        }
+
         fun start(context: Context) {
             val intent = Intent(context, LinkSpaceForegroundService::class.java)
             context.startForegroundService(intent)
         }
 
-        /**
-         * 反向投屏授权后升级前台服务类型（线 2 W7）：调用方是
-         * LinkSpaceService.prepareReverseStreamCapture，须在用户于系统
-         * 录屏授权框点允许之后、getMediaProjection() 之前调用（官方顺序）。
-         * 只是重发一次 start 命令，服务不重启、通知不变。
-         */
         fun startMediaProjection(context: Context) {
             val intent = Intent(context, LinkSpaceForegroundService::class.java)
                 .setAction(ACTION_START_MEDIA_PROJECTION)
             context.startForegroundService(intent)
         }
 
-        /** 用户主动退出：断开所有连接并停掉前台服务 */
         fun exit(context: Context) {
             val intent = Intent(context, LinkSpaceForegroundService::class.java)
                 .setAction(ACTION_EXIT)

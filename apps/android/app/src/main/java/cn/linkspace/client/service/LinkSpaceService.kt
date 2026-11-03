@@ -456,7 +456,19 @@ class LinkSpaceService private constructor(private val appContext: Context) {
             // ---------- 反向投屏（4.7，线 2 W6）：桌面看平板画面 ----------
             // 与 input 会话解耦：反向流的启停不以活动 input 会话为前提，
             // 授权门是平板端的 MediaProjection 系统录屏授权。
-            Protocol.TYPE_SCREEN_STREAM_REQUEST -> reverseScreen.onRequest(from, payload)
+            Protocol.TYPE_SCREEN_STREAM_REQUEST -> CoroutineScope(Dispatchers.IO).launch {
+                // 反向视频帧只能走平板主动连出的控制连接。电脑主动连入时，
+                // 本端只有入站链路；这里必须先补建出站链路，否则帧全部丢弃。
+                val ready = ensureOutboundForPeerId(from)
+                if (!ready) {
+                    Log.w(TAG, "反向投屏请求无可用出站视频通道: $from")
+                    sendControlMessage(from, Protocol.TYPE_SCREEN_STREAM_ERROR) {
+                        put("message", "反向投屏视频通道未建立")
+                    }
+                    return@launch
+                }
+                reverseScreen.onRequest(from, payload)
+            }
             Protocol.TYPE_SCREEN_STREAM_STOP -> handleScreenStreamStop(from, payload)
         }
     }
@@ -1258,6 +1270,19 @@ class LinkSpaceService private constructor(private val appContext: Context) {
             }
             outbound = OutboundControl(fullId, conn, jobs)
         }
+    }
+
+    /** 反向投屏请求前，确保到指定对端存在平板主动连出的控制链路 */
+    private suspend fun ensureOutboundForPeerId(peerId: String): Boolean {
+        if (outboundReusable(peerId)) return true
+        val peer = discovered.value.firstOrNull {
+            trust.fullDeviceIdOf(it.idPrefix) == peerId
+        } ?: return false
+        val fullId = trust.fullDeviceIdOf(peer.idPrefix) ?: peer.idPrefix
+        val expectedFp = trust.fingerprintOf(fullId)
+            ?.let { normalizeFingerprint(it) } ?: return false
+        ensureOutboundControl(peer, fullId, expectedFp)
+        return outboundReusable(fullId)
     }
 
     /** 已登记的出站连接是否可复用（同目标且未断） */
