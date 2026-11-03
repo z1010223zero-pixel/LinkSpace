@@ -40,9 +40,13 @@ MIT 允许再分发，条件仅为保留版权声明与许可声明——本目�
 不碰 Secure Boot、不开 test signing、不装自签证书。详见
 `src/main/extend/vdd-driver.ts` 的信任步骤注释与 `docs/line3-vdd.md` ⑤。
 
-## 已知缺口
+## 设备节点创建（2026-11-03 已实现）
 
 `pnputil /add-driver` 只把驱动包暂存进驱动库；在一台从未装过 VDD 的
-机器上，设备节点本身（硬件 ID `Root\MttVDD`）还需另一步创建（devcon
-或 SwDeviceCreate 小助手），本版本未包含——`status()` 会如实报
-`installed=true, devicePresent=false`。zero 上节点已建好，不受影响。
+机器上，设备节点本身（硬件 ID `Root\MttVDD`）由随包原生助手
+`linkspace-rootdev.exe`（`resources/winhelper/`，源码见
+`native/winhelper/`）创建：`VddDriverManager.ensureInstalled()` 在
+节点缺失时调它（`install <inf> Root\MttVDD`），复核 `devicePresent=true`
+才报 ok。选型（devcon 二进制不随包、SwDeviceCreate 句柄一关节点即删，
+均不用）与代价见 `docs/line3-vdd.md` ⑥ 与 `native/winhelper/README.md`。
+zero 上节点已建好，不受影响。

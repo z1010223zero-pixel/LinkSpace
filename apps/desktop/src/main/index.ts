@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { DeviceManager } from './device-manager'
 import { ScrcpyAdapter } from './scrcpy-adapter'
 import { registerIpc } from './ipc'
-import { locateBinaries, locateVirtualDisplayBinaries, locateVddPackageZip } from './platform'
+import { locateBinaries, locateVirtualDisplayBinaries, locateVddPackageZip, locateRootdevHelper } from './platform'
 import { VddVirtualDisplayManager } from './extend/vdd-display'
 import { VddDriverManager } from './extend/vdd-driver'
 import { log } from './log'
@@ -103,7 +103,7 @@ log.info(
 // VDD 驱动生命周期（线 3，⑤）：安装/启用/卸载由用户在设置页显式触发
 // （IPC vdd-driver:install），本处只构造管理器、不自动安装。
 // zip 缺失时 status() 报 packageBundled=false，安装以 package-missing 拒绝。
-const vddDriverManager = new VddDriverManager({ zipPath: locateVddPackageZip() })
+const vddDriverManager = new VddDriverManager({ zipPath: locateVddPackageZip(), helperPath: locateRootdevHelper() })
 
 // 扩展屏后端（线 3，④）：VDD 设备节点 + VddDriverManager，替代 swd-host
 // 的 VirtualDisplayManager（类文件保留，不删）。approve 时启用节点创建

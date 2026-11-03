@@ -12,7 +12,7 @@
 
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
-import { VDD_ZIP_NAME } from './extend/vdd-driver'
+import { VDD_ZIP_NAME, ROOTDEV_HELPER_EXE } from './extend/vdd-driver'
 
 export interface Binaries {
   scrcpy: string
@@ -138,6 +138,7 @@ export function resetBinaryCache(): void {
   cached = null
   cachedNative = null
   cachedVddZip = undefined
+  cachedRootdevHelper = undefined
 }
 
 // ---------- 虚拟显示器原生二进制（线 3，3.2-1） ----------
@@ -231,4 +232,50 @@ export function locateVddPackageZip(): string | null {
 /** 清除 VDD 驱动包缓存（与 resetBinaryCache 同口径，便于测试） */
 export function resetVddPackageCache(): void {
   cachedVddZip = undefined
+}
+
+// ---------- VDD 节点创建助手（线 3，设备节点创建） ----------
+//
+// 查找顺序：
+//   1. 环境变量 LINKSPACE_ROOTDEV_HELPER（测试与调试用）
+//   2. 打包资源目录 <resourcesPath>/winhelper/linkspace-rootdev.exe
+//      （electron-builder extraResources 须把 resources/winhelper 打进去，
+//      否则打包后此路查不到）
+//   3. 开发期仓内 resources/winhelper/linkspace-rootdev.exe
+//      （cwd 在 apps/desktop 或仓根）
+//
+// 找不到时返回 null，不抛错：VddDriverManager 的 ensureInstalled() 在
+// 节点缺失时以 node-create-failed 拒绝（驱动包已暂存时可重试安装），
+// 其余功能不受影响。
+let cachedRootdevHelper: string | null | undefined = undefined
+
+export function locateRootdevHelper(): string | null {
+  if (cachedRootdevHelper !== undefined) return cachedRootdevHelper
+  const envPath = process.env.LINKSPACE_ROOTDEV_HELPER
+  if (envPath && existsSync(envPath)) {
+    cachedRootdevHelper = envPath
+    return cachedRootdevHelper
+  }
+  const resourcesPath = (process as { resourcesPath?: string }).resourcesPath
+  if (resourcesPath) {
+    const p = join(resourcesPath, 'winhelper', ROOTDEV_HELPER_EXE)
+    if (existsSync(p)) {
+      cachedRootdevHelper = p
+      return cachedRootdevHelper
+    }
+  }
+  for (const dir of [join(process.cwd(), 'resources', 'winhelper'), join(process.cwd(), 'apps', 'desktop', 'resources', 'winhelper')]) {
+    const p = join(dir, ROOTDEV_HELPER_EXE)
+    if (existsSync(p)) {
+      cachedRootdevHelper = p
+      return cachedRootdevHelper
+    }
+  }
+  cachedRootdevHelper = null
+  return cachedRootdevHelper
+}
+
+/** 清除节点创建助手缓存（与 resetBinaryCache 同口径，便于测试） */
+export function resetRootdevHelperCache(): void {
+  cachedRootdevHelper = undefined
 }

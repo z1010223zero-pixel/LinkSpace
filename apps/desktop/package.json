@@ -67,6 +67,10 @@
       {
         "from": "resources/vdd",
         "to": "vdd"
+      },
+      {
+        "from": "resources/winhelper",
+        "to": "winhelper"
       }
     ],
     "win": {

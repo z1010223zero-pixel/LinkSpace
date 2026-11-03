@@ -57,3 +57,7 @@ apps/android/local.properties
 *.apk
 *.aab
 .zwork/
+
+# linkspace-rootdev.exe build output in native/winhelper (not committed;
+# the distributable copy lives in apps/desktop/resources/winhelper/)
+native/winhelper/*.exe

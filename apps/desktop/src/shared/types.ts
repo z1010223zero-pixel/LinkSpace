@@ -238,10 +238,12 @@ export interface VddDriverStatus {
   installedVersion: string | null
   /** 已发布 INF 名（如 oem116.inf），未装时 null */
   oemInf: string | null
-  /** 设备节点 ROOT\DISPLAY\0001 是否启用 */
+  /** 设备节点（按硬件 ID Root\MttVDD 查到）是否启用 */
   deviceEnabled: boolean
   /** 设备节点是否存在 */
   devicePresent: boolean
+  /** 按硬件 ID 查到的设备节点实例 ID（如 ROOT\DISPLAY\0001），不存在时 null */
+  deviceInstanceId: string | null
   /** 随包的驱动 zip 是否就位 */
   packageBundled: boolean
   /** 当前进程是否有管理员权限 */

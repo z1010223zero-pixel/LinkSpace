@@ -613,6 +613,7 @@ function makeFakeVddDriver(opts: {
         oemInf: 'oem116.inf',
         deviceEnabled: enabled,
         devicePresent: opts.devicePresent ?? true,
+        deviceInstanceId: (opts.devicePresent ?? true) ? 'ROOT\\DISPLAY\\0001' : null,
         packageBundled: true,
         isAdmin: true
       }

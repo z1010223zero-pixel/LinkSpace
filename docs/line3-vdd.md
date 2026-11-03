@@ -123,6 +123,8 @@
   SignPath 证书进 `TrustedPublisher` 才可静默）、卸载/禁用清理、
   版本钉死 **25.7.23 + SHA-256 `E24210…B3A`**（见上）、`vdd_settings.xml`
   的生成与管理；安装包内附带 VDD 的 MIT LICENSE 文本。
+  其中“建设备节点”一步已于 2026-11-03 实现（⑥，自研 SetupDi 助手），
+  剩余活体验证见下“⑥ 实现”。
   - 别用 winget 的 `VirtualDrivers.Virtual-Display-Driver`：那只是控制应用的便携包，**不装驱动**。
   - 别用仓库里的社区脚本安装：有杀软误报先例，只用官方 driver-only 包。
 - **待补：全新机器上的设备节点创建**：`pnputil /add-driver` 只暂存驱动包，从未装过 VDD 的机器上
@@ -161,10 +163,15 @@ Disable-PnpDevice -InstanceId 'ROOT\DISPLAY\0001' -Confirm:$false
   非管理员拒绝安装（且不发出任何安装命令）、安装 happy path（fake，
   断言 Expand-Archive → 信任导出 → certutil → pnputil /add-driver →
   复核的每一步命令）、已装直接 ok、enable/disable 命令、settings
-  读/写（临时目录）、uninstall 门禁。共 51 项断言，全部通过。
+  读/写（临时目录）、uninstall 门禁；设备节点创建（见下“⑥ 实现”）：
+  全新机器 happy path、助手失败、助手缺失、已暂存缺节点时重跑跳过
+  信任 + add-driver。共 66 项断言，全部通过。
 - `apps/desktop/src/main/platform.ts`——`locateVddPackageZip()`：
   环境变量 `LINKSPACE_VDD_ZIP` → 打包资源 `<resourcesPath>/vdd/` →
   开发期仓内 `resources/vdd/`；找不到返回 null，不抛错。
+  另有 `locateRootdevHelper()`（节点创建助手，见下“⑥ 实现”，
+  环境变量 `LINKSPACE_ROOTDEV_HELPER` → `<resourcesPath>/winhelper/` →
+  开发期仓内 `resources/winhelper/`）。
 - `apps/desktop/src/main/index.ts`——构造管理器并传给 `registerIpc`；
   只构造，不自动安装。
 - `apps/desktop/src/main/ipc.ts`——新增 `vdd-driver:status`（只读快照）
@@ -178,11 +185,14 @@ Disable-PnpDevice -InstanceId 'ROOT\DISPLAY\0001' -Confirm:$false
 
 ### 信任方法（选定：从 .cat 实时取签名者证书）
 
-安装流程：已装且版本符合直接 ok → 管理员检查 → 随包 zip 验大小 +
-SHA-256 → `Expand-Archive` 解到临时目录 → 信任 → `pnputil /add-driver
-<inf> /install` → 再查 `status()` 复核版本。每步失败返回可操作的
+安装流程：已装且版本符合且节点存在直接 ok → 管理员检查 → 随包 zip 验大小 +
+SHA-256 → `Expand-Archive` 解到临时目录 → 信任（驱动未暂存时）→
+`pnputil /add-driver <inf> /install`（驱动未暂存时）→ 再查 `status()` 复核
+版本 → 节点缺失时调随包助手建节点 → 再查 `status()` 复核
+`devicePresent=true`。每步失败返回可操作的
 reason（`not-admin` / `package-missing` / `hash-mismatch` /
-`extract-failed` / `trust-failed` / `install-failed` / `verify-failed` 等）。
+`extract-failed` / `trust-failed` / `install-failed` / `verify-failed` /
+`node-create-failed` 等）。
 
 信任步骤选了**从 `.cat` 实时取签名者证书**，不用随包附带 `.cer`：
 
@@ -204,16 +214,30 @@ reason（`not-admin` / `package-missing` / `hash-mismatch` /
    卸载时不清理 TrustedPublisher 里的 SignPath 证书（整机维度的发布者
    信任，其他 SignPath 签名驱动也可能依赖；卸载只拆驱动包）。
 
-### 已知缺口：新机器上的设备节点创建
+### 已知缺口：新机器上的设备节点创建——已实现（2026-11-03）
 
 `pnputil /add-driver` 只把驱动包暂存进驱动库并装到已存在的匹配设备上；
 在一台从未装过 VDD 的机器上，设备节点本身（INF 硬件 ID `Root\MttVDD`，
-见 `MttVDD.inf` 的 `[Standard.NTamd64]` 节）还需另一步创建
-（`devcon install MttVDD.inf Root\MttVDD`，或 SwDeviceCreate 小助手，
-如 TwinDesk 的 `macshare-winhelper --add-root-device`）。本版本不自带
-devcon、不写 P/Invoke 助手——`ensureInstalled()` 成功后若 `status()` 仍
-报 `devicePresent=false`，即节点未建，属待补的后续工作，不是安装失败的
-误报。zero 上节点 2026-10-28 前后已建好，不受影响。
+见 `MttVDD.inf` 的 `[Standard.NTamd64]` 节）还需另一步创建。
+**本缺口已补**：`ensureInstalled()` 在全新机器上也能一路走到
+`devicePresent=true`（见下“⑥ 实现”）。
+
+#### 选型（2026-11-03）
+
+| 方案 | 结论 |
+| --- | --- |
+| WDK `devcon.exe install MttVDD.inf Root\MttVDD` | 功能上就是正确做法，EWDK 里也有现成二进制（x64，121,288 字节）。但 devcon 是 WDK 样例工具，不在 WDK 可再分发清单里，塞进闭源发行包（Route B）是许可证灰区；且它是通用设备管理工具（可删/禁任意设备），随包带一个通用工具面太大。**不用**。 |
+| `SwDeviceCreate` 小助手 | 出局（决定性）：Microsoft Learn 明确写 "After this handle is closed, PnP will remove the device"——一次性助手退出即删节点，节点也不随重启保留；要保住节点需常驻进程持句柄，等于给 LinkSpace 加一个后台守护进程，代价远超收益，且与“节点持久化、开关由设置页/会话控制”的设计冲突。**不用**。 |
+| **自研 SetupDi 助手（采用）** | 把 `devcon install` 的 API 序列（`SetupDiCreateDeviceInfo` + `SPDRP_HARDWAREID` + `DIF_REGISTERDEVICE` + `UpdateDriverForPlugAndPlayDevices`，见 Microsoft Learn "Using the DevCon Tool to Install a Driver Package"）写成约 200 行自有代码的单用途 exe（`native/winhelper/linkspace-rootdev.cpp`），只建 `Root\MttVDD` 这一个节点。许可证干净（自有代码）、节点持久化（与 zero 现有 `ROOT\DISPLAY\0001` 同类根枚举节点，随重启保留）、同步确定性安装、无常驻进程。 |
+
+#### 代价与注意
+
+- 我们自己持有这段 SetupDi 代码（但序列是公开的 devcon 做法，风险低）。
+- 构建需 EWDK（zero 上已有 ISO `D:\dev\iddcx\EWDK_28000.2526.iso`，见 `native/winhelper/build.cmd`；换机/CI 需重新挂 ISO）。
+- 助手只认 Display 类、只建 `Root\MttVDD`；换硬件 ID 须改源码重编（VDD 的硬件 ID 钉死在驱动 INF 里，不会变）。
+- 节点实例 ID 由系统生成（全新机器上一般是 `ROOT\DISPLAY\0000`，zero 上是 `ROOT\DISPLAY\0001`——中段 `DISPLAY` 是设备类名，不是硬件 ID）；`status()` / `setDeviceEnabled()` 已改为按硬件 ID `Root\MttVDD` 查找节点、用查到的实际实例 ID 操作，不再硬编码 `ROOT\DISPLAY\0001`（zero 实测：该节点 HardwareID 确为 `Root\MttVDD`）。
+- 装驱动后节点处于**已启用**状态（驱动已启动），即安装完会多一块虚拟显示器；启用/禁用由设置页与扩展会话流程管理（`setDeviceEnabled()`），安装本身不管。
+- 重跑安装幂等：驱动已暂存时跳过信任 + `pnputil` 两步直奔助手；节点已存在时助手跳过创建只装驱动，不造重复节点。
 
 另：ARM64 Windows 只接受微软签名的驱动包，VDD 25.7.23 是 SignPath 签名，
 装不上（`0x800B0109`，见 TwinDesk issue #14 / 上游 #465）；管理器在
@@ -279,4 +303,55 @@ devcon、不写 P/Invoke 助手——`ensureInstalled()` 成功后若 `status()`
 
 - ④ 真机验证：需平板无线调试恢复（2026-11-03 20:50 已断，44311 拒绝，疑似休眠）+ 扩展屏推流到平板实测。
 - ③ 控制台扩展实测：须用户本人在场，显示设置里把虚拟屏设为扩展、拖窗口实测。
-- 全新机器设备节点创建（devcon / SwDeviceCreate 小助手）未实现，只做了失败识别。
+- 全新机器设备节点创建：已实现（见下「⑥ 实现」一节）；活体验证待用户——全新机器真安装、重跑幂等、是否需重启。
+
+## ⑥ 实现：设备节点创建进桌面应用（2026-11-03）
+
+> 分支 `wt/devnode`（自 `db013f7`）。验证全部走 fake 命令执行器 +
+> 助手源码级走查，不动真实设备状态（未在任何机器上真实创建节点）。
+
+### 文件
+
+- `native/winhelper/linkspace-rootdev.cpp`——节点创建助手源码（约 200 行，
+  自有代码）：`install <infPath> <hardwareId>`；先按硬件 ID 查 Display 类
+  现存节点，已存在则跳过创建只装驱动（幂等）；否则
+  `SetupDiCreateDeviceInfo`（设备名取硬件 ID 去掉 `Root\` 前缀，
+  `DICD_GENERATE_ID`）→ `SPDRP_HARDWAREID` 写硬件 ID →
+  `DIF_REGISTERDEVICE` → `UpdateDriverForPlugAndPlayDevices` 装驱动并启动。
+  `/MT` 静态链接，目标机无需 VC 运行库；退出码 0/2/10–16，失败时 stderr
+  有 `error 0x........ at <阶段>`。
+- `native/winhelper/build.cmd`——EWDK 构建脚本（挂载 ISO 后 `build.cmd [盘符]`，
+  默认 E:，调 `SetupBuildEnv.cmd amd64` + `cl /MT`）；`native/winhelper/README.md`
+  记录选型、代价与活体验证清单。
+- `apps/desktop/resources/winhelper/linkspace-rootdev.exe`——随包助手二进制
+  （EWDK 28000.2526 在 zero 上构建，SHA-256 见该目录 README.md）；
+  `package.json` `extraResources` 已接线（`resources/winhelper` → `winhelper`）。
+- `apps/desktop/src/main/extend/vdd-driver.ts`——`VddDriverManager`：
+  新增 `ROOT_HARDWARE_ID`（`Root\MttVDD`）、`ROOTDEV_HELPER_EXE`、
+  选项 `helperPath`；`status()` 改按硬件 ID 查节点并返回
+  `deviceInstanceId`（`VddDriverStatus` 新增该字段，见
+  `src/shared/types.ts`），`setDeviceEnabled()` 用查到的实际实例 ID；
+  `ensureInstalled()` 拆出 `stageDriver()`（信任 + `pnputil`，仅驱动
+  未暂存时），新增第 8 步 `createDeviceNode()`（调助手，失败
+  `node-create-failed`），成功后复核 `devicePresent=true` 才报 ok；
+  重跑安装时驱动已暂存则跳过信任 + `pnputil` 直奔助手。
+- `apps/desktop/src/main/platform.ts`——`locateRootdevHelper()`（环境变量
+  `LINKSPACE_ROOTDEV_HELPER` → `<resourcesPath>/winhelper/` → 开发期仓内
+  `resources/winhelper/`）；`src/main/index.ts` 构造管理器时传入。
+- `apps/desktop/src/main/verify-vdd-driver.ts`——新增第 15–18 节（fake）：
+  全新机器 happy path（助手收到 `install <inf> Root\MttVDD` 且在
+  `/add-driver` 之后、复核节点出现）、助手失败 → `node-create-failed`
+  （detail 带退出码）、助手缺失 → `node-create-failed` 且不调助手、
+  已暂存缺节点时重跑跳过信任 + `pnputil` 直奔助手；另补 status 返回
+  实例 ID 与节点已存在时不调助手的断言。共 66 项断言，全部通过。
+  `npm run build` / `typecheck` / `verify:vdd-driver` / `verify:extend`
+  全部通过。
+
+### 未验证（诚实记录）
+
+- 助手二进制只在 zero 上编译通过并跑过 `--help`（无设备变更）；`install`
+  路径未在任何机器上真实执行过——全新机器上节点是否真出现、实例 ID
+  是否如预期（`ROOT\DISPLAY\0000`）、重启后是否保留，均待用户活体验证；重跑安装是否不产生第二个节点（幂等）亦待验证。
+- `UpdateDriverForPlugAndPlayDevices` 在驱动已暂存且节点新建场景下的
+  行为（是否直接装上、无需重启）亦待活体验证；若它要求重启，安装流程
+  需把 `rebootRequired` 透传给设置页提示用户。

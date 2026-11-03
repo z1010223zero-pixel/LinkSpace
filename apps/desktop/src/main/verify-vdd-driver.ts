@@ -1,4 +1,4 @@
-// VDD 驱动生命周期无头测试（线 3，⑤）。
+// VDD 驱动生命周期无头测试（线 3，⑤ + 设备节点创建）。
 //
 // 全部用注入的 fake 命令执行器覆盖，不动真实设备状态：
 //   1. status 解析——已装（英文/中文 pnputil 标签各一）与未装
@@ -9,6 +9,11 @@
 //   5. settings 读/写（临时目录）：缺失新建、已有保留档位只改 count、
 //      preferred 档位追加、count<1 钳到 1
 //   6. uninstall：设备启用时拒绝、已禁用时发 /delete-driver
+//   7. 节点创建（全新机器）：add-driver 后节点仍缺失 → 调随包助手
+//      linkspace-rootdev.exe install <inf> Root\MttVDD → 复核节点出现
+//   8. 节点创建失败 → node-create-failed；助手缺失 → node-create-failed
+//      且不调助手；驱动已暂存但节点缺失时重跑安装跳过信任 + add-driver，
+//      直奔助手
 //
 // 不碰真实 pnputil、不碰 Enable/Disable-PnpDevice、不改显示状态。
 // 运行：npm run verify:vdd-driver（esbuild 打包后 node 执行）。
@@ -20,6 +25,7 @@ import { join } from 'node:path'
 import {
   DEVICE_INSTANCE_ID,
   EXPECTED_DRIVER_VERSION,
+  ROOT_HARDWARE_ID,
   VddDriverManager,
   parsePnputilDrivers,
   parsePnpDevice,
@@ -123,10 +129,10 @@ async function main(): Promise<void> {
     const none = parsePnputilDrivers(PNPUTIL_NONE)
     check('无 mttvdd 时解析出未装', !none.installed && none.oemInf === null && none.installedVersion === null)
     const dis = parsePnpDevice(PNPDEV_DISABLED)
-    check('已禁用节点解析', dis.present && !dis.enabled, `present=${dis.present} enabled=${dis.enabled}`)
+    check('已禁用节点解析', dis.present && !dis.enabled && dis.instanceId === DEVICE_INSTANCE_ID, `present=${dis.present} enabled=${dis.enabled} instanceId=${dis.instanceId}`)
     const ena = parsePnpDevice(PNPDEV_ENABLED)
-    check('已启用节点解析', ena.present && ena.enabled)
-    check('空输出解析为不存在', !parsePnpDevice('').present && !parsePnpDevice('').enabled)
+    check('已启用节点解析', ena.present && ena.enabled && ena.instanceId === DEVICE_INSTANCE_ID)
+    check('空输出解析为不存在', !parsePnpDevice('').present && !parsePnpDevice('').enabled && parsePnpDevice('').instanceId === null)
 
     // ---- 2. status()：已装 + 已禁用 ----
     console.log('\n2. status() 已装/已禁用')
@@ -142,6 +148,7 @@ async function main(): Promise<void> {
     const st = await mgrStatus.status()
     check('status 已装', st.installed && st.installedVersion === EXPECTED_DRIVER_VERSION && st.oemInf === 'oem116.inf')
     check('status 设备存在但已禁用', st.devicePresent && !st.deviceEnabled)
+    check('status 返回节点实例 ID', st.deviceInstanceId === DEVICE_INSTANCE_ID, st.deviceInstanceId ?? 'null')
     check('status 随包 zip 在', st.packageBundled)
     check('status 是管理员', st.isAdmin)
 
@@ -245,6 +252,7 @@ async function main(): Promise<void> {
     check('certutil 进 TrustedPublisher', fakeHappy.has('TrustedPublisher') && fakeHappy.has('certutil'))
     check('pnputil /add-driver 带 /install', fakeHappy.has('/add-driver') && fakeHappy.has('/install'))
     check('安装只打了一次 /add-driver', fakeHappy.count('/add-driver') === 1)
+    check('节点已存在时不调助手', !fakeHappy.has('linkspace-rootdev.exe'))
 
     // ---- 7. 已装且版本符合直接 ok，不重复装 ----
     console.log('\n7. 已装直接 ok')
@@ -351,6 +359,157 @@ async function main(): Promise<void> {
     const mgrNoPkg = new VddDriverManager({ zipPath: null, runner: fakeEmpty.run })
     const noPkgRes = await mgrNoPkg.ensureInstalled()
     check('包缺失返回 package-missing', !noPkgRes.ok && noPkgRes.reason === 'package-missing', noPkgRes.ok ? '意外成功' : noPkgRes.reason)
+
+    // ---- 15. 全新机器 happy path：add-driver 后节点仍缺失 → 调助手建节点 ----
+    console.log('\n15. 全新机器安装 happy path（节点创建）')
+    const freshFixture = Buffer.from('fake-zip-bytes-for-fresh-machine')
+    const freshZip = join(dir, 'fresh.zip')
+    await writeFile(freshZip, freshFixture)
+    const freshSha = createHash('sha256').update(freshFixture).digest('hex')
+    const helperPath = join(dir, 'linkspace-rootdev.exe')
+    await writeFile(helperPath, Buffer.from('fake-helper-bytes'))
+    let freshAddDriverCalls = 0
+    let freshHelperCalls = 0
+    const fakeFresh = new FakeRunner((cmd, args) => {
+      const joined = args.join(' ')
+      if (cmd === 'pnputil.exe' && joined.includes('/enum-drivers')) {
+        return ok(freshAddDriverCalls === 0 ? PNPUTIL_NONE : PNPUTIL_EN)
+      }
+      if (cmd === 'pnputil.exe' && joined.includes('/add-driver')) {
+        freshAddDriverCalls++
+        return ok('Driver package added successfully.\r\nPublished Name: oem116.inf\r\n')
+      }
+      if (cmd === 'certutil.exe') return ok('CertUtil: -addstore command completed successfully.\r\n')
+      if (joined.includes('Get-PnpDevice')) {
+        // 助手调用前节点不存在，调用后出现（已禁用态）
+        return freshHelperCalls === 0
+          ? { code: 1, stdout: '', stderr: 'Get-PnpDevice : No such device' }
+          : ok(PNPDEV_DISABLED)
+      }
+      if (joined.includes('Expand-Archive')) return ok('')
+      if (joined.includes('Get-AuthenticodeSignature')) return ok('')
+      if (cmd.endsWith('linkspace-rootdev.exe')) {
+        freshHelperCalls++
+        return ok('instanceId=ROOT\\DISPLAY\\0000\r\nok\r\n')
+      }
+      return adminTrue(cmd, args)
+    })
+    const mgrFresh = new VddDriverManager({
+      zipPath: freshZip,
+      helperPath,
+      runner: fakeFresh.run,
+      pinnedSha256: freshSha,
+      pinnedSize: freshFixture.length
+    })
+    const freshRes = await mgrFresh.ensureInstalled()
+    check('全新机器安装成功', freshRes.ok && !freshRes.alreadyInstalled, freshRes.ok ? 'ok' : `${freshRes.reason}：${freshRes.detail}`)
+    check('全新机器只打一次 /add-driver', fakeFresh.count('/add-driver') === 1)
+    check('全新机器调了一次助手', freshHelperCalls === 1)
+    const freshHelperCall = fakeFresh.calls.find((c) => c.cmd.endsWith('linkspace-rootdev.exe'))
+    check(
+      '助手收到 install <inf> Root\\MttVDD',
+      freshHelperCall !== undefined &&
+        freshHelperCall.args[0] === 'install' &&
+        freshHelperCall.args[1]!.endsWith('MttVDD.inf') &&
+        freshHelperCall.args[2] === ROOT_HARDWARE_ID,
+      freshHelperCall ? freshHelperCall.args.join(' ') : '没找到助手调用'
+    )
+    check('助手调用在 /add-driver 之后', fakeFresh.calls.findIndex((c) => c.cmd.endsWith('linkspace-rootdev.exe')) > fakeFresh.calls.findIndex((c) => c.args.join(' ').includes('/add-driver')))
+
+    // ---- 16. 助手失败 → node-create-failed，不报成功 ----
+    console.log('\n16. 节点创建助手失败')
+    let helperFailCalls = 0
+    let helperFailAddCalls = 0
+    const fakeHelperFail = new FakeRunner((cmd, args) => {
+      const joined = args.join(' ')
+      if (cmd === 'pnputil.exe' && joined.includes('/enum-drivers')) {
+        return ok(helperFailAddCalls === 0 ? PNPUTIL_NONE : PNPUTIL_EN)
+      }
+      if (cmd === 'pnputil.exe' && joined.includes('/add-driver')) {
+        helperFailAddCalls++
+        return ok('Driver package added successfully.\r\n')
+      }
+      if (cmd === 'certutil.exe') return ok('')
+      if (joined.includes('Get-PnpDevice')) return { code: 1, stdout: '', stderr: 'No such device' }
+      if (joined.includes('Expand-Archive')) return ok('')
+      if (joined.includes('Get-AuthenticodeSignature')) return ok('')
+      if (cmd.endsWith('linkspace-rootdev.exe')) {
+        helperFailCalls++
+        return { code: 14, stdout: '', stderr: 'error 0x80070005 at UpdateDriverForPlugAndPlayDevices' }
+      }
+      return adminTrue(cmd, args)
+    })
+    const mgrHelperFail = new VddDriverManager({
+      zipPath: freshZip,
+      helperPath,
+      runner: fakeHelperFail.run,
+      pinnedSha256: freshSha,
+      pinnedSize: freshFixture.length
+    })
+    const helperFailRes = await mgrHelperFail.ensureInstalled()
+    check('助手失败返回 node-create-failed', !helperFailRes.ok && helperFailRes.reason === 'node-create-failed', helperFailRes.ok ? '意外成功' : helperFailRes.reason)
+    check('助手失败时 detail 带退出码', !helperFailRes.ok && helperFailRes.detail.includes('14'), helperFailRes.ok ? '' : helperFailRes.detail)
+    check('助手失败时只调了一次助手', helperFailCalls === 1)
+
+    // ---- 17. 助手缺失 → node-create-failed，且不调助手 ----
+    console.log('\n17. 助手缺失拒绝建节点')
+    let noHelperAddCalls = 0
+    const fakeNoHelper = new FakeRunner((cmd, args) => {
+      const joined = args.join(' ')
+      if (cmd === 'pnputil.exe' && joined.includes('/enum-drivers')) {
+        return ok(noHelperAddCalls === 0 ? PNPUTIL_NONE : PNPUTIL_EN)
+      }
+      if (cmd === 'pnputil.exe' && joined.includes('/add-driver')) {
+        noHelperAddCalls++
+        return ok('Driver package added successfully.\r\n')
+      }
+      if (cmd === 'certutil.exe') return ok('')
+      if (joined.includes('Get-PnpDevice')) return { code: 1, stdout: '', stderr: 'No such device' }
+      if (joined.includes('Expand-Archive')) return ok('')
+      if (joined.includes('Get-AuthenticodeSignature')) return ok('')
+      return adminTrue(cmd, args)
+    })
+    const mgrNoHelper = new VddDriverManager({
+      zipPath: freshZip,
+      helperPath: join(dir, 'does-not-exist.exe'),
+      runner: fakeNoHelper.run,
+      pinnedSha256: freshSha,
+      pinnedSize: freshFixture.length
+    })
+    const noHelperRes = await mgrNoHelper.ensureInstalled()
+    check('助手缺失返回 node-create-failed', !noHelperRes.ok && noHelperRes.reason === 'node-create-failed', noHelperRes.ok ? '意外成功' : noHelperRes.reason)
+    check('助手缺失时没调助手', !fakeNoHelper.has('linkspace-rootdev.exe'))
+
+    // ---- 18. 驱动已暂存但节点缺失：重跑安装跳过信任 + add-driver，直奔助手 ----
+    console.log('\n18. 已暂存缺节点时重跑安装')
+    let retryHelperCalls = 0
+    const fakeRetry = new FakeRunner((cmd, args) => {
+      const joined = args.join(' ')
+      if (cmd === 'pnputil.exe' && joined.includes('/enum-drivers')) return ok(PNPUTIL_EN)
+      if (joined.includes('Get-PnpDevice')) {
+        return retryHelperCalls === 0
+          ? { code: 1, stdout: '', stderr: 'No such device' }
+          : ok(PNPDEV_DISABLED)
+      }
+      if (joined.includes('Expand-Archive')) return ok('')
+      if (cmd.endsWith('linkspace-rootdev.exe')) {
+        retryHelperCalls++
+        return ok('instanceId=ROOT\\DISPLAY\\0000\r\nok\r\n')
+      }
+      return adminTrue(cmd, args)
+    })
+    const mgrRetry = new VddDriverManager({
+      zipPath: freshZip,
+      helperPath,
+      runner: fakeRetry.run,
+      pinnedSha256: freshSha,
+      pinnedSize: freshFixture.length
+    })
+    const retryRes = await mgrRetry.ensureInstalled()
+    check('重跑安装成功且 alreadyInstalled', retryRes.ok && retryRes.alreadyInstalled, retryRes.ok ? 'ok' : `${retryRes.reason}：${retryRes.detail}`)
+    check('重跑时跳过 certutil 信任', !fakeRetry.has('certutil'))
+    check('重跑时跳过 /add-driver', !fakeRetry.has('/add-driver'))
+    check('重跑时调了助手', retryHelperCalls === 1)
 
     report()
   } finally {
