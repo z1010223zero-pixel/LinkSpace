@@ -524,7 +524,7 @@ fun MainScreen(service: LinkSpaceService, onClipboardToggle: (Boolean) -> Unit) 
             // 每次请求都要过这道确认 + 系统录屏授权框；拒绝/取消都明确回绝，
             // 桌面窗口显示原因。90 秒无人确认由服务侧 TTL 自动拒绝
             //（覆盖 LinkSpace 同意框 + 系统录屏授权框两次确认）。
-            // 反向投屏请求弹窗（B 线：补 30 秒倒计时与“单次有效”文案）
+            // 反向投屏请求弹窗（B 线：补 90 秒倒计时与“单次有效”文案）
             reverseRequest?.let { req ->
                 ReverseStreamRequestDialog(
                     req = req,

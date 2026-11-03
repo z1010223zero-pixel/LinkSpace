@@ -459,7 +459,12 @@ class LinkSpaceService private constructor(private val appContext: Context) {
             Protocol.TYPE_SCREEN_STREAM_REQUEST -> CoroutineScope(Dispatchers.IO).launch {
                 // 反向视频帧只能走平板主动连出的控制连接。电脑主动连入时，
                 // 本端只有入站链路；这里必须先补建出站链路，否则帧全部丢弃。
-                val ready = ensureOutboundForPeerId(from)
+                // connectControl 建链失败会抛异常（TLS/握手失败），必须兜住：
+                // 否则协程静默崩溃、桌面收不到 screen.stream.error，会一直
+                // 停在“暂无画面”，而平板侧 TTL 也从未启动（onRequest 没跑到）。
+                val ready = runCatching { ensureOutboundForPeerId(from) }
+                    .onFailure { Log.w(TAG, "反向投屏补建出站视频通道失败: $from", it) }
+                    .getOrDefault(false)
                 if (!ready) {
                     Log.w(TAG, "反向投屏请求无可用出站视频通道: $from")
                     sendControlMessage(from, Protocol.TYPE_SCREEN_STREAM_ERROR) {
@@ -896,7 +901,7 @@ class LinkSpaceService private constructor(private val appContext: Context) {
      * reverseStreamRequest 流，MainActivity 弹确认框，同意后弹系统录屏
      * 授权框，拿到 MediaProjection 再调 startReverseStreamWithProjection）。
      * 未确认前绝不自动开录——与 W4 的 ControlledInputSession 默认拒绝
-     * 同款安全姿势；30s 无人确认由 ReverseScreenStreamer TTL 自动拒绝。
+     * 同款安全姿势；90s 无人确认由 ReverseScreenStreamer TTL 自动拒绝。
      */
     val reverseScreen: ReverseScreenStreamer by lazy {
         ReverseScreenStreamer(
@@ -911,7 +916,7 @@ class LinkSpaceService private constructor(private val appContext: Context) {
             listener = object : ReverseScreenStreamer.Listener {
                 override fun onReverseStreamRequested(request: ReverseScreenStreamer.ReverseStreamRequest) {
                     // W7：交给 MainActivity 的确认框 + 系统录屏授权框。
-                    // 界面不在前台时请求只挂 30s，超时由 TTL 自动拒绝回 error，
+                    // 界面不在前台时请求只挂 90s，超时由 TTL 自动拒绝回 error，
                     // 不会静默挂住桌面窗口。
                     Log.i(TAG, "收到 ${request.peerId} 的反向投屏请求，等待本机录屏授权")
                     _reverseStreamRequest.value = request

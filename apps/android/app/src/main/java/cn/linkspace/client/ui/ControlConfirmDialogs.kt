@@ -25,9 +25,10 @@ import cn.linkspace.client.service.ReverseScreenStreamer
 import kotlinx.coroutines.delay
 
 /**
- * 控制 / 反向投屏确认弹窗的 30 秒倒计时（B 线，ToDesk 对标：
+ * 控制 / 反向投屏确认弹窗的倒计时（B 线，ToDesk 对标：
  * 被控端确认弹窗须写清谁在连、给倒计时、注明“单次有效”；
  * 截图见 android-research.md §2.3(4)，42 秒倒计时 + “此授权单次有效”）。
+ * 控制请求 30 秒，反向投屏 90 秒（须覆盖 LinkSpace 同意框 + 系统录屏授权框两次确认）。
  *
  * 倒计时只做展示，超时拒绝以服务侧 TTL 为准：
  * 控制请求用 [ControlledInputSession.ControlRequest.expiresAt]（绝对时间），
@@ -35,7 +36,7 @@ import kotlinx.coroutines.delay
  * [ReverseScreenStreamer.REQUEST_TTL_MS]；服务侧到时自动拒绝，弹窗随状态消失。
  */
 
-/** 距 deadline 的剩余整秒（向上取整，刚弹出时显示满格 30 而不是 29），每秒重算。 */
+/** 距 deadline 的剩余整秒（向上取整，刚弹出时显示满格而不是少 1），每秒重算。 */
 @Composable
 private fun rememberTtlRemainingSeconds(deadlineEpochMs: Long, totalSeconds: Int): Int {
     fun remaining(): Int =
@@ -108,7 +109,7 @@ fun ControlRequestDialog(
 /**
  * 反向投屏请求：电脑想看本机屏幕（线 2 W7）。
  * 每次请求都要过这道确认 + 系统录屏授权框；拒绝/取消都明确回绝，
- * 桌面窗口显示原因。30 秒无人确认由服务侧 TTL 自动拒绝。
+ * 桌面窗口显示原因。90 秒无人确认由服务侧 TTL 自动拒绝。
  * 倒计时取 requestedAt + REQUEST_TTL_MS；文案补“单次有效”。
  */
 @Composable

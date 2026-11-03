@@ -118,12 +118,15 @@ export class ReverseWindowManager {
     const hash = `#/reverse-stream?peer=${encodeURIComponent(peerId)}&name=${encodeURIComponent(displayName)}`
     const devUrl = this.deps.rendererUrl()
     if (devUrl) {
-      void win.loadURL(`${devUrl}#/${hash}`)
+      // hash 自带 `#/` 前缀，直接拼；再补 `#/` 会拼出 `#/#/...`，渲染入口
+      // 两个前缀都匹配不上，开发模式下画面窗口会挂成主界面。
+      void win.loadURL(`${devUrl}${hash}`)
     } else {
       void win.loadFile(this.deps.rendererFile(), { hash })
     }
-    win.webContents.once('did-finish-load', () => {
+    win.webContents.on('did-finish-load', () => {
       // 静态画面可能不会再推新帧；窗口打开/刷新时立刻补绘最近一帧。
+      // 用 on 而不用 once：刷新后也须补绘，否则静态画面一直空白。
       if (this.lastFrame) this.sendFrame(this.lastFrame)
     })
     win.on('closed', () => {
