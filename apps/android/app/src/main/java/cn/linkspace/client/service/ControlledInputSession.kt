@@ -29,11 +29,24 @@ import org.json.JSONObject
  * 确认弹窗，确认后才放行 input.event；拒绝回 session.reject；
  * 30s 超时自动回落拒绝；确认 UI 未弹出或服务未启用时不放行任何输入
  * （安全红线，见协议 9.1「每次控制请求都有明确提示」）。
+ * 唯一例外是用户亲手勾选的信任设备（[isAutoApprovePeer]，Bug 2）：
+ * 门禁全过后直接放行，不弹确认框；会话本身仍是单次有效。
  *
  * control 授权语义与桌面端一致：会话级内存态，不进 TrustStore 持久化。
+ * 只有“以后不再询问”这一个标记以 scope 形式持久化在 TrustStore 里。
  */
 class ControlledInputSession(
     private val isPeerAuthorized: (String) -> Boolean,
+    /**
+     * 该对端是否已被用户明确标记为“信任设备，以后不再询问”（Bug 2：
+     * TrustStore 里 `control.no-confirm` scope）。为 true 时，门禁
+     * 全部通过后直接放行本次请求，不弹确认框——这是“绝不自动批准”
+     * 的唯一例外，且必须由用户在确认框里亲手勾选才能获得。
+     * 默认 false：未接线时一律走确认框，老行为不变。
+     * 免确认只省掉 LinkSpace 自己的确认框：会话仍是单次有效，
+     * 结束/断连/撤销信任照样掐断；无障碍门禁、配对门禁、TTL 全部照常。
+     */
+    private val isAutoApprovePeer: (String) -> Boolean = { false },
     private val localScreen: () -> InputController.Screen,
     private val send: (peerId: String, type: String, payload: JSONObject.() -> Unit) -> Unit,
     /**
@@ -210,6 +223,14 @@ class ControlledInputSession(
             schedule(object : java.util.TimerTask() {
                 override fun run() = onTtlExpired(sessionId)
             }, REQUEST_TTL_MS)
+        }
+        // 信任设备免确认（Bug 2）：门禁已全过，立即走与用户点“允许”
+        // 相同的 approve 路径（复核无障碍、发 session.accept），
+        // 不调 onControlRequested、不弹确认框。
+        if (isAutoApprovePeer(peerId)) {
+            Log.i(TAG, "受信设备 $peerId 的键鼠控制请求：跳过确认框直接放行")
+            approve(sessionId)
+            return
         }
         Log.i(TAG, "收到 $peerId 的键鼠控制请求，等待本机确认")
         listener?.onControlRequested(req)

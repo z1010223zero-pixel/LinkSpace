@@ -55,6 +55,7 @@ internal fun scopeLabel(scope: String): String = when (scope) {
     "clipboard" -> "剪贴板同步"
     "input" -> "键鼠控制"
     "screen" -> "屏幕查看"
+    "control.no-confirm" -> "信任设备（不再询问）"
     else -> scope
 }
 

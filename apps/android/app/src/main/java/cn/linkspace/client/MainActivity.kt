@@ -29,6 +29,7 @@ import cn.linkspace.client.service.DiscoveredService
 import cn.linkspace.client.service.InputController
 import cn.linkspace.client.service.LinkSpaceService
 import cn.linkspace.client.service.OutgoingFile
+import cn.linkspace.client.service.Protocol
 import cn.linkspace.client.service.ReverseScreenStreamer
 import cn.linkspace.client.service.LinkSpaceForegroundService
 import cn.linkspace.client.ui.AppNavShell
@@ -303,13 +304,27 @@ fun MainScreen(service: LinkSpaceService, onClipboardToggle: (Boolean) -> Unit) 
     // 过去直接 expired，桌面窗口只看到“反向投屏失败：expired”。
     // 两个框都是 Dialog（独立窗口），放这里一样盖在触控板之上。
     // ---------- 反向投屏请求：电脑想看本机屏幕（线 2 W7） ----------
-    // 每次请求都要过这道确认 + 系统录屏授权框；拒绝/取消都明确回绝，
+    // 未信任设备每次请求都要过这道确认 + 系统录屏授权框；拒绝/取消都明确回绝，
     // 桌面窗口显示原因。90 秒无人确认由服务侧 TTL 自动拒绝
     //（覆盖 LinkSpace 同意框 + 系统录屏授权框两次确认）。
-    reverseRequest?.let { req ->
+    // 信任设备（Bug 2：确认框里勾过“信任此设备”）跳过 LinkSpace 确认框，
+    // 直接进系统录屏授权框——系统框跳不过，也不绕过。
+    val reverseTrusted = reverseRequest?.let { service.isNoConfirmTrusted(it.peerId) } ?: false
+    LaunchedEffect(reverseRequest) {
+        val req = reverseRequest
+        if (req != null && service.isNoConfirmTrusted(req.peerId)) {
+            captureRequest = req
+            val manager =
+                context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as android.media.projection.MediaProjectionManager
+            screenCapture.launch(manager.createScreenCaptureIntent())
+        }
+    }
+    if (reverseRequest != null && !reverseTrusted) {
+        val req = reverseRequest!!
         ReverseStreamRequestDialog(
             req = req,
-            onApprove = {
+            onApprove = { trust ->
+                if (trust) service.grantNoConfirmTrust(req.peerId)
                 captureRequest = req
                 val manager =
                     context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as android.media.projection.MediaProjectionManager
@@ -323,11 +338,13 @@ fun MainScreen(service: LinkSpaceService, onClipboardToggle: (Boolean) -> Unit) 
     // 30s 内未确认由会话层自动拒绝；弹窗被划掉按拒绝处理——
     // 确认 UI 未弹出时不放行任何输入。同上，控制会话激活时
     // early return 会跳过挂在后面的框，一并提到前面。
+    // 信任设备由会话层直接放行（Bug 2），到不了这里；这里只处理
+    // 未信任设备的确认，勾选“信任此设备”随放行一起授信。
     if (controlRequest != null) {
         val req = controlRequest!!
         ControlRequestDialog(
             req = req,
-            onApprove = { service.approveControl(req.sessionId) },
+            onApprove = { trust -> service.approveControl(req.sessionId, trust) },
             onDeny = { service.denyControl(req.sessionId) }
         )
     }
@@ -482,6 +499,19 @@ fun MainScreen(service: LinkSpaceService, onClipboardToggle: (Boolean) -> Unit) 
                                     (context as? android.app.Activity)?.finish()
                                 },
                                 versionName = versionName,
+                                trustedNoConfirm = trusted.filter {
+                                    it.scope.contains(Protocol.SCOPE_NO_CONFIRM)
+                                },
+                                onRevokeNoConfirm = { deviceId ->
+                                    val name = trusted.firstOrNull { it.deviceId == deviceId }?.displayName
+                                        ?: deviceId
+                                    service.revokeNoConfirmTrust(deviceId)
+                                    board.success("已撤销对 $name 的信任，下次再弹确认框")
+                                },
+                                onClearNoConfirm = {
+                                    service.clearNoConfirmTrust()
+                                    board.success("已清空信任清单，下次全部重新确认")
+                                },
                             )
                         }
                     }

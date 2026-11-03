@@ -21,6 +21,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import cn.linkspace.client.service.TrustStore
 
 /**
  * 设置页：改名、剪贴板、被控设置、端口/指纹、关于、退出。
@@ -42,9 +43,14 @@ fun SettingsPage(
     onRenameClick: () -> Unit,
     onExitConfirm: () -> Unit,
     versionName: String,
+    /** 信任清单：勾选过“信任此设备”的已配对设备（免确认标记，Bug 2） */
+    trustedNoConfirm: List<TrustStore.Entry> = emptyList(),
+    onRevokeNoConfirm: (String) -> Unit = {},
+    onClearNoConfirm: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     var showExitConfirm by remember { mutableStateOf(false) }
+    var showClearTrustConfirm by remember { mutableStateOf(false) }
 
     Column(modifier.fillMaxWidth().padding(LinkSpaceSpacing.lg)) {
         SectionTitle("本机")
@@ -121,6 +127,54 @@ fun SettingsPage(
             }
         }
 
+        SectionTitle("信任清单")
+        Card(Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(LinkSpaceSpacing.lg)) {
+                Text(
+                    "勾选过“信任此设备”的电脑再次请求控制或查看屏幕时，不再弹出 LinkSpace 确认框（系统录屏授权框仍会弹出）。信任默认永久有效；撤销只取消“不再询问”，设备仍保持配对。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (trustedNoConfirm.isEmpty()) {
+                    Text(
+                        "暂无信任设备：首次确认框里勾选“信任此设备，以后不再询问”即可加入。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = LinkSpaceSpacing.sm),
+                    )
+                } else {
+                    trustedNoConfirm.forEach { entry ->
+                        Row(
+                            Modifier.padding(top = LinkSpaceSpacing.md),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text(entry.displayName, style = MaterialTheme.typography.bodyMedium)
+                                Text(
+                                    "${deviceTypeLabel(entry.deviceType)} · ${entry.deviceId.take(12)}…",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            Spacer(Modifier.width(LinkSpaceSpacing.md))
+                            OutlinedButton(onClick = { onRevokeNoConfirm(entry.deviceId) }) {
+                                Text("撤销")
+                            }
+                        }
+                    }
+                    OutlinedButton(
+                        onClick = { showClearTrustConfirm = true },
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            contentColor = LinkSpaceStatusColors.Danger,
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = LinkSpaceSpacing.md),
+                    ) { Text("清空全部信任") }
+                }
+            }
+        }
+
         SectionTitle("关于")
         Card(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(LinkSpaceSpacing.lg)) {
@@ -168,6 +222,28 @@ fun SettingsPage(
             },
             dismissButton = {
                 OutlinedButton(onClick = { showExitConfirm = false }) { Text("取消") }
+            },
+        )
+    }
+
+    if (showClearTrustConfirm) {
+        AlertDialog(
+            onDismissRequest = { showClearTrustConfirm = false },
+            title = { Text("清空全部信任？") },
+            text = { Text("将取消全部设备的“不再询问”，之后每次控制或查看屏幕都会重新弹出确认框。设备仍保持配对，不用重新配对。") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showClearTrustConfirm = false
+                        onClearNoConfirm()
+                    },
+                    colors = ButtonDefaults.textButtonColors(
+                        contentColor = LinkSpaceStatusColors.Danger,
+                    ),
+                ) { Text("清空") }
+            },
+            dismissButton = {
+                OutlinedButton(onClick = { showClearTrustConfirm = false }) { Text("取消") }
             },
         )
     }

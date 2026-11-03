@@ -160,6 +160,15 @@ object Protocol {
      * control 不在其中：让对端操作本机必须另行授权。
      */
     val DEFAULT_GRANT_SCOPE: List<String> = listOf("file", "clipboard")
+
+    /**
+     * “信任设备，以后不再询问”：已配对设备上的免确认标记（Bug 2）。
+     * 仅 Android 本地语义，配对时永不授予，只能由用户在控制/投屏
+     * 确认框里勾选后写入；判定用 [TrustStore.hasScope]。
+     * 重配对回显给桌面端时桌面会过滤掉未知 scope（pairing.ts
+     * filterApprovedScope 只认 file/clipboard/control），无害。
+     */
+    const val SCOPE_NO_CONFIRM = "control.no-confirm"
 }
 
 /** 控制消息信封，字段与桌面端一致 */

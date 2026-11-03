@@ -99,6 +99,50 @@ class TrustStore(private val file: File) {
     }
 
     /**
+     * 给已配对设备追加一个授权范围（Bug 2：`control.no-confirm`）。
+     * 只对信任清单内已有的设备生效——未配对的设备没有条目可写，
+     * 绝不凭空建信任（fail-closed）。已含该范围时不重复写盘。
+     */
+    @Synchronized
+    fun grantScope(deviceId: String, scope: String): Boolean {
+        val idx = entries.indexOfFirst { it.deviceId == deviceId }
+        if (idx < 0 || entries[idx].scope.contains(scope)) return false
+        entries[idx] = entries[idx].copy(scope = entries[idx].scope + scope)
+        persist()
+        return true
+    }
+
+    /**
+     * 从单个设备上收回一个授权范围（Bug 2：设置页撤销单个信任）。
+     * 只摘掉该范围，设备本身仍在信任清单里、仍保持配对。
+     */
+    @Synchronized
+    fun revokeScope(deviceId: String, scope: String): Boolean {
+        val idx = entries.indexOfFirst { it.deviceId == deviceId }
+        if (idx < 0 || !entries[idx].scope.contains(scope)) return false
+        entries[idx] = entries[idx].copy(scope = entries[idx].scope - scope)
+        persist()
+        return true
+    }
+
+    /**
+     * 从全部设备上收回一个授权范围（Bug 2：设置页一键清空信任清单）。
+     * 同样只摘范围、不动配对关系。返回被改动的设备数。
+     */
+    @Synchronized
+    fun clearScope(scope: String): Int {
+        var changed = 0
+        for (i in entries.indices) {
+            if (entries[i].scope.contains(scope)) {
+                entries[i] = entries[i].copy(scope = entries[i].scope - scope)
+                changed++
+            }
+        }
+        if (changed > 0) persist()
+        return changed
+    }
+
+    /**
      * 更新对端显示名（device.rename，5.4）。与桌面端 trust.ts 同一语义：
      * 只对信任清单内的设备生效，返回是否有实际变更。
      */
@@ -126,9 +170,16 @@ class TrustStore(private val file: File) {
             )
         }
         file.parentFile?.mkdirs()
-        // 先写临时文件再改名，避免崩溃留下半个 JSON
+        // 先写临时文件再改名，避免崩溃留下半个 JSON。
+        // 改名用 Files.move(REPLACE_EXISTING)：File.renameTo 在
+        // Windows 上目标已存在时直接失败（且不报错），第二次及以后的
+        // 持久化会静默丢失——JVM 单测就在 Windows 上跑，reload 测例
+        // 靠它；Android/Linux 上 rename 本就能覆盖，行为不变。
         val tmp = File(file.parentFile, "${file.name}.tmp")
         tmp.writeText(arr.toString(2))
-        tmp.renameTo(file)
+        java.nio.file.Files.move(
+            tmp.toPath(), file.toPath(),
+            java.nio.file.StandardCopyOption.REPLACE_EXISTING
+        )
     }
 }

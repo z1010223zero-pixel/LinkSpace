@@ -26,8 +26,9 @@ class ControlledInputSessionW5Test {
     private val injectErrors = mutableListOf<String>()
     private var requested: ControlledInputSession.ControlRequest? = null
 
-    private fun newSession() = ControlledInputSession(
+    private fun newSession(autoApprove: Boolean = false) = ControlledInputSession(
         isPeerAuthorized = { it == "peer-1" },
+        isAutoApprovePeer = { autoApprove && it == "peer-1" },
         localScreen = { InputController.Screen(1080, 2400) },
         send = { peerId, type, payloadFn ->
             sent += Triple(peerId, type, JSONObject().apply(payloadFn))
@@ -77,6 +78,49 @@ class ControlledInputSessionW5Test {
         assertNull(s.pendingRequest)
         assertNull(requested)
         assertEquals(1, authNotEnabled)
+        assertEquals(1, sent.size)
+        assertEquals(Protocol.TYPE_SESSION_REJECT, sent[0].second)
+        assertEquals("accessibility disabled", sent[0].third.optString("reason"))
+    }
+
+    /**
+     * 信任设备免确认（Bug 2）：门禁全过后直接放行，不调确认回调、
+     * 不挂 pending，会话直接进入 active 并回 session.accept。
+     */
+    @Test
+    fun `trusted device auto approves without prompt`() {
+        val s = newSession(autoApprove = true)
+        s.onStart("peer-1", startPayload())
+        assertNull(requested)
+        assertNull(s.pendingRequest)
+        assertEquals("peer-1", s.activeSession?.peerId)
+        assertEquals(1, sent.size)
+        assertEquals(Protocol.TYPE_SESSION_ACCEPT, sent[0].second)
+    }
+
+    /** 未标记信任的设备仍走确认框：onStart 只挂 pending，不自动放行 */
+    @Test
+    fun `untrusted device still prompts`() {
+        val s = newSession(autoApprove = false)
+        s.onStart("peer-1", startPayload())
+        assertTrue(requested != null)
+        assertTrue(s.pendingRequest != null)
+        assertNull(s.activeSession)
+        assertTrue(sent.isEmpty())
+    }
+
+    /**
+     * 免确认也不绕门禁：无障碍未开启时，信任设备同样被拒绝、
+     * 不进 pending、不弹确认框。
+     */
+    @Test
+    fun `trusted device still rejected when accessibility disabled`() {
+        ready = false
+        val s = newSession(autoApprove = true)
+        s.onStart("peer-1", startPayload())
+        assertNull(requested)
+        assertNull(s.pendingRequest)
+        assertNull(s.activeSession)
         assertEquals(1, sent.size)
         assertEquals(Protocol.TYPE_SESSION_REJECT, sent[0].second)
         assertEquals("accessibility disabled", sent[0].third.optString("reason"))

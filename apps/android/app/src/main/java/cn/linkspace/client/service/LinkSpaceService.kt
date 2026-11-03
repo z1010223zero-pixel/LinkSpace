@@ -631,6 +631,40 @@ class LinkSpaceService private constructor(private val appContext: Context) {
         _trusted.value = trust.list()
     }
 
+    // ---------- 信任设备清单（Bug 2：确认框“以后不再询问”） ----------
+
+    /**
+     * 该设备是否被用户标记为信任设备（以后建会话跳过 LinkSpace 确认框）。
+     * 判定只认配对身份 + TrustStore 里的 `control.no-confirm` scope；
+     * 未配对的设备即使 scope 被写坏也到不了这里——scope 只挂在已配对条目上。
+     */
+    fun isNoConfirmTrusted(deviceId: String): Boolean =
+        trust.hasScope(deviceId, Protocol.SCOPE_NO_CONFIRM)
+
+    /** 用户在确认框勾选“信任此设备”：给已配对设备加上免确认标记，默认永久有效 */
+    fun grantNoConfirmTrust(deviceId: String) {
+        if (trust.grantScope(deviceId, Protocol.SCOPE_NO_CONFIRM)) {
+            _trusted.value = trust.list()
+            Log.i(TAG, "已信任设备 $deviceId：以后不再弹确认框")
+        }
+    }
+
+    /** 设置页撤销单个信任：只摘免确认标记，设备仍保持配对，下次再弹确认框 */
+    fun revokeNoConfirmTrust(deviceId: String) {
+        if (trust.revokeScope(deviceId, Protocol.SCOPE_NO_CONFIRM)) {
+            _trusted.value = trust.list()
+            Log.i(TAG, "已撤销设备 $deviceId 的免确认信任")
+        }
+    }
+
+    /** 设置页一键清空信任清单：只摘全部设备的免确认标记，不动配对关系 */
+    fun clearNoConfirmTrust() {
+        if (trust.clearScope(Protocol.SCOPE_NO_CONFIRM) > 0) {
+            _trusted.value = trust.list()
+            Log.i(TAG, "已清空信任清单（免确认标记）")
+        }
+    }
+
     // ---------- 本机改名（5.4） ----------
 
     /**
@@ -895,11 +929,14 @@ class LinkSpaceService private constructor(private val appContext: Context) {
      *
      * 用户确认 UI 在 MainActivity：onControlRequested 到达即弹确认弹窗，
      * 确认后才放行 input.event；拒绝回 session.reject；30s 超时自动拒绝。
-     * 绝不自动批准——安全红线。
+     * 绝不自动批准——安全红线；唯一例外是用户在确认框里亲手勾选的
+     * 信任设备（Bug 2：TrustStore `control.no-confirm` scope），门禁
+     * 全过后由 ControlledInputSession 直接放行，不弹确认框。
      */
     val controlledInput: ControlledInputSession by lazy {
         ControlledInputSession(
             isPeerAuthorized = { peerId -> trust.isKnown(peerId) },
+            isAutoApprovePeer = { peerId -> trust.hasScope(peerId, Protocol.SCOPE_NO_CONFIRM) },
             localScreen = {
                 val m = appContext.resources.displayMetrics
                 InputController.Screen(m.widthPixels.coerceAtLeast(1), m.heightPixels.coerceAtLeast(1))
@@ -1063,9 +1100,17 @@ class LinkSpaceService private constructor(private val appContext: Context) {
 
     // ---------- 电脑→安卓远控：确认 UI 与授权状态（线 2 W5） ----------
 
-    /** 确认弹窗“允许”：只有会话层放行后才进入 active，注入随即开始 */
-    fun approveControl(sessionId: String) {
-        controlledInput.approve(sessionId)
+    /**
+     * 确认弹窗“允许”：只有会话层放行后才进入 active，注入随即开始。
+     * [trustDevice] 为 true（确认框里勾了“信任此设备”）时，放行成功
+     * 后再给该设备加上免确认标记——放行失败（过期/不存在）不授信。
+     */
+    fun approveControl(sessionId: String, trustDevice: Boolean = false) {
+        val peerId = controlledInput.pendingRequest
+            ?.takeIf { it.sessionId == sessionId }?.peerId
+        if (controlledInput.approve(sessionId) && trustDevice && peerId != null) {
+            grantNoConfirmTrust(peerId)
+        }
     }
 
     /** 确认弹窗“拒绝”/弹窗被划掉：回 session.reject */

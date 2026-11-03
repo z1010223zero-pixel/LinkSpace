@@ -1,12 +1,15 @@
 package cn.linkspace.client.ui
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -17,6 +20,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -72,15 +76,21 @@ private fun TtlCountdownRow(seconds: Int, totalSeconds: Int, timeoutText: String
  * 电脑请求控制本机：确认弹窗（协议 9.1）。
  * 30 秒内未确认由会话层自动拒绝；弹窗被划掉按拒绝处理。
  * 倒计时取请求自带的 expiresAt；文案补“单次有效”。
+ *
+ * 信任设备（Bug 2）：勾选“信任此设备，以后不再询问”再点“允许”，
+ * 该设备以后请求控制时直接放行、不再弹框；信任默认永久有效，
+ * 在设置页 → 信任清单里可撤销。只省 LinkSpace 自己的确认框，
+ * 会话本身仍是单次有效、结束即失效。
  */
 @Composable
 fun ControlRequestDialog(
     req: ControlledInputSession.ControlRequest,
-    onApprove: () -> Unit,
+    onApprove: (trustDevice: Boolean) -> Unit,
     onDeny: () -> Unit
 ) {
     val totalSeconds = (ControlledInputSession.REQUEST_TTL_MS / 1000).toInt()
     val seconds = rememberTtlRemainingSeconds(req.expiresAt, totalSeconds)
+    var trustDevice by remember { mutableStateOf(false) }
     AlertDialog(
         onDismissRequest = onDeny,
         title = { Text("允许远程控制本机？") },
@@ -93,12 +103,34 @@ fun ControlRequestDialog(
                     fontSize = 12.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { trustDevice = !trustDevice }
+                ) {
+                    Checkbox(
+                        checked = trustDevice,
+                        onCheckedChange = { trustDevice = it }
+                    )
+                    Text(
+                        "信任此设备，以后不再询问",
+                        fontSize = 12.sp,
+                    )
+                }
+                if (trustDevice) {
+                    Text(
+                        "勾选后，此设备以后请求控制时不再弹出确认框（可在设置 → 信任清单里撤销）。",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
                 Spacer(Modifier.height(4.dp))
                 TtlCountdownRow(seconds, totalSeconds, "超时自动拒绝")
             }
         },
         confirmButton = {
-            Button(onClick = onApprove) { Text("允许") }
+            Button(onClick = { onApprove(trustDevice) }) { Text("允许") }
         },
         dismissButton = {
             OutlinedButton(onClick = onDeny) { Text("拒绝（${seconds}s）") }
@@ -111,11 +143,15 @@ fun ControlRequestDialog(
  * 每次请求都要过这道确认 + 系统录屏授权框；拒绝/取消都明确回绝，
  * 桌面窗口显示原因。90 秒无人确认由服务侧 TTL 自动拒绝。
  * 倒计时取 requestedAt + REQUEST_TTL_MS；文案补“单次有效”。
+ *
+ * 信任设备（Bug 2）：与控制确认框同一套“信任此设备，以后不再询问”，
+ * 勾选后该设备以后请求看屏幕时直接进系统录屏授权框，不再弹
+ * LinkSpace 确认框；系统录屏授权框跳不过，仍要点允许才开录。
  */
 @Composable
 fun ReverseStreamRequestDialog(
     req: ReverseScreenStreamer.ReverseStreamRequest,
-    onApprove: () -> Unit,
+    onApprove: (trustDevice: Boolean) -> Unit,
     onDeny: () -> Unit
 ) {
     val totalSeconds = (ReverseScreenStreamer.REQUEST_TTL_MS / 1000).toInt()
@@ -123,6 +159,7 @@ fun ReverseStreamRequestDialog(
         req.requestedAt + ReverseScreenStreamer.REQUEST_TTL_MS,
         totalSeconds
     )
+    var trustDevice by remember { mutableStateOf(false) }
     AlertDialog(
         onDismissRequest = onDeny,
         title = { Text("电脑请求查看你的屏幕") },
@@ -134,12 +171,34 @@ fun ReverseStreamRequestDialog(
                     fontSize = 12.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { trustDevice = !trustDevice }
+                ) {
+                    Checkbox(
+                        checked = trustDevice,
+                        onCheckedChange = { trustDevice = it }
+                    )
+                    Text(
+                        "信任此设备，以后不再询问",
+                        fontSize = 12.sp,
+                    )
+                }
+                if (trustDevice) {
+                    Text(
+                        "勾选后，此设备以后请求查看屏幕时不再弹出确认框，直接进系统录屏授权框（可在设置 → 信任清单里撤销）。",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
                 Spacer(Modifier.height(4.dp))
                 TtlCountdownRow(seconds, totalSeconds, "超时自动拒绝")
             }
         },
         confirmButton = {
-            Button(onClick = onApprove) { Text("同意") }
+            Button(onClick = { onApprove(trustDevice) }) { Text("同意") }
         },
         dismissButton = {
             OutlinedButton(onClick = onDeny) { Text("拒绝（${seconds}s）") }
