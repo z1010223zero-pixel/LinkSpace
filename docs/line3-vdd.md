@@ -111,20 +111,22 @@
 
 ## 后续接流（③④⑤）待办
 
-- **③ 控制台会话验证**：用户在电脑前操作，把 VDD 虚拟屏设为扩展，
+- **③ 控制台会话验证**（待用户本人在场）：用户在电脑前操作，把 VDD 虚拟屏设为扩展，
   确认显示设置里出现第 3 块屏、分辨率/位置符合预期、窗口可拖过去；
   重新启用只需 `Enable-PnpDevice -InstanceId 'ROOT\DISPLAY\0001'`（管理员），
   用完可再 `Disable-PnpDevice` 恢复。
-- **④ LinkSpace 接流**：桌面 screen-stream 抓取虚拟屏画面并推到平板呈现，
-  输入回路与线 2 的信任清单/失焦暂停逻辑配合；虚拟屏无物理输入，
-  注意鼠标/触控落点与显示拓扑的对应关系。
-- **⑤ 驱动生命周期进桌面应用**：首次安装流程（官方 Releases 直链下载 →
+- **④ LinkSpace 接流**（代码侧已完成，见下「④ 实现」一节；真机验证待平板无线调试恢复）：
+  桌面 screen-stream 抓取虚拟屏画面并推到平板呈现，输入回路与线 2 的信任清单/失焦暂停逻辑配合；
+  虚拟屏无物理输入，注意鼠标/触控落点与显示拓扑的对应关系。
+- **⑤ 驱动生命周期进桌面应用**（已完成，见下「⑤ 实现」一节）：首次安装流程（官方 Releases 直链下载 →
   验大小与签名 → `pnputil /add-driver` → 建设备节点 →
   SignPath 证书进 `TrustedPublisher` 才可静默）、卸载/禁用清理、
   版本钉死 **25.7.23 + SHA-256 `E24210…B3A`**（见上）、`vdd_settings.xml`
   的生成与管理；安装包内附带 VDD 的 MIT LICENSE 文本。
   - 别用 winget 的 `VirtualDrivers.Virtual-Display-Driver`：那只是控制应用的便携包，**不装驱动**。
   - 别用仓库里的社区脚本安装：有杀软误报先例，只用官方 driver-only 包。
+- **待补：全新机器上的设备节点创建**：`pnputil /add-driver` 只暂存驱动包，从未装过 VDD 的机器上
+  设备节点（硬件 ID `Root\MttVDD`）还需另一步创建（devcon 或 SwDeviceCreate 小助手）；`create` 失败文案已能识别并指明，未实现。
 
 ## 复现命令（zero，管理员 PowerShell）
 
@@ -216,3 +218,65 @@ devcon、不写 P/Invoke 助手——`ensureInstalled()` 成功后若 `status()`
 另：ARM64 Windows 只接受微软签名的驱动包，VDD 25.7.23 是 SignPath 签名，
 装不上（`0x800B0109`，见 TwinDesk issue #14 / 上游 #465）；管理器在
 `install-failed` 的 detail 里会点出这一可能。zero 是 x64，不受影响。
+
+## ④ 实现：VDD 后端虚拟显示器管理器（2026-11-03）
+
+### 文件
+
+- `apps/desktop/src/main/extend/vdd-display.ts`（新建，233 行）——`VddVirtualDisplayManager`，
+  与旧 `VirtualDisplayManager`（swd-host 后端）完全相同的接口形状
+  （`create` / `destroy` / `active` / `currentScreen` / `available`），后端是 VDD 设备节点 + `VddDriverManager`。
+- `apps/desktop/src/main/index.ts`——Host 的 `extendCreateVirtualDisplay` / `extendDestroyVirtualDisplay`
+  已换成 VDD 后端管理器；swd-host 的 `VirtualDisplayManager` 构造已去掉（类文件保留未删，测试仍用它）；
+  启动日志改报 `虚拟显示器帧源：dd-capture=…`，并明确打一条
+  `[extend] 扩展屏后端已切换到 VDD（Virtual Display Driver 25.7.23）`。
+  `locateVirtualDisplayBinaries()` 仍保留（dd-capture 帧源还要用）。
+- `apps/desktop/src/main/verify-extend.ts`——新增 21 项 VDD 断言（见下）。
+
+### 行为
+
+- `create(preferred)`：先查 driver `status()`，未安装直接返回可操作失败，**会话创建时绝不自动安装驱动**
+  （安装只在设置页显式触发）；已装但 `devicePresent=false` 返回覆盖⑤已知缺口的文案
+  （设备节点未创建，需另一步创建根设备）；`ensureSettings(1, preferred)`；记录会话前设备是否已启用；
+  未启用时 `setDeviceEnabled(true)`；轮询 `listDisplays()` 差分等新显示器出现（默认 30s 超时，
+  按最接近 preferred 挑一块）；超时失败时若本次会话启用过节点，恢复回禁用，不留残留。
+- `destroy()`：只有本次会话是我们启用了节点时才发禁用（fire-and-forget，失败只记日志）；
+  会话前已启用的保持启用；无活动显示器时是安全空操作。
+- `available`：最近一次 `status()` 的 `installed` 快照（`create` 刷新，未查过时保守为 false）。
+
+### startDd 矩形流向核实（已通，无代码改动）
+
+行号按 LF 计数（host.ts 纯 LF 共 2027 行）：
+
+- `host.ts:1212–1225`：`screen.stream.request`（`source='virtual-display'`）先校验
+  `extendCoordinator.activeSession` 与请求方是同一 peer（无活动扩展会话直接回 error），
+  然后 `startForwardStream(peerId, STREAM_SOURCE_VIRTUAL_DISPLAY, { ...ext.virtualScreen }, scaleWidth)`——
+  region 就是活动扩展会话的 `virtualScreen`。
+- `host.ts:1593–1602`：`startForwardStream` 里 `this.streamRegion = region`，
+  随后 `screenStream.startDd({ ..., rect: region, ... })`。
+- `screen-stream.ts:252–277`：`startDd` 用 `--rect x y w h` 起 dd-capture；
+  `screen-stream.ts:451–458`：码率换档重启复用同一 `ddRect`。
+- 锁屏解锁恢复同口径：`host.ts:1666–1672`，按原会话的 `ext.virtualScreen` 重起流。
+
+### 触控映射核实（3.4 结论属实，只核实未重做）
+
+- `host.ts:1067–1072`：input 会话的 `localScreen` 回调优先用 `this.streamRegion` 的 w/h 作映射目标。
+- `host.ts:1078–1092`：`inject` 回调对 move 事件按 `streamRegion` 的 origin 平移回虚拟屏相对坐标。
+- 扩展屏推流时 `streamRegion = virtualScreen`（见上 `host.ts:1593`），所以触控映射基准就是虚拟显示器矩形；
+  断连兜底 `host.ts:451` 会清 `streamRegion`。无代码改动。
+
+### 测试与验证（全部在 zero 上跑过）
+
+- `npm run build`（electron-vite）通过；`npm run typecheck`（vue-tsc --noEmit）通过，无报错。
+- `npm run verify:extend` 全部通过，含 21 项新增 VDD 断言（fake driver manager + fake listDisplays：
+  happy path、驱动未装时 create 失败且未尝试 enable、设备节点未建时失败文案点出缺口、
+  会话前已启用时不重复 enable 且 destroy 不禁用、destroy 空操作零驱动命令、超时后恢复禁用；
+  开头一条 bonjour `Service name is already in use` 是 E2E 段的既有环境噪音，测试本身全绿）。
+- `npm run verify:vdd-driver` 全部通过（⑤ 的 51 项断言未动）。
+- 全程未做真实设备 Enable/Disable，未碰平板；zero 上 VDD 节点真实状态未动。
+
+### 仍阻塞的活体验证
+
+- ④ 真机验证：需平板无线调试恢复（2026-11-03 20:50 已断，44311 拒绝，疑似休眠）+ 扩展屏推流到平板实测。
+- ③ 控制台扩展实测：须用户本人在场，显示设置里把虚拟屏设为扩展、拖窗口实测。
+- 全新机器设备节点创建（devcon / SwDeviceCreate 小助手）未实现，只做了失败识别。
