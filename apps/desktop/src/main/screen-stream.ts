@@ -90,10 +90,13 @@ export type ScreenStreamSource = 'screen' | 'virtual-display'
  * - `LINKSPACE_STREAM_ENCODER=h264_mf` 可临时切 Windows MediaFoundation
  *   编码器做 A/B 对照，只作排障用。
  *
- * 2026-10-31 排障记录称 MF 编码的流在该 ROM（c2.qti）上全绿、libx264
- * 流下半帧全零，但代码从未真正切到 MF——此前注释写“换 MF 直接绕开”
- * 与代码的 `-c:v libx264` 漂移。真机核实后二者改一致，环境变量覆盖
- * 在核实完成前不得当作正式方案。
+ * 2026-11-03 真机 A/B 核实（小新平板 Pro GT，TB710FU；正向投屏，
+ * 显示器 1 3841x2160 → 1920p/8Mbps）：libx264 画面干净锐利、无绿
+ * 块、无下半帧全零；h264_mf 能出流、无绿块，但同等设置下明显比
+ * libx264 软（文字边缘模糊）。2026-10-31 记录称“MF 全绿、libx264
+ * 下半帧全零”在当前构建上双向均未复现，该记录作废。结论：代码
+ * 默认 libx264 是对的，注释与代码已一致；h264_mf 只留作排障
+ * 覆盖，不得当作正式方案。
  */
 export type StreamEncoder = 'libx264' | 'h264_mf'
 
