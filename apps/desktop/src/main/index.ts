@@ -6,7 +6,7 @@ import { DeviceManager } from './device-manager'
 import { ScrcpyAdapter } from './scrcpy-adapter'
 import { registerIpc } from './ipc'
 import { locateBinaries, locateVirtualDisplayBinaries, locateVddPackageZip } from './platform'
-import { VirtualDisplayManager } from './extend/virtual-display'
+import { VddVirtualDisplayManager } from './extend/vdd-display'
 import { VddDriverManager } from './extend/vdd-driver'
 import { log } from './log'
 import { Host } from './host'
@@ -92,23 +92,28 @@ function listPhysicalDisplays(): Array<{ x: number; y: number; w: number; h: num
     .sort((a, b) => a.x - b.x || a.y - b.y)
 }
 
-// 虚拟显示器管理器（线 3，3.2-1）：approve 时 spawn swd-host 创建，
-// 会话结束时销毁。swd-host/dd-capture 缺失时创建直接失败（扩展请求
-// 回 session.reject），不影响镜像投屏与键鼠会话。
+// 虚拟显示器帧源（线 3）：dd-capture 抓虚拟显示器画面（screen-stream.ts
+// 的 startDd）；dd-capture 缺失时扩展屏投屏不可用（扩展请求回
+// session.reject），不影响镜像投屏与键鼠会话。
 const nativeDisplayBins = locateVirtualDisplayBinaries()
 log.info(
-  `虚拟显示器：swd-host=${nativeDisplayBins.swdHost ?? '缺失（扩展屏不可用）'}，` +
-    `dd-capture=${nativeDisplayBins.ddCapture ?? '缺失（扩展屏投屏不可用）'}`
+  `虚拟显示器帧源：dd-capture=${nativeDisplayBins.ddCapture ?? '缺失（扩展屏投屏不可用）'}`
 )
-const virtualDisplayManager = new VirtualDisplayManager({
-  swdHostPath: nativeDisplayBins.swdHost,
-  listDisplays: listPhysicalDisplays
-})
 
 // VDD 驱动生命周期（线 3，⑤）：安装/启用/卸载由用户在设置页显式触发
 // （IPC vdd-driver:install），本处只构造管理器、不自动安装。
 // zip 缺失时 status() 报 packageBundled=false，安装以 package-missing 拒绝。
 const vddDriverManager = new VddDriverManager({ zipPath: locateVddPackageZip() })
+
+// 扩展屏后端（线 3，④）：VDD 设备节点 + VddDriverManager，替代 swd-host
+// 的 VirtualDisplayManager（类文件保留，不删）。approve 时启用节点创建
+// 虚拟显示器，会话结束的任何路径都销毁；未安装驱动时创建直接失败，
+// 绝不在会话里自动安装。
+const vddVirtualDisplayManager = new VddVirtualDisplayManager({
+  driver: vddDriverManager,
+  listDisplays: listPhysicalDisplays
+})
+log.info('[extend] 扩展屏后端已切换到 VDD（Virtual Display Driver 25.7.23）')
 
 const host = new Host({
   displayName: 'LinkSpace Desktop',
@@ -122,10 +127,10 @@ const host = new Host({
   // 虚拟显示器帧源（线 3，3.2-1）：source=virtual-display 的投屏请求
   // 由 screen-stream.ts 的 startDd 经 dd-capture 取帧
   screenDdCapturePath: nativeDisplayBins.ddCapture ?? undefined,
-  // 扩展屏创建/销毁出口（线 3，3.2-2）：approve 时创建虚拟显示器，
+  // 扩展屏创建/销毁出口（线 3，④ VDD 后端）：approve 时创建虚拟显示器，
   // 会话结束的任何路径都销毁
-  extendCreateVirtualDisplay: (preferred) => virtualDisplayManager.create(preferred),
-  extendDestroyVirtualDisplay: () => virtualDisplayManager.destroy(),
+  extendCreateVirtualDisplay: (preferred) => vddVirtualDisplayManager.create(preferred),
+  extendDestroyVirtualDisplay: () => vddVirtualDisplayManager.destroy(),
   inputVirtualScreen: win32 ? () => win32.virtualScreen() : undefined,
   inputInject: inputSink
     ? (events) => {

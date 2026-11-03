@@ -11,6 +11,8 @@
 //   3. VirtualDisplayManager 与 startDd——以 node 写的 fake swd-host
 //      （打 SWD-READY/APPEARED 行）验证管理器协议解析、模式选定与
 //      超时失败；startDd 以不存在的 dd-capture 路径验证失败走 onEnded。
+//   4. VddVirtualDisplayManager（线 3，④）——fake driver manager +
+//      fake listDisplays：VDD 后端的创建/销毁/超时路径，不碰真实设备。
 //
 // 真实的虚拟显示器创建（SWD + 驱动）在后台会话里不可用（须测试签名 +
 // 关 Secure Boot），创建/销毁层以注入的 fake 替代：验证的是「对的
@@ -34,6 +36,7 @@ import {
   type ExtendPreferredSize
 } from './extend/session'
 import { VirtualDisplayManager } from './extend/virtual-display'
+import { VddVirtualDisplayManager, type VddDriverLike } from './extend/vdd-display'
 import { ScreenStreamService } from './screen-stream'
 
 let failures = 0
@@ -581,6 +584,160 @@ async function testVirtualDisplayManager(): Promise<void> {
   }
 }
 
+// ---------- VddVirtualDisplayManager：fake driver manager + fake listDisplays ----------
+
+// fake 驱动管理器：记录 status/ensureSettings/setDeviceEnabled 的调用，
+// 不碰真实设备。enabled 状态由 fake 自己维护（setDeviceEnabled 改写它，
+// status 读它），与真实 VddDriverManager 的行为一致。
+interface FakeVddDriverCalls {
+  status: number
+  ensureSettings: Array<{ count: number; preferred?: { width: number; height: number; refreshRate?: number } }>
+  setEnabled: boolean[]
+}
+
+function makeFakeVddDriver(opts: {
+  installed?: boolean
+  devicePresent?: boolean
+  deviceEnabled?: boolean
+  settingsOk?: boolean
+  enableOk?: boolean
+}): { driver: VddDriverLike; calls: FakeVddDriverCalls } {
+  const calls: FakeVddDriverCalls = { status: 0, ensureSettings: [], setEnabled: [] }
+  let enabled = opts.deviceEnabled ?? false
+  const driver: VddDriverLike = {
+    status: async () => {
+      calls.status++
+      return {
+        installed: opts.installed ?? true,
+        installedVersion: '11.30.4.434',
+        oemInf: 'oem116.inf',
+        deviceEnabled: enabled,
+        devicePresent: opts.devicePresent ?? true,
+        packageBundled: true,
+        isAdmin: true
+      }
+    },
+    ensureSettings: async (count, preferred) => {
+      calls.ensureSettings.push({ count, preferred })
+      if (opts.settingsOk === false) {
+        return { ok: false, reason: 'settings-write-failed', detail: 'fake 写入失败', count, created: false, changed: false }
+      }
+      return { ok: true, count, created: false, changed: false }
+    },
+    setDeviceEnabled: async (e) => {
+      calls.setEnabled.push(e)
+      if (opts.enableOk === false) {
+        return { ok: false, reason: e ? 'enable-failed' : 'disable-failed', detail: 'fake 启用/禁用失败' }
+      }
+      enabled = e
+      return { ok: true }
+    }
+  }
+  return { driver, calls }
+}
+
+async function testVddVirtualDisplayManager(): Promise<void> {
+  console.log('\n=== VddVirtualDisplayManager：fake driver manager ===\n')
+
+  const before = [{ x: 0, y: 0, w: 1920, h: 1080 }]
+  const after = [
+    { x: 0, y: 0, w: 1920, h: 1080 },
+    { x: 1920, y: 0, w: 2560, h: 1440 },
+    { x: 1920, y: 0, w: 1024, h: 768 }
+  ]
+
+  // 1. happy path：调了 enable，差分挑中新显示器
+  {
+    const { driver, calls } = makeFakeVddDriver({})
+    let n = 0
+    const m = new VddVirtualDisplayManager({
+      driver,
+      listDisplays: () => (++n === 1 ? before : after)
+    })
+    const r = await m.create({ width: 2560, height: 1440 })
+    check('VDD 创建成功', r.ok)
+    check('VDD 按最接近请求尺寸挑到 2560x1440', r.ok && r.screen.w === 2560 && r.screen.x === 1920)
+    check('VDD 创建后 active', m.active)
+    check('VDD 创建后 available', m.available)
+    check('VDD 创建时调了 ensureSettings(count=1)', calls.ensureSettings.length === 1 && calls.ensureSettings[0]?.count === 1)
+    check('VDD 创建时调了 enable', calls.setEnabled.length === 1 && calls.setEnabled[0] === true)
+    check('VDD currentScreen 与创建结果一致', m.currentScreen?.w === 2560)
+    // destroy：本次会话是我们启用过 → 禁用
+    m.destroy()
+    await sleep(100)
+    check('VDD destroy 后 inactive', !m.active)
+    check('VDD destroy 时调了 disable（本次会话启用过）', calls.setEnabled.length === 2 && calls.setEnabled[1] === false)
+  }
+
+  // 2. 驱动未装：create 失败，且未尝试 enable、未写设置
+  {
+    const { driver, calls } = makeFakeVddDriver({ installed: false })
+    const m = new VddVirtualDisplayManager({ driver, listDisplays: () => before })
+    const r = await m.create(null)
+    check('VDD 驱动未装时创建失败', !r.ok)
+    check('VDD 驱动未装时原因可操作（指去设置页安装）', !r.ok && r.reason.includes('设置页安装'))
+    check('VDD 驱动未装时未尝试 enable', calls.setEnabled.length === 0)
+    check('VDD 驱动未装时未写设置', calls.ensureSettings.length === 0)
+    check('VDD 驱动未装时 available 为 false', !m.available)
+    check('VDD 驱动未装时 inactive', !m.active)
+  }
+
+  // 3. 驱动已装但设备节点未建（⑤ 已知缺口）：失败文案点出缺口，不误报安装失败
+  {
+    const { driver, calls } = makeFakeVddDriver({ devicePresent: false })
+    const m = new VddVirtualDisplayManager({ driver, listDisplays: () => before })
+    const r = await m.create(null)
+    check('VDD 设备节点未建时创建失败', !r.ok)
+    check('VDD 设备节点未建时原因点出节点创建缺口', !r.ok && r.reason.includes('设备节点未创建'))
+    check('VDD 设备节点未建时未尝试 enable', calls.setEnabled.length === 0)
+  }
+
+  // 4. 会话前设备已启用：create 不重复 enable；destroy 不禁用（保持启用）
+  {
+    const { driver, calls } = makeFakeVddDriver({ deviceEnabled: true })
+    let n = 0
+    const m = new VddVirtualDisplayManager({
+      driver,
+      listDisplays: () => (++n === 1 ? before : after)
+    })
+    const r = await m.create({ width: 1920, height: 1080 })
+    check('VDD 会话前已启用时创建成功', r.ok)
+    check('VDD 会话前已启用时未重复 enable', calls.setEnabled.length === 0)
+    m.destroy()
+    await sleep(100)
+    check('VDD 会话前已启用时 destroy 不禁用', calls.setEnabled.length === 0)
+    check('VDD 会话前已启用时 destroy 后 inactive', !m.active)
+  }
+
+  // 5. destroy 无活动时是安全空操作
+  {
+    const { driver, calls } = makeFakeVddDriver({})
+    const m = new VddVirtualDisplayManager({ driver, listDisplays: () => before })
+    m.destroy()
+    await sleep(100)
+    check('VDD 无活动时 destroy 不调任何驱动命令', calls.status === 0 && calls.setEnabled.length === 0)
+    check('VDD 无活动时 destroy 后仍 inactive', !m.active)
+  }
+
+  // 6. 超时路径：启用成功但新显示器一直不出现 → 失败，且把节点恢复回禁用
+  {
+    const { driver, calls } = makeFakeVddDriver({})
+    const m = new VddVirtualDisplayManager({
+      driver,
+      listDisplays: () => before,
+      appearTimeoutMs: 600
+    })
+    const t0 = Date.now()
+    const r = await m.create(null)
+    const elapsed = Date.now() - t0
+    check('VDD 新显示器超时创建失败', !r.ok)
+    check('VDD 超时原因点出未枚举到新显示器', !r.ok && r.reason.includes('未枚举到新显示器'))
+    check('VDD 超时失败不挂死（<5s）', elapsed < 5000)
+    check('VDD 超时后 inactive', !m.active)
+    check('VDD 超时后把节点恢复回禁用（enable 后补 disable）', calls.setEnabled.length === 2 && calls.setEnabled[0] === true && calls.setEnabled[1] === false)
+  }
+}
+
 // ---------- startDd：帧源失败路径 ----------
 
 async function testStartDdFailure(): Promise<void> {
@@ -616,6 +773,7 @@ async function main(): Promise<void> {
   await testController()
   await testE2e()
   await testVirtualDisplayManager()
+  await testVddVirtualDisplayManager()
   await testStartDdFailure()
 
   console.log(`\n=== 结果：${failures === 0 ? '全部通过' : `${failures} 项失败`} ===\n`)
