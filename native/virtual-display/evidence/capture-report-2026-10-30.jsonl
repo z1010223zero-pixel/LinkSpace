@@ -1,0 +1,3 @@
+{"device":"\\.\DISPLAY10","rect":[6464,0,2560,1440],"adapter":"Intel(R) Arc(TM) Graphics","ddSupported":true,"dupHr":"0x0","frames":146,"timeouts":6,"errors":0,"avgIntervalMs":44.7851,"bmp":"frame-DISPLAY10.bmp","crc32":"0x666f7b3f","lumMin":0,"lumMax":0}
+{"device":"\\.\DISPLAY8","rect":[2880,0,1024,768],"adapter":"Intel(R) Arc(TM) Graphics","ddSupported":true,"dupHr":"0x0","frames":50,"timeouts":15,"errors":0,"avgIntervalMs":27.392,"bmp":"frame-DISPLAY8.bmp","crc32":"0x6efe0618","lumMin":15,"lumMax":255}
+{"device":"\\.\DISPLAY9","rect":[3904,0,2560,1440],"adapter":"Intel(R) Arc(TM) Graphics","ddSupported":true,"dupHr":"0x0","frames":49,"timeouts":13,"errors":0,"avgIntervalMs":160.108,"bmp":"frame-DISPLAY9.bmp","crc32":"0xf62e1996","lumMin":10,"lumMax":255}

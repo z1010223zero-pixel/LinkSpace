@@ -8,7 +8,7 @@
 
 ---
 
-## 完成状态（2026-11-03，未阻塞项第一波 + 第二波已合进本分支，头 `a9436b1`）
+## 完成状态（2026-11-03，未阻塞项第一波 + 第二波已合进本分支，头 `a9436b1`；线 3 的 3.1 PoC 入库已完成，见⑦）
 
 > 只标状态，不改各节原文的任务表述。真机走查（2.6）与线 3 仍未动。
 
@@ -19,7 +19,8 @@
 - **⑤ 中文输入通道（2.3-3）**：方案已定 + 已实现（`8b36ed4`）：调研见 `docs/chinese-input-research.md`，B1 拼音直通（默认）+ B2 `input.text` → `commitText` + C `screen.paste` 补桌面→平板接收侧，降级链 B1→B2→C→A；`input.error` 五类失败回传；协议 §4.9 + protocol.json 已登记；**B1 能否成立取决于平板自带输入法是否响应 `sendKeyEvent` 组字，待 2.6 真机走查**。
 - **⑥ from-to 身份绑定 + id 去重**：已实现（`f5a9af7`）：from 绑定 fail-closed（丢弃 + 记告警，不断连；首条 announce 登记后固定）+ id 去重每连接最近 1024 条；protocol.md §3 缺口已关闭；端到端行为待 2.6 走查。
 - **验证基线（合并树 a9436b1，协调人独立重跑）**：桌面 build + typecheck 0 + verify:input/binding 全过 + verify:protocol 112 项 0 失败 4 警告；Android builder assembleDebug 成功、单测 100 项 0 失败、APK 42,188,968 字节（`/data/home/linkspace-build-final`）。
-- **仍阻塞**：2.6 真机联调、线 3（PoC 入库、display-extend、Windows 收尾、联动验证）、PC 锁屏抓屏、h264_mf 注释漂移、软编软解优化。
+- **⑦ 线 3 PoC 入库（3.1）**：已收进仓（2026-11-03）：`native/virtual-display/` 收到 IddCx PoC 全套源码（驱动 8 文件与上游微软示例 SHA-256 逐文件一致、零改动；App 侧 `main.cpp` + 新增 `capture.cpp/h`）+ `evidence/capture-report-2026-10-30.jsonl`；README 重写（构建方法、签名方式、与主进程的接线点、2026-10-30 验证结果全表），状态改为“已收进仓”；仓内 EWDK 28000.2526 复跑 Release x64 构建成功（0 错误，22 秒）。诚实缺口：DISPLAY10 首帧全黑（`lumMin=lumMax=0`，原因未定位，见 README §4）；`.zwork/a/poc/` 的 10-29 草稿副本未采用，以 10-30 验证版为准。3.1-2 解耦已满足：驱动构建不进主构建（独立 EWDK 构建，产物由 .gitignore 排除）。
+- **仍阻塞**：2.6 真机联调、线 3（display-extend、Windows 收尾、联动验证）、PC 锁屏抓屏、h264_mf 注释漂移、软编软解优化。
 
 ---
 
