@@ -13,7 +13,7 @@ import { ReverseWindowManager } from './reverse-window'
 import { EdgeSwitcher } from './input/edge'
 import { loadWin32 } from './input/win32/native'
 import { SendInputSink } from './input/win32/sink'
-import { Win32InputCapture } from './input/win32/capture'
+import { Win32InputCapture, decideCaptureMode } from './input/win32/capture'
 import type { DiscoveredService } from './discovery'
 import type { PendingPairing } from './pairing'
 import type { TransferTask } from './transfer/manager'
@@ -191,6 +191,8 @@ const reverseWindows = new ReverseWindowManager({
       mainWindow.webContents.send('reverse-stream:notice', reason)
     }
   },
+  // Bug 1：画面窗口失焦/最小化 → 输入暂停，刷新全局采集模式
+  onInputPausedChange: () => refreshInputCaptureMode(),
   resolvePreload,
   rendererUrl: () => process.env.ELECTRON_RENDERER_URL,
   rendererFile: () => join(__dirname, '../renderer/index.html')
@@ -332,6 +334,26 @@ const INPUT_TICK_MS = 12
 let inputTimer: NodeJS.Timeout | null = null
 let inputCapture: Win32InputCapture | null = null
 
+/**
+ * 控制端采集模式刷新（Bug 1：反向窗口失焦仍同步输入）。
+ * 决策见 input/win32/capture.ts 的 decideCaptureMode：被控挂起优先；
+ * 反向窗口会话（控平板）只在画面窗口获得焦点时开全局采集，失焦/
+ * 最小化时挂起——输入只走画面窗口本身的 IPC；线 1 边缘穿越会话
+ * 没有画面窗口，不受焦点门限制。调用点：inputChanged（会话变迁）
+ * 与反向窗口焦点变化（ReverseWindowManager.onInputPausedChange）。
+ */
+function refreshInputCaptureMode(): void {
+  if (!inputCapture) return
+  inputCapture.setMode(
+    decideCaptureMode({
+      controlledByPeer: host.controlledByPeer() !== null,
+      controllingPeer: host.controllingPeer() !== null,
+      reverseSession: host.reverseInputScreen() !== null,
+      reverseInputPaused: reverseWindows.isInputPaused()
+    })
+  )
+}
+
 function startInputLoop(): void {
   if (!win32 || inputTimer) return
   try {
@@ -411,7 +433,7 @@ app.whenReady().then(async () => {
         // 被控期间强制挂起采集并锁定边缘（审查 P2-3）：本机输入正由
         // 对端注入驱动，采集若继续跑，注入产生的移动会被当成本机输入
         // 再次转发/触发边缘穿越——对端无需授权即可借本机驱动第三方
-        inputCapture?.setMode(host.controlledByPeer() ? 'suspended' : host.controllingPeer() ? 'control' : 'idle')
+        refreshInputCaptureMode()
         if (host.controlledByPeer()) edgeSwitcher.lock()
         refreshEdgeLayout()
         broadcast('input:changed')

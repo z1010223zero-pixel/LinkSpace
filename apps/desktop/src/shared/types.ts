@@ -187,6 +187,11 @@ export interface ReverseStreamStatusView {
     screen: { w: number; h: number } | null
     error: string | null
   }
+  /**
+   * Bug 1：画面窗口失焦/最小化时输入暂停（全局采集挂起、IPC 输入被拒）。
+   * 恢复焦点后自动解除。线 1 会话没有画面窗口，不受此门限制。
+   */
+  inputPaused: boolean
   clipboardEnabled: boolean
 }
 

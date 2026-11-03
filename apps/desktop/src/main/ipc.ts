@@ -572,6 +572,10 @@ export function registerIpc(
     return r.ok ? { ok: true as const } : fail(r.error)
   })
 
+  // Bug 1：反向窗口失焦/最小化时，窗口的输入 IPC 一律拒绝（与全局
+  // 采集挂起同一口径）；渲染层把该文案显示为提示，用户点一下窗口即恢复
+  const REVERSE_INPUT_PAUSED_MESSAGE = '窗口未获得焦点，输入已暂停：点一下平板画面窗口恢复控制'
+
   ipcMain.handle('reverse-stream:input', (_e, input: unknown) => {
     // 窗口输入 → input.event：先把画布坐标映射到会话声明的流尺寸，
     // 再过一遍与线上事件相同的解码校验（字段白名单 + 数值钳制）。
@@ -579,6 +583,10 @@ export function registerIpc(
     // 让窗口显示原因而不是让点击静默落掉。
     const screen = host.reverseInputScreen()
     if (!screen) return fail('键鼠控制尚未建立：请等平板确认控制后再操作')
+    // Bug 1：窗口失焦/最小化时输入暂停。画布指针与窗口键盘本就只在
+    // 窗口获得焦点时产生，这里是防竞态的第二道门——焦点在事件发出与
+    // IPC 到达之间丢失时丢弃，不让半次点击漏到平板
+    if (reverseWindows.isInputPaused()) return fail(REVERSE_INPUT_PAUSED_MESSAGE)
     const events = decodeReverseWindowInput(input, screen)
     if (!events) return fail('输入事件不合法')
     host.sendInputEvents(events)
@@ -589,6 +597,7 @@ export function registerIpc(
     // 成品输入（协议 4.9，B2）：控制端已组字好的文本分段发 input.text
     if (typeof peerId !== 'string' || !peerId) return fail('缺少对端 ID')
     if (typeof text !== 'string' || !text) return fail('请输入要发送的文本')
+    if (reverseWindows.isInputPaused()) return fail(REVERSE_INPUT_PAUSED_MESSAGE)
     const r = host.sendInputText(peerId, text)
     return r.ok ? { ok: true as const } : fail(r.error)
   })
@@ -597,6 +606,7 @@ export function registerIpc(
     // 粘贴回退（协议 4.8，C）：渲染层发送前已两步确认“将覆盖平板剪贴板”
     if (typeof peerId !== 'string' || !peerId) return fail('缺少对端 ID')
     if (typeof text !== 'string' || !text) return fail('请输入要粘贴的文本')
+    if (reverseWindows.isInputPaused()) return fail(REVERSE_INPUT_PAUSED_MESSAGE)
     const r = host.sendScreenPasteToTablet(peerId, text)
     return r.ok ? { ok: true as const } : fail(r.error)
   })

@@ -50,6 +50,38 @@ export const KEY_POLL_MAX = 0xfe
 
 export type CaptureMode = 'idle' | 'control' | 'suspended'
 
+/**
+ * 控制端采集模式决策（Bug 1：反向窗口失焦仍同步输入）。
+ *
+ * 全局采集（Win32 轮询光标 + 全键状态）只在线 1 控制会话里无条件
+ * 开：线 1 没有画面窗口，鼠标键盘本来就是全系统采的。
+ * 反向窗口会话（控平板）不同：输入应只来自画面窗口本身（画布指针
+ * + 窗口键盘走 reverse-stream:input IPC），全局采集只是「窗口获得
+ * 焦点时」的补充——窗口失焦/最小化时必须挂起（suspended：不转发、
+ * 不喂边缘穿越、只保基线），否则用户在别的窗口打字、挪鼠标都会
+ * 同步到平板。恢复焦点后回到 control。
+ * 被控挂起（controlledBy）优先于一切：本机输入正被对端注入驱动，
+ * 采集到的移动不是本机用户意图（审查 P2-3）。
+ *
+ * 纯函数：无头测试可直接断言决策矩阵；Electron 窗口焦点状态由
+ * 调用方（index.ts 经 ReverseWindowManager.isInputPaused()）传入。
+ */
+export function decideCaptureMode(opts: {
+  controlledByPeer: boolean
+  controllingPeer: boolean
+  /** 当前控制会话是否属于反向窗口（Host.reverseInputScreen() 非空） */
+  reverseSession: boolean
+  /** 反向窗口是否失焦/最小化 */
+  reverseInputPaused: boolean
+}): CaptureMode {
+  if (opts.controlledByPeer) return 'suspended'
+  if (opts.controllingPeer) {
+    if (opts.reverseSession && opts.reverseInputPaused) return 'suspended'
+    return 'control'
+  }
+  return 'idle'
+}
+
 export class Win32InputCapture {
   private mode: CaptureMode = 'idle'
   private readonly keys = new Set<number>()

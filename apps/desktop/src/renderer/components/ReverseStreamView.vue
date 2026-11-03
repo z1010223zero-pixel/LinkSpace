@@ -387,6 +387,10 @@ onBeforeUnmount(() => {
       <button class="rs-close" title="关闭窗口并结束控制会话" @click="disconnect">×</button>
     </header>
 
+    <div v-if="status?.inputPaused" class="banner banner--warn rs-paused">
+      窗口未获得焦点，输入已暂停 — 点一下本窗口恢复控制（鼠标/键盘不会同步到平板）
+    </div>
+
     <div v-if="toolbarVisible" class="rs-toolbar">
       <div class="rs-toolbar__group">
         <span class="rs-toolbar__group-label">显示</span>
@@ -474,7 +478,7 @@ onBeforeUnmount(() => {
     <div class="rs-stage">
       <canvas
         ref="canvasRef"
-        class="rs-canvas"
+        :class="['rs-canvas', { 'rs-canvas--paused': status?.inputPaused }]"
         tabindex="0"
         @pointerdown="onPointerDown"
         @pointermove="onPointerMove"
@@ -630,6 +634,10 @@ onBeforeUnmount(() => {
 .rs-canvas:focus {
   outline: 1px solid var(--accent);
   outline-offset: -1px;
+}
+/* Bug 1：输入暂停时画面变暗，与顶部横条一起提示“输入已暂停” */
+.rs-canvas--paused {
+  opacity: 0.55;
 }
 .rs-empty {
   position: absolute;

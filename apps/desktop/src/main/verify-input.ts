@@ -27,7 +27,7 @@ import { InputSessionCoordinator, InputController } from './input/session'
 import { EdgeSwitcher, type EdgeLayout } from './input/edge'
 import { InputLayoutStore } from './input/layout'
 import { normalizeAbsolute, buildInputBatch, buildReleaseBatch, INPUT_SIZE, UNION_OFF } from './input/win32/sink'
-import { Win32InputCapture } from './input/win32/capture'
+import { Win32InputCapture, decideCaptureMode } from './input/win32/capture'
 
 let failures = 0
 
@@ -735,6 +735,50 @@ function testWin32(): void {
   }
 }
 
+// Bug 1：反向窗口失焦/最小化时，全局采集必须挂起，否则用户在别的
+// 窗口打字、挪鼠标都会同步到平板。决策矩阵（窗口焦点事件本身是
+// Electron 行为，无头测不到；这里钉死“给定焦点态 → 什么采集模式”）：
+//   - 被控挂起优先于一切（含正在控制对端时被反向控制）
+//   - 反向会话 + 窗口获得焦点 → control（与修复前一致）
+//   - 反向会话 + 窗口失焦/最小化 → suspended（只保基线，不转发、不喂边缘）
+//   - 线 1 会话（无反向窗口）不受焦点门限制 → control
+//   - 无会话 → idle
+function testDecideCaptureMode(): void {
+  console.log('\n=== 纯逻辑：采集模式决策（Bug 1 焦点门） ===\n')
+
+  const base = { controlledByPeer: false, controllingPeer: false, reverseSession: false, reverseInputPaused: false }
+  check('无会话 → idle', decideCaptureMode(base) === 'idle')
+  check(
+    '线 1 控制中 → control',
+    decideCaptureMode({ ...base, controllingPeer: true }) === 'control'
+  )
+  check(
+    '反向会话 + 窗口获得焦点 → control',
+    decideCaptureMode({ ...base, controllingPeer: true, reverseSession: true, reverseInputPaused: false }) === 'control'
+  )
+  check(
+    '反向会话 + 窗口失焦/最小化 → suspended',
+    decideCaptureMode({ ...base, controllingPeer: true, reverseSession: true, reverseInputPaused: true }) === 'suspended'
+  )
+  check(
+    '线 1 控制中不受反向暂停态影响 → control',
+    decideCaptureMode({ ...base, controllingPeer: true, reverseSession: false, reverseInputPaused: true }) === 'control'
+  )
+  check(
+    '被控挂起优先于控制态 → suspended',
+    decideCaptureMode({ ...base, controlledByPeer: true, controllingPeer: true }) === 'suspended'
+  )
+  check(
+    '被控挂起优先于反向焦点态 → suspended',
+    decideCaptureMode({ ...base, controlledByPeer: true, controllingPeer: true, reverseSession: true, reverseInputPaused: false }) ===
+      'suspended'
+  )
+  check(
+    '仅被控（无控制会话）→ suspended',
+    decideCaptureMode({ ...base, controlledByPeer: true }) === 'suspended'
+  )
+}
+
 // ---------- 双 Host 环路 ----------
 
 async function testE2e(): Promise<void> {
@@ -1346,6 +1390,7 @@ async function main(): Promise<void> {
   await testInputTextSend()
   testEdge()
   testWin32()
+  testDecideCaptureMode()
 
   const workDir = await mkdtemp(join(tmpdir(), 'linkspace-input-unit-'))
   try {

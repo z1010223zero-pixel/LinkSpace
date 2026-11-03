@@ -23,6 +23,8 @@ export interface ReverseWindowDeps {
   host: Host
   /** 流在别处结束且有明确原因（平板拒绝/超时/断连）时，通知主窗口提示 */
   onEndedWithReason?: (reason: string) => void
+  /** Bug 1：输入暂停/恢复变化时回调，主进程据此刷新全局采集模式 */
+  onInputPausedChange?: () => void
   resolvePreload: () => string
   /** 开发模式的渲染服务地址（ELECTRON_RENDERER_URL），未设置时走打包文件 */
   rendererUrl: () => string | undefined
@@ -37,6 +39,8 @@ export class ReverseWindowManager {
   private peerId: string | null = null
   private displayName = ''
   private lastFrame: ReverseStreamFrame | null = null
+  /** Bug 1：窗口失焦/最小化时输入暂停（见 isInputPaused） */
+  private inputPaused = false
 
   constructor(deps: ReverseWindowDeps) {
     this.host = deps.host
@@ -75,6 +79,28 @@ export class ReverseWindowManager {
 
   isOpenFor(peerId: string): boolean {
     return this.isOpen && this.peerId === peerId
+  }
+
+  /**
+   * Bug 1 门控：反向窗口失焦或最小化时，输入暂停。
+   * 窗口不存在也算暂停——没有画面窗口在前台时，全局采集（Win32 轮询）
+   * 不得向平板转发。线 1 会话没有反向窗口，调用方须先确认当前是
+   * 反向会话（Host.reverseInputScreen() 非空）再用此值决策，否则
+   * 线 1 的全局采集会被误挂起。
+   */
+  isInputPaused(): boolean {
+    return this.inputPaused
+  }
+
+  /** 焦点/最小化变化时重算暂停态；变化才推送状态并通知主进程刷新采集模式 */
+  private refreshInputPaused(): void {
+    const win = this.win
+    const paused = !win || win.isDestroyed() || !win.isFocused() || win.isMinimized()
+    if (paused === this.inputPaused) return
+    this.inputPaused = paused
+    log.info(`[reverse-window] 输入${paused ? '已暂停（窗口失焦/最小化）' : '已恢复（窗口获得焦点）'}`)
+    this.sendStatus()
+    this.deps.onInputPausedChange?.()
   }
 
   /** 打开（或聚焦已打开的）平板画面窗口。调用前须已请求反向流成功 */
@@ -139,8 +165,20 @@ export class ReverseWindowManager {
       if (peer && this.host.reverseStreamStatus().peerId === peer) {
         this.host.stopReverseScreenStream(peer)
       }
+      // 窗口没了 = 输入暂停（无窗口可获焦）；通知主进程刷新采集模式，
+      // 防止残留的反向会话继续走全局采集向平板转发
+      this.refreshInputPaused()
     })
+    // Bug 1：输入转发以本窗口获得焦点为门。最小化时 Electron 同时
+    // 发 blur，restore 后一般跟 focus；四者都走同一重算，幂等
+    win.on('focus', () => this.refreshInputPaused())
+    win.on('blur', () => this.refreshInputPaused())
+    win.on('minimize', () => this.refreshInputPaused())
+    win.on('restore', () => this.refreshInputPaused())
     this.win = win
+    // 初始态：窗口 show:false、尚未获得焦点 → 暂停；ready-to-show
+    // 获得焦点时 focus 事件会解除
+    this.refreshInputPaused()
     log.info(`[reverse-window] 平板画面窗口已打开（${displayName}）`)
     return win
   }
@@ -164,6 +202,7 @@ export class ReverseWindowManager {
       scaleWidth: st.scaleWidth,
       receiver: st.receiver,
       input: this.host.reverseInputStatus(),
+      inputPaused: this.isInputPaused(),
       clipboardEnabled: this.host.isClipboardEnabled()
     }
   }
