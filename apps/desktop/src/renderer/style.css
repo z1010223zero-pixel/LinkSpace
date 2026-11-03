@@ -1159,6 +1159,30 @@ a:focus-visible,
   color: var(--text-muted);
 }
 
+/* ---------- 设置页：虚拟显示器驱动（线 3，⑤） ---------- */
+.vdd-note {
+  margin: var(--space-sm) 0 0;
+  font-size: var(--text-xs);
+  color: var(--warn);
+}
+
+.vdd-message {
+  margin: var(--space-sm) 0 0;
+  padding: var(--space-sm) var(--space-md);
+  border-radius: var(--radius-md);
+  font-size: var(--text-sm);
+}
+
+.vdd-message--info {
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+
+.vdd-message--danger {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
 /* 分段控件（扩展屏模式 Extend / Mirror） */
 .segmented {
   display: inline-flex;

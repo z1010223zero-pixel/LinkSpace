@@ -177,7 +177,7 @@ Disable-PnpDevice -InstanceId 'ROOT\DISPLAY\0001' -Confirm:$false
 - `apps/desktop/src/main/ipc.ts`——新增 `vdd-driver:status`（只读快照）
   与 `vdd-driver:install`（用户显式动作）；`src/shared/types.ts` 与
   `src/preload/index.ts` 按现有模式补暴露。**不设任何自动调用点**，
-  启动与会话流程里都不调安装；渲染层 UI（设置页按钮）待后续接。
+  启动与会话流程里都不调安装；渲染层 UI（设置页接线）见下「设置页接线」一节。
 - `apps/desktop/resources/vdd/`——随包驱动：官方 driver-only zip
   （已验大小 + SHA-256）、上游 MIT `LICENSE.txt` 全文、README
   （来源 URL、版本、哈希、信任前提、已知缺口）。`package.json`
@@ -243,6 +243,32 @@ reason（`not-admin` / `package-missing` / `hash-mismatch` /
 装不上（`0x800B0109`，见 TwinDesk issue #14 / 上游 #465）；管理器在
 `install-failed` 的 detail 里会点出这一可能。zero 是 x64，不受影响。
 
+### 设置页接线（2026-11-03）
+
+- 核实：preload 已暴露 `vddDriverStatus` / `installVddDriver`
+  （`src/preload/index.ts`，`LinkSpaceApi` 与 `ipc.ts` 的两条 handler
+  在 ⑤ 实现时已就位），**本次未改 preload、未改 `vdd-driver.ts`**。
+- `apps/desktop/src/renderer/App.vue`（设置页新增「虚拟显示器驱动」卡片）：
+  状态只读展示（驱动是否已安装 + 版本、设备节点是否存在/是否启用、
+  驱动包是否随包、当前进程是否有管理员权限）；状态只在进入设置页时读
+  （`watch(currentPage)`），另有「刷新状态」按钮手动重读；安装按钮只在
+  用户点击时调 `installVddDriver`，启动时、进入设置页时均不调用安装。
+  按钮及附近文案讲清后果：装驱动进系统驱动库、SignPath Foundation
+  证书进本机 TrustedPublisher（仅发布者信任，不改 Secure Boot、
+  不开测试签名）、需要管理员权限；非管理员运行时按钮禁用并提示以
+  管理员身份重启。已安装时再次点击由管理器按钉死版本检查（相符直接
+  返回、不重装）。安装后若 `devicePresent=false`，卡片内提示设备节点
+  尚未创建（⑤ 已知缺口），不是安装失败的误报。
+- 失败翻译（渲染层，`translateVddInstallError`）：IPC 失败文案是
+  `<reason>：<detail>`，reason（`not-admin` / `package-missing` /
+  `hash-mismatch` / `extract-failed` / `trust-failed` / `install-failed` /
+  `verify-failed`）译成中文标题 + 做法；技术类失败另附管理器返回的
+  detail 当诊断信息；未知 reason 直接显示 detail，不甩英文错误码。
+- `apps/desktop/src/renderer/style.css`：新增 `.vdd-note` / `.vdd-message`
+  （成功走 `--ok-soft`，失败走 `--danger-soft`）。
+- 验证：`npm run build`、`npm run typecheck`、`npm run verify:vdd-driver`
+  （⑤ 的 51 项断言未动）全过。活体验证仍阻塞，见文末「仍阻塞的活体验证」。
+
 ## ④ 实现：VDD 后端虚拟显示器管理器（2026-11-03）
 
 ### 文件
@@ -301,6 +327,11 @@ reason（`not-admin` / `package-missing` / `hash-mismatch` /
 
 ### 仍阻塞的活体验证
 
+- 设置页接线活体验证：须在 zero 上实测——进入设置页读状态（与
+  `pnputil /enum-drivers`、`Get-PnpDevice` 人工核对四项）、点安装
+  （管理员会话，确认 SignPath 信任步骤与复核版本；已装时点一次应报
+  「无需重复安装」）、非管理员会话下按钮禁用提示。本次只做了代码 +
+  桌面端验证，未点真实安装。
 - ④ 真机验证：需平板无线调试恢复（2026-11-03 20:50 已断，44311 拒绝，疑似休眠）+ 扩展屏推流到平板实测。
 - ③ 控制台扩展实测：须用户本人在场，显示设置里把虚拟屏设为扩展、拖窗口实测。
 - 全新机器设备节点创建：已实现（见下「⑥ 实现」一节）；活体验证待用户——全新机器真安装、重跑幂等、是否需重启。

@@ -12,7 +12,8 @@ import type {
   SessionView,
   TransferInfo,
   TransferTaskView,
-  TrustedDevice
+  TrustedDevice,
+  VddDriverStatus
 } from '../shared/types'
 import DeviceCard from './components/DeviceCard.vue'
 import SidebarNav, { type NavPage } from './components/SidebarNav.vue'
@@ -929,6 +930,108 @@ function onBannerClose(id: string): void {
   if (id === 'notice') notice.value = null
 }
 
+// ---------- 虚拟显示器驱动（线 3，⑤；设置页接线） ----------
+//
+// 状态只在进入设置页时（或点「刷新状态」时）读，不在启动时读；
+// 安装只在用户点「安装虚拟显示器驱动」时触发，不设任何自动调用点。
+// preload 已暴露 vddDriverStatus / installVddDriver（见 src/preload/index.ts），
+// 本处只做渲染层接线，不碰驱动生命周期代码。
+const vddStatus = ref<VddDriverStatus | null>(null)
+const vddStatusFailed = ref(false)
+const vddMessage = ref<{ text: string; level: 'info' | 'danger' } | null>(null)
+
+/** 主进程 install 失败的 reason → 用户能看懂的标题 + 做法。
+ * IPC 失败文案是 `<reason>：<detail>`（见 src/main/ipc.ts 的
+ * vdd-driver:install handler），reason 本身是英文码，不直接示人。
+ * detail 已是中文可操作文案：技术类失败附在后面当诊断信息，
+ * 其余只给标题 + 做法，不重复 detail。 */
+const VDD_INSTALL_ERRORS: Record<string, { title: string; advice: string; showDetail: boolean }> = {
+  'not-admin': {
+    title: '需要管理员权限',
+    advice: '请关闭 LinkSpace，右键以管理员身份重新运行，再点安装。',
+    showDetail: false
+  },
+  'package-missing': {
+    title: '驱动安装包缺失',
+    advice: '随 LinkSpace 附带的驱动包找不到了，请重新安装 LinkSpace。',
+    showDetail: false
+  },
+  'hash-mismatch': {
+    title: '驱动包校验未通过',
+    advice: '附带的驱动包与钉死的版本不一致（可能被篡改或版本漂移），已拒绝安装，请重新安装 LinkSpace。',
+    showDetail: false
+  },
+  'extract-failed': {
+    title: '驱动包解压失败',
+    advice: '请检查磁盘空间后重试；仍失败请重新安装 LinkSpace。',
+    showDetail: true
+  },
+  'trust-failed': {
+    title: '发布者证书信任失败',
+    advice: '驱动签名校验或证书导入未通过，已拒绝安装；请确认系统时间正确、不要拦截证书导入，再重试。',
+    showDetail: true
+  },
+  'install-failed': {
+    title: '驱动安装失败',
+    advice: '系统未能完成驱动安装。ARM64 Windows 只接受微软签名的驱动包，VDD 暂不支持；x64 机器请重试，仍失败请重启后再试。',
+    showDetail: true
+  },
+  'verify-failed': {
+    title: '安装后复核未通过',
+    advice: '安装命令返回成功，但驱动库里没有期望版本，安装未生效，请重试。',
+    showDetail: true
+  }
+}
+
+function translateVddInstallError(message: string): string {
+  const sep = message.indexOf('：')
+  const reason = sep >= 0 ? message.slice(0, sep) : ''
+  const detail = sep >= 0 ? message.slice(sep + 1) : message
+  const entry = VDD_INSTALL_ERRORS[reason]
+  if (!entry) return detail || message
+  return entry.showDetail && detail
+    ? `${entry.title}：${entry.advice}（${detail}）`
+    : `${entry.title}：${entry.advice}`
+}
+
+async function loadVddStatus(): Promise<void> {
+  vddStatusFailed.value = false
+  try {
+    vddStatus.value = await window.linkspace.vddDriverStatus()
+  } catch {
+    vddStatus.value = null
+    vddStatusFailed.value = true
+  }
+}
+
+/** 只在进入设置页时读状态（启动时不读、不装）。 */
+watch(currentPage, (page) => {
+  if (page === 'settings') void loadVddStatus()
+})
+
+async function installVddDriver(): Promise<void> {
+  await withBusy('vdd-install', async () => {
+    vddMessage.value = null
+    const res = await window.linkspace.installVddDriver()
+    if (!res.ok) {
+      vddMessage.value = { text: translateVddInstallError(res.error.message), level: 'danger' }
+      return
+    }
+    await loadVddStatus()
+    const st = vddStatus.value
+    const nodeNote =
+      st && !st.devicePresent
+        ? '设备节点尚未创建：驱动已装好，但虚拟显示器节点还需另一步创建（开发中），扩展屏暂不可用。'
+        : ''
+    vddMessage.value = {
+      text:
+        (res.value.alreadyInstalled ? '驱动已安装，无需重复安装。' : '驱动安装成功。') +
+        (nodeNote ? ` ${nodeNote}` : ''),
+      level: 'info'
+    }
+  })
+}
+
 // ---------- 概览页 ----------
 
 /** 连接可视化对端：首台已信任设备；没有时显示占位。
@@ -1566,6 +1669,82 @@ onBeforeUnmount(() => {
                   复制指纹
                 </button>
               </div>
+            </section>
+
+            <section class="card">
+              <h3 class="card__title">虚拟显示器驱动</h3>
+              <p class="card__sub">
+                平板当扩展屏用的虚拟显示器驱动（开源 Virtual Display Driver）。
+                安装会把驱动装进系统驱动库，并把签名者 SignPath Foundation 的证书加入本机受信任的发布者——只用于静默安装此驱动，不改
+                Secure Boot、不开测试签名。安装需要管理员权限，且只在你点下面的按钮时进行，不会自动安装。
+              </p>
+              <dl class="kv-list">
+                <div class="kv-list__row">
+                  <dt class="kv-list__key">驱动</dt>
+                  <dd class="kv-list__value">
+                    <template v-if="vddStatus">
+                      {{ vddStatus.installed ? `已安装（版本 ${vddStatus.installedVersion ?? '未知'}）` : '未安装' }}
+                    </template>
+                    <span v-else-if="vddStatusFailed">状态读取失败，点下方「刷新状态」重试</span>
+                    <span v-else>检测中…</span>
+                  </dd>
+                </div>
+                <div class="kv-list__row">
+                  <dt class="kv-list__key">设备节点</dt>
+                  <dd class="kv-list__value">
+                    <template v-if="vddStatus">
+                      {{ vddStatus.devicePresent ? (vddStatus.deviceEnabled ? '已启用' : '已禁用') : '不存在' }}
+                    </template>
+                    <span v-else>—</span>
+                  </dd>
+                </div>
+                <div class="kv-list__row">
+                  <dt class="kv-list__key">驱动包</dt>
+                  <dd class="kv-list__value">
+                    <template v-if="vddStatus">
+                      {{ vddStatus.packageBundled ? '已随安装包附带' : '缺失（无法安装）' }}
+                    </template>
+                    <span v-else>—</span>
+                  </dd>
+                </div>
+                <div class="kv-list__row">
+                  <dt class="kv-list__key">管理员权限</dt>
+                  <dd class="kv-list__value">
+                    <template v-if="vddStatus">
+                      {{ vddStatus.isAdmin ? '是' : '否（安装需要管理员权限）' }}
+                    </template>
+                    <span v-else>—</span>
+                  </dd>
+                </div>
+              </dl>
+              <p v-if="vddStatus && vddStatus.installed && !vddStatus.devicePresent" class="vdd-note">
+                设备节点尚未创建：驱动已装好，但虚拟显示器节点还需另一步创建（开发中，见
+                docs/line3-vdd.md「已知缺口」），扩展屏暂不可用。
+              </p>
+              <div class="settings-row">
+                <div class="settings-row__text">
+                  <div class="settings-row__label">安装虚拟显示器驱动</div>
+                  <div class="settings-row__hint">
+                    <span v-if="!vddStatus">正在读取驱动状态…</span>
+                    <span v-else-if="!vddStatus.isAdmin">当前不是管理员运行：请以管理员身份重启 LinkSpace 后再安装</span>
+                    <span v-else-if="vddStatus.installed">驱动已安装；再次点击会检查版本，版本不对才重装</span>
+                    <span v-else>点一次即安装，中途不要关闭应用</span>
+                  </div>
+                </div>
+                <button
+                  class="btn btn--sm"
+                  :disabled="busy['vdd-install'] || !vddStatus || !vddStatus.isAdmin"
+                  @click="installVddDriver"
+                >
+                  {{ busy['vdd-install'] ? '安装中…' : '安装虚拟显示器驱动' }}
+                </button>
+                <button class="btn btn--sm" :disabled="busy['vdd-install']" @click="loadVddStatus">
+                  刷新状态
+                </button>
+              </div>
+              <p v-if="vddMessage" class="vdd-message" :class="`vdd-message--${vddMessage.level}`">
+                {{ vddMessage.text }}
+              </p>
             </section>
 
             <section class="card">
