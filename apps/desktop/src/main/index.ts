@@ -38,6 +38,9 @@ app.setPath('userData', join(app.getPath('appData'), 'LinkSpace'))
 // 这是针对本机图形环境的规避，不是通用配置，排查到根因后应移除。
 app.commandLine.appendSwitch('in-process-gpu')
 app.commandLine.appendSwitch('disable-gpu-shader-disk-cache')
+if (!app.isPackaged) {
+  app.commandLine.appendSwitch('remote-debugging-port', '9222')
+}
 app.disableHardwareAcceleration()
 
 // ---------- Win32 键鼠层（阶段 3） ----------
