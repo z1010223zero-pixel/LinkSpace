@@ -264,6 +264,10 @@ export class Host {
   private forwardCursorTimer: NodeJS.Timeout | null = null
   /** 最近一次投屏用的高性能通路参数（请求关键帧时原样重启）；兼容模式为 null */
   private forwardFast: { cand: FastCandidate; params: FastParams } | null = null
+  /** 正向投屏请求代数序号（拦截异步探测期间被停流或新请求覆盖的陈旧回调） */
+  private forwardStreamReqSeq = 0
+  /** 最近一次响应平板 screen.stream.keyframe 重启编码器的时间戳（防抖限频） */
+  private lastFastKeyframeRestartAt = 0
   /** 正向推流码率自适应积压采样定时器（避免换档叠加泄漏） */
   private forwardBacklogTimer: NodeJS.Timeout | null = null
   /** 最近一次虚拟显示器异步销毁 Promise，供 stop() 退出前等待完成 */
@@ -275,6 +279,7 @@ export class Host {
     region: { x: number; y: number; w: number; h: number } | null
     scaleWidth: number
     regionArgs: string[]
+    fast?: { cand: FastCandidate; params: FastParams } | null
   } | null = null
   private readonly inputLayout: InputLayoutStore
   private listeners: { [K in keyof HostEvents]?: Listener<K>[] } = {}
@@ -1326,6 +1331,7 @@ export class Host {
         : []
       // 高性能模式（平板请求 mode=fast）：探测 ddagrab + 硬编通路，通过则走新路线，
       // 任何一步不满足都静默回退兼容模式（start 消息不带 mode，平板据此选解码器）。
+      const reqSeq = ++this.forwardStreamReqSeq
       const fastReq = parseFastRequest(payload)
       if (fastReq && region) {
         const envOut = process.env.LINKSPACE_DDAGRAB_OUTPUT
@@ -1342,8 +1348,13 @@ export class Host {
           bitrate: computeFastBitrate(size.width, size.height, fastReq.fps)
         }
         const ffmpegPath = this.opts.screenFfmpegPath
+        const isStillValid = (): boolean =>
+          reqSeq === this.forwardStreamReqSeq &&
+          this.peers.has(peerId) &&
+          this.inputCoordinator?.activeSession?.peerId === peerId
         void pickFastCandidate(ffmpegPath, params)
           .then((cand) => {
+            if (!isStillValid()) return
             if (cand) {
               this.startForwardStream(peerId, 'screen', region, scaleWidth, regionArgs, { cand, params })
             } else {
@@ -1352,6 +1363,7 @@ export class Host {
             }
           })
           .catch((err) => {
+            if (!isStillValid()) return
             log.warn(`[fast-stream] 探测异常，回退兼容模式: ${String(err)}`)
             this.startForwardStream(peerId, 'screen', region, scaleWidth, regionArgs)
           })
@@ -1359,25 +1371,16 @@ export class Host {
       }
       this.startForwardStream(peerId, 'screen', region, scaleWidth, regionArgs)
     })
-    // 平板解码异常/丢帧后请求关键帧：高性能模式下重启编码器即得到新 IDR
-    //（ffmpeg 子进程无法带外强制关键帧；原生编码助手阶段再做真正的按需 IDR）。
+    // 平板解码异常/丢帧后请求关键帧：高性能模式下原地重启 ffmpeg 编码器即产出新 IDR
+    //（不重发 screen.stream.start，避免平板端销毁重建 MediaCodec；加 2s 冷却防止重启风暴）。
     control.on('screen.stream.keyframe', (conn) => {
       const peerId = conn.peerId
       if (!peerId || this.forwardStreamPeerId !== peerId || !this.screenStream.isFast) return
-      const fast = this.forwardFast
-      const region = this.forwardStreamRegion
-      if (!fast || !region) return
-      log.info('[fast-stream] 平板请求关键帧，重启编码器')
-      this.screenStream.stop()
-      this.clearForwardStreamState()
-      this.startForwardStream(
-        peerId,
-        'screen',
-        region,
-        this.forwardStreamScaleWidth,
-        this.forwardStreamRegionArgs,
-        fast
-      )
+      const now = Date.now()
+      if (now - this.lastFastKeyframeRestartAt < 2000) return
+      this.lastFastKeyframeRestartAt = now
+      log.info('[fast-stream] 平板请求关键帧，原地重启编码器产出新 IDR')
+      this.screenStream.restartFast()
     })
     control.on('screen.stream.stop', (conn, msg) => {
       if (!conn.peerId) return
@@ -1886,6 +1889,7 @@ export class Host {
    * 时调用方显式清 pausedForwardStream。
    */
   private clearForwardStreamState(): void {
+    this.forwardStreamReqSeq++
     this.forwardStreamPeerId = null
     this.forwardStreamStarted = false
     if (this.forwardCursorTimer) {
@@ -1917,13 +1921,16 @@ export class Host {
   handleSessionLock(): void {
     if (!this.screenStream.running || !this.forwardStreamPeerId) return
     const peerId = this.forwardStreamPeerId
-    // 先记恢复参数，再停流清归属（暂停记录保留到解锁）
+    // 先记恢复参数（含高性能模式配置），再停流清归属（暂停记录保留到解锁）
     this.pausedForwardStream = {
       peerId,
       source: this.forwardStreamSource,
       region: this.forwardStreamRegion ? { ...this.forwardStreamRegion } : null,
       scaleWidth: this.forwardStreamScaleWidth,
-      regionArgs: [...this.forwardStreamRegionArgs]
+      regionArgs: [...this.forwardStreamRegionArgs],
+      fast: this.forwardFast
+        ? { cand: { ...this.forwardFast.cand }, params: { ...this.forwardFast.params } }
+        : null
     }
     this.screenStream.stop()
     this.clearForwardStreamState()
@@ -1957,7 +1964,14 @@ export class Host {
         log.info('[screen-stream] 解锁后键鼠会话已不在，锁屏暂停的投屏不再恢复')
         return
       }
-      this.startForwardStream(paused.peerId, 'screen', paused.region, paused.scaleWidth, paused.regionArgs)
+      this.startForwardStream(
+        paused.peerId,
+        'screen',
+        paused.region,
+        paused.scaleWidth,
+        paused.regionArgs,
+        paused.fast ?? undefined
+      )
     }
     log.info(`[screen-stream] 解锁后正向投屏已恢复（${paused.peerId}）`)
   }

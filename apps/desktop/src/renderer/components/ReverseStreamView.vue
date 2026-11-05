@@ -229,9 +229,12 @@ async function tapPinKey(digit: string): Promise<void> {
   const w = canvas && canvas.width > 0 ? canvas.width : 1920
   const h = canvas && canvas.height > 0 ? canvas.height : 1080
   const cx = w * 0.5
-  // 横屏平板标准 PIN 键盘相对坐标
-  const colOffset = w * 0.095
-  const rowY = [0.44 * h, 0.54 * h, 0.64 * h, 0.74 * h]
+  const isLandscape = w >= h
+  // 自适应横屏平板与竖屏手机/平板的标准 PIN 键盘相对坐标
+  const colOffset = isLandscape ? w * 0.095 : w * 0.22
+  const rowY = isLandscape
+    ? [0.44 * h, 0.54 * h, 0.64 * h, 0.74 * h]
+    : [0.52 * h, 0.61 * h, 0.70 * h, 0.79 * h]
   const colX = [cx - colOffset, cx, cx + colOffset]
 
   let targetX = cx
@@ -262,10 +265,11 @@ let patternLastIdx = -1
 function patternDotPos(idx: number, w: number, h: number): { x: number; y: number } {
   const col = (idx % 3) - 1
   const row = Math.floor(idx / 3) - 1
+  const isLandscape = w >= h
   const cx = w * 0.5
-  const cy = h * 0.56
-  const dx = w * 0.08
-  const dy = h * 0.12
+  const cy = isLandscape ? h * 0.56 : h * 0.62
+  const dx = isLandscape ? w * 0.08 : w * 0.18
+  const dy = isLandscape ? h * 0.12 : h * 0.09
   return {
     x: Math.round(cx + col * dx),
     y: Math.round(cy + row * dy)
@@ -811,7 +815,12 @@ onBeforeUnmount(() => {
 
         <div v-if="unlockTab === 'pattern'" class="rs-pattern-pad">
           <div class="rs-pattern-hint">在下方按住鼠标划动连线：</div>
-          <div class="rs-pattern-grid">
+          <div
+            class="rs-pattern-grid"
+            @pointerup.prevent="endPattern"
+            @pointerleave.prevent="endPattern"
+            @pointercancel.prevent="endPattern"
+          >
             <div
               v-for="idx in [0, 1, 2, 3, 4, 5, 6, 7, 8]"
               :key="idx"

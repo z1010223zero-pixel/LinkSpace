@@ -225,15 +225,22 @@ class FastStreamDecoder(
             var lastFeedMs = System.currentTimeMillis()
 
             while (!stopped.get()) {
-                if (surfaceChanged.compareAndSet(true, false)) {
-                    val newS = synchronized(lock) { surface }
-                    if (newS != null && newS.isValid) {
-                        runCatching {
-                            decoder.setOutputSurface(newS)
-                            requestKeyframeThrottled()
-                        }.onFailure { e ->
-                            Log.w(TAG, "切换 Surface 失败: ${e.message}")
+                val curSurface = synchronized(lock) { surface }
+                if (curSurface == null || !curSurface.isValid) {
+                    // Surface 临时销毁（如屏幕旋转/视图重挂载）：暂停送帧等待新 Surface，避免向已释放 Surface 解码抛异常断流
+                    synchronized(lock) {
+                        if (!stopped.get() && (surface == null || surface?.isValid != true)) {
+                            lock.wait(50L)
                         }
+                    }
+                    continue
+                }
+                if (surfaceChanged.compareAndSet(true, false)) {
+                    runCatching {
+                        decoder.setOutputSurface(curSurface)
+                        requestKeyframeThrottled()
+                    }.onFailure { e ->
+                        Log.w(TAG, "切换 Surface 失败: ${e.message}")
                     }
                 }
 

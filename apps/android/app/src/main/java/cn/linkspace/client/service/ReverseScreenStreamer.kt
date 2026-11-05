@@ -986,7 +986,7 @@ class ReverseScreenStreamer(
         private val START_CODE = byteArrayOf(0, 0, 0, 1)
         private val AUD_NAL = byteArrayOf(0, 0, 0, 1, 0x09, 0xf0.toByte())
 
-        /** 分辨率档位（协议 4.7，与 protocol.json streamQualityPresets 同值，升级为 60fps 高帧率） */
+        /** 反向投屏高帧率分辨率档位（协议 4.7，宽度档位与 protocol.json streamQualityPresets 对齐，反向硬件编码升级为 60fps 高码率） */
         val STREAM_PRESETS = listOf(
             StreamPreset("720p", 1280, 60, 6_000_000),
             StreamPreset("1080p", 1920, 60, 16_000_000),

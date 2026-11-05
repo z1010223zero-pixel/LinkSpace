@@ -37,15 +37,13 @@
   - 支持虚拟多按键、自绘键盘与滚轮手势；
   - 多屏环境下支持一键切换要投屏与控制的显示器。
 
-### 🚀 2. 毫秒级极速低延迟推流与解码（Ultra-Low Latency Streaming）
-- **桌面端推流引擎**：
-  - Windows 原生 Direct 采集 + 多线程切片并行编码（`sliced-threads=1`）；
-  - `fast_bilinear` 硬件加速下采样，4K 到 1080p/720p 稳定 60~90 FPS 输出；
-  - 控制与视频通道全链路开启 `TCP_NODELAY`，彻底消除 Nagle 缓冲延迟。
-- **Android 端极速软解**：
-  - 基于 FFmpeg `libavcodec` 4 线程切片并发软解（抗活流抖动与花屏）；
-  - 原生 `libswscale` NEON 硬件加速 `YUV420P -> RGBA` 内存零拷贝转换（单帧转换耗时从 ~45ms 降至 ~1.5ms）；
-  - 触控事件 120Hz 极速合并节流，触摸即时本地光标刷新，消除视觉迟滞。
+### 🚀 2. 双擎自适应毫秒级超低延迟串流（Dual-Engine Ultra-Low Latency Streaming）
+- **高性能硬编硬解管线（Fast Mode，默认优先）**：
+  - **桌面端 DXGI 零拷贝抓屏 + GPU 硬件编码**：采用 `ddagrab`（DXGI Desktop Duplication）抓屏与 GPU 硬件缩放，自动探测并启用 `h264_nvenc` / `h264_qsv` / `h264_amf` 硬件编码器，按完整 H.264 访问单元（AU）带时间戳封包直发；
+  - **Android 端 `MediaCodec` `Surface` 硬解直投**：零 CPU 像素拷贝直接解码至 GPU 纹理渲染，支持 Android 11+ 标准低延迟与高通/联发科/麒麟底层低延迟硬件扩展，内置 2.5s 首帧看门狗，异常时无缝自动回退兼容模式。
+- **高兼容软编软解管线（Compat Mode，自动兜底）**：
+  - **桌面端**：`gdigrab` + `libx264` 多线程切片并行编码（`sliced-threads=1`、CRF 恒定画质 + VBV 窄缓冲封顶），全链路开启 `TCP_NODELAY`；
+  - **Android 端**：基于 FFmpeg `libavcodec` 4 线程切片软解 + `libswscale` NEON 加速 `YUV420P -> RGBA` 转换，配合 120Hz 触控合并与本地即时光标绘制。
 
 ### 🛡️ 3. 双向免确认有效期与长效保活（Smart Authorization & Zero-Dialog）
 - **多天免确认授权**：
@@ -55,10 +53,10 @@
   - 平板端推流停止后仅断开 Surface 连接，保持系统 `MediaProjection` 与 `VirtualDisplay` 句柄跨会话存活；
   - 免确认期内电脑重连投屏实现**零 LinkSpace 弹窗、零系统录屏弹窗**秒级秒开。
 
-### 🔓 4. 锁屏直接唤醒与一键/自动上滑解锁（Lock Screen Wake & Unlock）
+### 🔓 4. 锁屏直接唤醒与密码/图案盲输辅助（Lock Screen Wake & Blind Unlock Helper）
 - **平板端息屏唤醒与上滑解锁**：
-  - 当电脑发起控制或投屏时，平板端无障碍服务自动通过系统 WakeLock 点亮屏幕，并自动注入平滑上滑解锁手势；
-  - 电脑端反向投屏窗口顶栏常驻「亮屏解锁」按钮，随时一键唤醒并解锁平板。
+  - 当电脑发起控制或投屏时，平板端自动通过 `WakeLock` 与 `requestDismissKeyguard` 点亮屏幕，并自动注入平滑上滑解锁手势；
+  - 电脑端反向投屏窗口顶栏常驻「亮屏解锁」与「锁屏辅助」按钮，针对 Android 锁屏密码页系统级黑屏保护（`FLAG_SECURE`），内置自适应横竖屏的**数字 PIN 键盘**与**九宫格图案连线面板**，支持远程盲输密码解锁。
 - **电脑端显示器唤醒**：
   - 平板发起控制被授权时，电脑端自动调用 Win32 原生电源接口唤醒休眠息屏的显示器。
 
@@ -82,16 +80,16 @@ graph LR
     subgraph Windows PC ["Windows 桌面端 (apps/desktop)"]
         UI_PC["Vue 3 + Electron Renderer"]
         Main_PC["Node.js Main Process"]
-        Cap_PC["Screen Capture (GDI / Desktop Duplication)"]
-        Enc_PC["FFmpeg H.264 Encoder (Sliced Threads)"]
+        Cap_PC["Screen Capture (DXGI ddagrab / dd-capture / GDI)"]
+        Enc_PC["H.264 Encoder (NVENC·QSV·AMF / libx264)"]
         Win32_In["Win32 Input Injector (SendInput)"]
     end
 
     subgraph Android Device ["Android 平板/手机 (apps/android)"]
-        UI_Droid["Jetpack Compose UI"]
+        UI_Droid["Jetpack Compose + Dual StreamView"]
         Svc_Droid["LinkSpace Background Service"]
-        Dec_Droid["StreamDecoder (libavcodec + libswscale)"]
-        Proj_Droid["MediaProjection + VirtualDisplay (Cached)"]
+        Dec_Droid["FastStreamDecoder (MediaCodec Surface) / StreamDecoder (FFmpeg)"]
+        Proj_Droid["MediaProjection + VirtualDisplay (60fps Cached)"]
         A11y_Droid["Accessibility Service (Gesture & Key Injection)"]
     end
 
@@ -115,7 +113,7 @@ graph LR
 | **桌面端原生接入** | Koffi (Win32 FFI) | 鼠标键盘原生注入 (`SendInput`)、显示器唤醒与光标追踪 |
 | **Android 客户端** | Kotlin 2.0 + Jetpack Compose | 现代化声明式界面、Material 3 设计 |
 | **Android 输入注入** | Android Accessibility Service | 系统级触摸手势、返回/主页动作、锁屏唤醒上滑解锁 |
-| **Android 视频解码** | Bytedeco FFmpeg (`libavcodec` + `libswscale`) | 原生多线程切片解码 + NEON 零拷贝直接渲染 |
+| **Android 视频解码** | `MediaCodec` Surface 硬解 + Bytedeco FFmpeg (`libavcodec` + `libswscale`) | 双擎解码：优先 GPU Surface 零拷贝硬解，异常自动无缝回退多线程 NEON 软解 |
 | **网络通信** | mDNS + TLS 1.3 + WebSocket | 局域网服务自发现、安全握手与二进制流分发 |
 
 ---

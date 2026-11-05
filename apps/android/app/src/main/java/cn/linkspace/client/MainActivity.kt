@@ -58,16 +58,19 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         @Volatile
-        var currentActivity: MainActivity? = null
+        private var currentActivityRef: java.lang.ref.WeakReference<MainActivity>? = null
+
+        val currentActivity: MainActivity?
+            get() = currentActivityRef?.get()?.takeIf { !it.isFinishing && !it.isDestroyed }
     }
 
     override fun onStart() {
         super.onStart()
-        currentActivity = this
+        currentActivityRef = java.lang.ref.WeakReference(this)
     }
 
     override fun onDestroy() {
-        if (currentActivity === this) currentActivity = null
+        if (currentActivityRef?.get() === this) currentActivityRef = null
         super.onDestroy()
     }
     /**
@@ -168,7 +171,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        currentActivity = this
+        currentActivityRef = java.lang.ref.WeakReference(this)
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O_MR1) {
             setShowWhenLocked(true)
             setTurnScreenOn(true)

@@ -67,3 +67,6 @@ native/winhelper/*.exe
 !native/dd-capture/x64/
 !native/dd-capture/x64/Release/
 !native/dd-capture/x64/Release/dd-capture.exe
+
+# 审查与临时工作目录
+review-tmp/

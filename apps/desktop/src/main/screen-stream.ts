@@ -290,6 +290,7 @@ export class ScreenStreamService {
       this.stop()
     }
     this.fastMode = true
+    this.fastOpts = { ...opts, args: [...opts.args] }
     this.streamSource = 'screen'
     this.ddRect = null
     this.ddCapturePath = null
@@ -336,19 +337,16 @@ export class ScreenStreamService {
       if (this.proc !== proc) return
       clearFlush()
       for (const { au, key } of splitter.push(chunk)) emitAu(au, key)
-      // ffmpeg 开启 -flush_packets 1 时，单帧 <64KB 一次 write 完整到达，立即冲刷当前 AU，
-      // 消除「等下一帧 AUD 才吐上一帧」的 16.7ms 延迟与静止画面尾帧滞留；
-      // 若恰好填满 64KB 管道块（大 IDR 帧被拆包），等 3ms 让尾包合入再冲刷。
-      if (chunk.length < 65536) {
-        const tail = splitter.flushPending()
-        if (tail) emitAu(tail.au, tail.key)
-      } else {
+      // 管道微延迟合包冲刷（2ms）：同一帧被 OS 命名管道拆成多个 data 块时，
+      // 连续分块会在 <0.2ms 内相继到达并重置定时器，避免按 chunk.length<65536
+      // 同步冲刷把大 IDR 帧或半包帧拦腰截断；2ms 静默后立即冲刷尾帧，兼顾完整性与零尾帧滞留。
+      if (splitter.hasPendingVcl()) {
         flushTimer = setTimeout(() => {
           flushTimer = null
           if (this.proc !== proc) return
           const tail = splitter.flushPending()
           if (tail) emitAu(tail.au, tail.key)
-        }, 3)
+        }, 2)
       }
     })
     proc.on('exit', (code) => {
@@ -367,6 +365,18 @@ export class ScreenStreamService {
     })
     this.proc = proc
     log.info('[screen-stream] 高性能推流已启动（ddagrab + 硬编 → 按帧 WS 二进制）')
+  }
+
+  /**
+   * 高性能模式原地重启编码器以立即产出新 IDR 关键帧（供 screen.stream.keyframe 使用）：
+   * 不重发 screen.stream.start，避免平板端销毁重建 MediaCodec。
+   */
+  restartFast(): boolean {
+    if (!this.fastMode || !this.fastOpts) return false
+    const opts = this.fastOpts
+    this.stop()
+    this.startFast(opts)
+    return true
   }
 
   /** 当前是否高性能模式（宿主据此决定码率自适应、关键帧请求的处理方式） */
@@ -626,6 +636,12 @@ export class ScreenStreamService {
   private ddReadyTimer: NodeJS.Timeout | null = null
   private encoder: StreamEncoder = 'libx264'
   private fastMode = false
+  private fastOpts: {
+    ffmpegPath: string
+    args: string[]
+    onAu: (au: Buffer, key: boolean) => void
+    onFastFailed?: (reason: string) => void
+  } | null = null
   private teeStream: import('node:fs').WriteStream | null = null
 
   /** 当前推流帧源（宿主锁屏恢复、状态查询用） */

@@ -37,15 +37,13 @@ In LinkSpace, any device can act as both controller and controlled client, enabl
   - On-screen touch keys, virtual software keyboard, and two-finger scroll gestures.
   - Multi-monitor picker allows switching between different PC displays in one click.
 
-### 🚀 2. Ultra-Low Latency Streaming (60+ FPS)
-- **Desktop Streaming Engine**:
-  - Native Windows screen capture with multi-threaded sliced H.264 encoding (`sliced-threads=1`).
-  - Hardware-accelerated `fast_bilinear` downsampling (4K down to 1080p/720p at stable 60~90 FPS).
-  - End-to-end `TCP_NODELAY` enabled across all control and binary video transport sockets to eliminate Nagle buffering latency.
-- **Android Native Decoding**:
-  - Multi-threaded slice decoding (`FF_THREAD_SLICE`) powered by FFmpeg `libavcodec`.
-  - Native `libswscale` NEON hardware-accelerated `YUV420P -> RGBA` zero-copy memory rendering (frame conversion latency reduced from ~45ms down to ~1.5ms).
-  - 120Hz touch event coalescing with instant local cursor rendering for zero perceived visual lag.
+### 🚀 2. Dual-Engine Ultra-Low Latency Streaming (60+ FPS)
+- **High-Performance Hardware Pipeline (Fast Mode, Default)**:
+  - **Desktop DXGI Zero-Copy Capture + GPU Encoding**: Captures frames via `ddagrab` (DXGI Desktop Duplication) with GPU scaling and auto-probed `h264_nvenc` / `h264_qsv` / `h264_amf` hardware encoders, delivering framing per H.264 Access Unit (AU).
+  - **Android `MediaCodec` `Surface` Hardware Decoding**: Zero-CPU-copy direct decoding onto GPU `TextureView` surfaces with Android 11+ and vendor low-latency extensions, guarded by a 2.5s first-frame watchdog that seamlessly falls back to Compatibility Mode if needed.
+- **Compatibility Software Pipeline (Compat Mode, Automatic Fallback)**:
+  - **Desktop**: `gdigrab` + `libx264` multi-threaded sliced encoding (`sliced-threads=1`, capped CRF + tight VBV buffer) with end-to-end `TCP_NODELAY`.
+  - **Android**: Multi-threaded slice decoding (`FF_THREAD_SLICE`) via FFmpeg `libavcodec` + NEON `libswscale` `YUV420P -> RGBA` rendering, paired with 120Hz touch coalescing and instant local cursor overlay.
 
 ### 🛡️ 3. Multi-Day No-Confirm Trust & Persistent Projection
 - **Customizable Trust Durations**:
@@ -55,10 +53,10 @@ In LinkSpace, any device can act as both controller and controlled client, enabl
   - When stopping a reverse stream, LinkSpace detaches the encoder surface while caching the `MediaProjection` and `VirtualDisplay` handles.
   - Re-streaming from PC within the validity period launches instantly with **zero LinkSpace prompts and zero Android system projection dialogs**.
 
-### 🔓 4. Lock Screen Wake & Auto Swipe-Up Unlock
+### 🔓 4. Lock Screen Wake & Blind PIN/Pattern Unlock Helper
 - **Tablet Wake & Unlock**:
-  - When PC initiates control or streaming, Android's accessibility service acquires a WakeLock to turn on the screen and dispatches an automated swipe-up unlock gesture.
-  - A persistent **"Wake & Unlock"** button in the PC window title bar allows waking and unlocking sleeping tablets on demand.
+  - When PC initiates control or streaming, Android's accessibility service acquires a `WakeLock`, invokes `requestDismissKeyguard`, and dispatches an automated swipe-up unlock gesture.
+  - Built-in **"Wake & Unlock"** and **"Unlock Helper"** tools in the PC viewer title bar provide an orientation-adaptive **PIN Pad** and **9-Dot Pattern Grid** to remotely unlock tablets even when Android's `FLAG_SECURE` masks the lock screen in black.
 - **PC Display Wakeup**:
   - When tablet controls the PC, LinkSpace automatically wakes sleeping PC monitors via native Win32 power execution state APIs.
 
@@ -114,7 +112,7 @@ graph LR
 | **Native Integration** | Koffi (Win32 FFI) | Native input injection (`SendInput`), display wake, cursor tracker |
 | **Android Client** | Kotlin 2.0 + Jetpack Compose | Declarative UI with Material 3 components |
 | **Android Input** | Android Accessibility Service | System touch gestures, navigation actions, lock screen swipe unlock |
-| **Android Decoder** | Bytedeco FFmpeg (`libavcodec` + `libswscale`) | Multi-threaded slice decoder + NEON zero-copy pixel buffer |
+| **Android Decoder** | `MediaCodec` Surface + Bytedeco FFmpeg (`libavcodec` + `libswscale`) | Dual-engine: zero-copy GPU Surface hardware decode with automatic fallback to NEON software decode |
 | **Networking** | mDNS + TLS 1.3 + WebSocket | Zero-config service discovery, mutual authentication, binary streaming |
 
 ---
