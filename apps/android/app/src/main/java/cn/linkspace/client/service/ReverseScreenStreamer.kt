@@ -641,13 +641,19 @@ class ReverseScreenStreamer(
                     MediaFormat.KEY_BITRATE_MODE,
                     MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR
                 )
-                // 静止画面每 100ms 重复上一帧，防解码管道饿死；高刷屏（120/144Hz）
+                // 静止画面每 33ms 重复上一帧，防解码管道饿死；高刷屏（120/144Hz）
                 // 限制送入编码器的帧率为 STREAM_FPS，避免 CBR 按 30fps 计单帧比特预算
-                // 却按 144fps 塞帧导致码率飙到 ~25Mbps；关 B 帧消除重排延迟。
-                setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 100_000L)
+                // 却按 144fps 塞帧导致码率飙到 ~25Mbps；关 B 帧并开低延迟实时优先级。
+                setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 33_333L)
+                setInteger(MediaFormat.KEY_PRIORITY, 0)
+                setInteger(MediaFormat.KEY_OPERATING_RATE, STREAM_FPS)
+                setInteger("vendor.qti-ext-enc-low-latency.enable", 1)
                 if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
                     setFloat(MediaFormat.KEY_MAX_FPS_TO_ENCODER, STREAM_FPS.toFloat())
                     setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
+                }
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                    setInteger(MediaFormat.KEY_LATENCY, 0)
                 }
             }
             codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
@@ -719,13 +725,19 @@ class ReverseScreenStreamer(
                     }
                     if (bytes.isEmpty()) continue
                     val annexB = normalizeNals(bytes)
+                    // 帧尾追加 H.264 AUD NAL（00 00 00 01 09 F0）：让接收端 ffmpeg h264_parser
+                    // 收到本包即刻判定当前访问单元结束并送入解码器，无需等待下一帧起始码到达。
                     if (isKey && csd != null) {
-                        val withCsd = ByteArray(csd!!.size + annexB.size)
+                        val withCsd = ByteArray(csd!!.size + annexB.size + AUD_NAL.size)
                         System.arraycopy(csd!!, 0, withCsd, 0, csd!!.size)
                         System.arraycopy(annexB, 0, withCsd, csd!!.size, annexB.size)
+                        System.arraycopy(AUD_NAL, 0, withCsd, csd!!.size + annexB.size, AUD_NAL.size)
                         sink(withCsd, true)
                     } else {
-                        sink(annexB, isKey)
+                        val withAud = ByteArray(annexB.size + AUD_NAL.size)
+                        System.arraycopy(annexB, 0, withAud, 0, annexB.size)
+                        System.arraycopy(AUD_NAL, 0, withAud, annexB.size, AUD_NAL.size)
+                        sink(withAud, isKey)
                     }
                 }
             } catch (e: Exception) {
@@ -923,6 +935,7 @@ class ReverseScreenStreamer(
         const val PROBE_INTERVAL_MS = 2000L
 
         private val START_CODE = byteArrayOf(0, 0, 0, 1)
+        private val AUD_NAL = byteArrayOf(0, 0, 0, 1, 0x09, 0xf0.toByte())
 
         /** 分辨率档位（协议 4.7，与 protocol.json streamQualityPresets 同值） */
         val STREAM_PRESETS = listOf(

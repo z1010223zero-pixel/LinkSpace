@@ -121,7 +121,7 @@ export function resolveStreamEncoder(): StreamEncoder {
  * 不能裸露）；TS 源里别用反斜杠转义（会被字符串字面量吃掉）。
  * 缩放到 1920 宽（不放大小屏），高度取最近 32 倍数（1088 档）。
  */
-function buildEncodeArgs(scaleWidth: number, encoder: StreamEncoder): string[] {
+function buildEncodeArgs(scaleWidth: number, encoder: StreamEncoder, tier: number): string[] {
   const args: string[] = [
     '-vf', `scale='min(${scaleWidth},iw)':-32`,
     '-c:v', encoder
@@ -130,13 +130,34 @@ function buildEncodeArgs(scaleWidth: number, encoder: StreamEncoder): string[] {
     args.push(
       '-preset', 'ultrafast',
       '-tune', 'zerolatency',
-      // zerolatency 已关 lookahead/sync lookahead；这里再显式钉住，
-      // 并关 sliced-threads 保持单 slice 兼容性
-      '-x264-params', 'rc-lookahead=0:sync-lookahead=0:sliced-threads=0'
+      // zerolatency 默认开 sliced-threads；若只关 sliced-threads 而不锁 threads=1，
+      // x264 会退回帧级多线程（按 CPU 逻辑核数缓冲 16~24 帧，带来近 1 秒编码延迟）。
+      // 显式指定 threads=1:sliced-threads=0:bframes=0:aud=1，兼顾单 slice 兼容性、
+      // 0 帧缓冲延迟与 AUD 帧尾立刻冲刷
+      '-x264-params', 'threads=1:sliced-threads=0:rc-lookahead=0:sync-lookahead=0:bframes=0:aud=1'
     )
   }
-  // GOP 30（1s 一个 IDR，丢帧后 1s 内自愈）
-  args.push('-g', '30', '-pix_fmt', 'yuv420p', '-f', 'h264', 'pipe:1')
+  // 自适应码率与用户画质档位取交集（必须在 pipe:1 输出 URL 之前，否则被当成第二个输出口忽略）
+  const preset = STREAM_QUALITY_PRESETS.find((p) => p.width === scaleWidth)
+  const presetBps = preset?.bps ?? 8_000_000
+  const fps = preset?.fps ?? 30
+  const tierBps = TIERS[tier]?.bps ?? null
+  const bps = Math.min(tierBps ?? presetBps, presetBps)
+  if (bps > 0) {
+    const frameBps = Math.round(bps / fps)
+    args.push('-b:v', String(bps), '-maxrate', String(bps), '-bufsize', String(frameBps))
+  }
+  // GOP 30（1s 一个 IDR，丢帧后 1s 内自愈）；开启 low_delay 与包级即时冲刷
+  args.push(
+    '-bf', '0',
+    '-g', '30',
+    '-flags', 'low_delay',
+    '-fflags', 'nobuffer',
+    '-flush_packets', '1',
+    '-pix_fmt', 'yuv420p',
+    '-f', 'h264',
+    'pipe:1'
+  )
   return args
 }
 
@@ -218,6 +239,11 @@ export class ScreenStreamService {
         ]
       : [
           '-hide_banner', '-loglevel', 'error',
+          '-fflags', 'nobuffer',
+          '-flags', 'low_delay',
+          '-probesize', '32',
+          '-analyzeduration', '0',
+          '-thread_queue_size', '4',
           '-f', 'gdigrab',
           // draw_mouse=0：采集不含真实光标——注入移动与采集互相打架会让
           // 镜像里光标持续闪烁（用户实测）；触端按绝对坐标直接映射，
@@ -226,7 +252,7 @@ export class ScreenStreamService {
           '-framerate', '30',
           ...regionArgs,
           '-i', 'desktop',
-          ...buildEncodeArgs(scaleWidth, this.encoder)
+          ...buildEncodeArgs(scaleWidth, this.encoder, this.tier)
         ]
     this.streamSource = 'screen'
     this.ddRect = null
@@ -297,9 +323,14 @@ export class ScreenStreamService {
             ffmpegPath,
             [
               '-hide_banner', '-loglevel', 'error',
+              '-fflags', 'nobuffer',
+              '-flags', 'low_delay',
+              '-probesize', '32',
+              '-analyzeduration', '0',
+              '-thread_queue_size', '4',
               '-f', 'rawvideo', '-pix_fmt', 'bgra', '-s', `${rect.w}x${rect.h}`,
               '-i', 'pipe:0',
-              ...buildEncodeArgs(scaleWidth, this.encoder)
+              ...buildEncodeArgs(scaleWidth, this.encoder, this.tier)
             ],
             onChunk,
             scaleWidth,
@@ -373,18 +404,10 @@ export class ScreenStreamService {
     feedStdin?: NodeJS.ReadableStream,
     onEncoderExit?: () => void
   ): void {
-    // 自适应码率与用户画质档位取交集：拥塞时仍能下降；用户选低清晰度
-    // 时也不会因为 t0 无上限而把 Wi-Fi 打爆。
     const preset = STREAM_QUALITY_PRESETS.find((p) => p.width === scaleWidth)
     const presetBps = preset?.bps ?? 8_000_000
-    const fps = preset?.fps ?? 30
-    const tierArgs: string[] = []
     const tierBps = TIERS[this.tier]?.bps ?? null
     const bps = Math.min(tierBps ?? presetBps, presetBps)
-    if (bps > 0) {
-      const frameBps = Math.round(bps / fps)
-      tierArgs.push('-b:v', String(bps), '-maxrate', String(bps), '-bufsize', String(frameBps))
-    }
     this.ffmpegPath = ffmpegPath
     this.onChunkRef = onChunk
     // 排障旁路：把实际推流的字节原样落盘（LINKSPACE_STREAM_TEE=<路径>），
@@ -395,7 +418,7 @@ export class ScreenStreamService {
       teeStream = createWriteStream(teePath)
       log.info(`[screen-stream] 推流字节落盘: ${teePath}`)
     }
-    const proc = spawn(ffmpegPath, [...args, ...tierArgs], { windowsHide: true })
+    const proc = spawn(ffmpegPath, args, { windowsHide: true })
     if (feedStdin) {
       proc.stdin.on('error', () => {
         /* 编码器已死时管道写失败是预期，不抛 */
@@ -598,8 +621,14 @@ export class ScreenStreamReceiver {
     this.stderrTail = []
     const args = [
       '-hide_banner', '-loglevel', 'error',
-      '-fflags', 'nobuffer',
+      '-fflags', 'nobuffer+fastseek+flush_packets',
       '-flags', 'low_delay',
+      '-avioflags', 'direct',
+      // 显式指定单线程解码（-threads 1）：默认 auto 会按 CPU 逻辑核数开启
+      // FF_THREAD_FRAME 帧级多线程（16~24 核即积压 16~24 帧，在 10~30fps 下
+      // 造成 0.6s~2.0s 的解码管线延迟）。单核软解 1080p/1440p H.264 仅需 2~4ms，
+      // 零帧缓冲延迟，收到一帧即刻吐出一帧。
+      '-threads', '1',
       // 裸 H.264 Annex-B 无容器时间戳：显式指定 -f h264 与最小探测窗口，
       // 避免 avformat_find_stream_info 阻塞吞流（与 Android StreamDecoder 同根因）；
       // -vsync 0（passthrough）关闭 rawvideo 默认 CFR 时间戳同步——MediaCodec
@@ -610,6 +639,7 @@ export class ScreenStreamReceiver {
       '-f', 'h264',
       '-i', 'pipe:0',
       '-vsync', '0',
+      '-flush_packets', '1',
       '-f', 'rawvideo',
       '-pix_fmt', 'rgba',
       'pipe:1'
@@ -743,6 +773,24 @@ export class ScreenStreamReceiver {
     }
     const frameSize = this.expectedWidth * this.expectedHeight * 4
     if (frameSize <= 0) return
+    // 若 stdout 缓冲里已积压超过 1 帧完整画面（如渲染端忙或批量到达），
+    // 直接跳过旧帧，只组装并推送最新一帧，避免未压缩 RGBA 帧排队造成延迟累积。
+    while (this.frameBytes >= frameSize * 2) {
+      let skipped = 0
+      while (skipped < frameSize) {
+        const head = this.frameChunks[0]
+        const need = frameSize - skipped
+        if (head.length <= need) {
+          skipped += head.length
+          this.frameChunks.shift()
+        } else {
+          skipped += need
+          this.frameChunks[0] = head.subarray(need)
+        }
+      }
+      this.frameBytes -= frameSize
+      this.framesDecoded++
+    }
     // 每帧只拷贝一次：块列表累积，凑够一帧再一次性组装。
     // 此前每个 stdout 小块都 Buffer.concat 整段缓冲（1080p 帧约 9MB、30fps 约 276MB/s），
     // 反复拷贝拖慢 ffmpeg 的 stdout 消费，进而撑爆 stdin 积压触发丢帧花屏。

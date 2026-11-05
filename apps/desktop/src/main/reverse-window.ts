@@ -39,6 +39,9 @@ export class ReverseWindowManager {
   private peerId: string | null = null
   private displayName = ''
   private lastFrame: ReverseStreamFrame | null = null
+  private pendingFrame: ReverseStreamFrame | null = null
+  private frameTimer: NodeJS.Timeout | null = null
+  private lastFrameSentAt = 0
   /** Bug 1：窗口失焦/最小化时输入暂停（见 isInputPaused） */
   private inputPaused = false
 
@@ -92,10 +95,17 @@ export class ReverseWindowManager {
     return this.inputPaused
   }
 
-  /** 焦点/最小化变化时重算暂停态；变化才推送状态并通知主进程刷新采集模式 */
-  private refreshInputPaused(): void {
+  /**
+   * 渲染层主动发起点击/按键/输入时调用：说明用户正在与本窗口交互，
+   * 立即解除暂停（消除 Windows 焦点事件与指针/IME 候选框之间的竞态）。
+   */
+  markActive(): void {
     const win = this.win
-    const paused = !win || win.isDestroyed() || !win.isFocused() || win.isMinimized()
+    if (!win || win.isDestroyed() || win.isMinimized()) return
+    this.setInputPaused(false)
+  }
+
+  private setInputPaused(paused: boolean): void {
     if (paused === this.inputPaused) return
     this.inputPaused = paused
     log.info(`[reverse-window] 输入${paused ? '已暂停（窗口失焦/最小化）' : '已恢复（窗口获得焦点）'}`)
@@ -109,6 +119,7 @@ export class ReverseWindowManager {
       if (this.peerId === peerId) {
         if (this.win.isMinimized()) this.win.restore()
         this.win.focus()
+        this.setInputPaused(false)
         return this.win
       }
       // 不应发生：Host 只允许一路反向流。防御性关掉旧窗口再开新的
@@ -117,8 +128,8 @@ export class ReverseWindowManager {
     this.peerId = peerId
     this.displayName = displayName
     const win = new BrowserWindow({
-      width: 1000,
-      height: 700,
+      width: 1080,
+      height: 740,
       minWidth: 640,
       minHeight: 480,
       title: `LinkSpace - ${displayName}`,
@@ -134,7 +145,12 @@ export class ReverseWindowManager {
     // 移除默认应用菜单（含 editMenu 的 Ctrl+V/Ctrl+C/Ctrl+Z 原生快捷键拦截），
     // 确保画面窗口内的组合键直接落到渲染层 keydown 转发给平板。
     win.removeMenu()
-    win.on('ready-to-show', () => win.show())
+    win.on('ready-to-show', () => {
+      if (win.isDestroyed()) return
+      win.show()
+      win.focus()
+      this.setInputPaused(false)
+    })
     // 与主窗口同款防护：渲染层被注入后导航到攻击者页面是一律拦下的逃逸路径
     win.webContents.on('will-navigate', (event, url) => {
       event.preventDefault()
@@ -159,6 +175,11 @@ export class ReverseWindowManager {
       if (this.lastFrame) this.sendFrame(this.lastFrame)
     })
     win.on('closed', () => {
+      if (this.frameTimer) {
+        clearTimeout(this.frameTimer)
+        this.frameTimer = null
+      }
+      this.pendingFrame = null
       const peer = this.peerId
       this.win = null
       this.peerId = null
@@ -170,24 +191,48 @@ export class ReverseWindowManager {
       }
       // 窗口没了 = 输入暂停（无窗口可获焦）；通知主进程刷新采集模式，
       // 防止残留的反向会话继续走全局采集向平板转发
-      this.refreshInputPaused()
+      this.setInputPaused(true)
     })
-    // Bug 1：输入转发以本窗口获得焦点为门。最小化时 Electron 同时
-    // 发 blur，restore 后一般跟 focus；四者都走同一重算，幂等
-    win.on('focus', () => this.refreshInputPaused())
-    win.on('blur', () => this.refreshInputPaused())
-    win.on('minimize', () => this.refreshInputPaused())
-    win.on('restore', () => this.refreshInputPaused())
+    // Bug 1：输入转发以本窗口获得焦点为门。直接用事件本身设状态，
+    // 避免 Windows 上 focus/restore 回调瞬间 win.isFocused() 尚未更新导致卡在暂停态。
+    win.on('focus', () => {
+      if (!win.isDestroyed() && !win.isMinimized()) this.setInputPaused(false)
+    })
+    win.webContents.on('focus', () => {
+      if (!win.isDestroyed() && !win.isMinimized()) this.setInputPaused(false)
+    })
+    win.webContents.on('before-input-event', () => {
+      if (!win.isDestroyed() && !win.isMinimized()) this.setInputPaused(false)
+    })
+    win.on('restore', () => {
+      if (!win.isDestroyed()) this.setInputPaused(false)
+    })
+    win.on('minimize', () => this.setInputPaused(true))
+    win.on('blur', () => {
+      // 延迟 60ms 复核：Windows 中文输入法候选框弹出或内部焦点切换时可能瞬时触发 blur
+      setTimeout(() => {
+        if (!this.win || this.win.isDestroyed()) {
+          this.setInputPaused(true)
+          return
+        }
+        if (this.win.isMinimized() || !this.win.isFocused()) {
+          this.setInputPaused(true)
+        }
+      }, 60)
+    })
     this.win = win
-    // 初始态：窗口 show:false、尚未获得焦点 → 暂停；ready-to-show
-    // 获得焦点时 focus 事件会解除
-    this.refreshInputPaused()
+    this.setInputPaused(false)
     log.info(`[reverse-window] 平板画面窗口已打开（${displayName}）`)
     return win
   }
 
   /** 关窗口（不断流：'closed' 里按需停流）。幂等 */
   close(): void {
+    if (this.frameTimer) {
+      clearTimeout(this.frameTimer)
+      this.frameTimer = null
+    }
+    this.pendingFrame = null
     const win = this.win
     if (!win || win.isDestroyed()) {
       this.win = null
@@ -213,6 +258,27 @@ export class ReverseWindowManager {
   private sendFrame(frame: ReverseStreamFrame): void {
     const win = this.win
     if (!win || win.isDestroyed()) return
+    this.pendingFrame = frame
+    if (this.frameTimer) return
+    const now = Date.now()
+    const elapsed = now - this.lastFrameSentAt
+    // 16ms 节流合并（最高 ~60fps）：避免多帧 9MB~16MB RGBA 同时堆积在 Electron IPC 管道
+    if (elapsed >= 14) {
+      this.flushPendingFrame()
+    } else {
+      this.frameTimer = setTimeout(() => {
+        this.frameTimer = null
+        this.flushPendingFrame()
+      }, 14 - elapsed)
+    }
+  }
+
+  private flushPendingFrame(): void {
+    const frame = this.pendingFrame
+    this.pendingFrame = null
+    const win = this.win
+    if (!frame || !win || win.isDestroyed()) return
+    this.lastFrameSentAt = Date.now()
     win.webContents.send('reverse-stream:frame', {
       width: frame.width,
       height: frame.height,

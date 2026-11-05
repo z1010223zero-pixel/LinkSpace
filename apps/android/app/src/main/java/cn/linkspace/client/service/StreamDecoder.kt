@@ -116,6 +116,8 @@ class StreamDecoder(
             val opts = AVDictionary()
             avutil.av_dict_set(opts, "fflags", "nobuffer", 0)
             avutil.av_dict_set(opts, "flags", "low_delay", 0)
+            avutil.av_dict_set(opts, "probesize", "32", 0)
+            avutil.av_dict_set(opts, "analyzeduration", "0", 0)
             avformat.avformat_open_input(formatCtx, null as String?, fmt, opts)
             avutil.av_dict_free(opts)
             Log.i(TAG, "avformat_open_input 完成")
@@ -128,6 +130,10 @@ class StreamDecoder(
             val codecCtx = avcodec.avcodec_alloc_context3(codec)
             ctx = codecCtx
             avcodec.avcodec_parameters_to_context(codecCtx, codecpar)
+            // 开启 LOW_DELAY + FAST 并锁单线程（消除 FF_THREAD_FRAME 多核帧缓冲延迟）
+            codecCtx.flags(codecCtx.flags() or avcodec.AV_CODEC_FLAG_LOW_DELAY)
+            codecCtx.flags2(codecCtx.flags2() or avcodec.AV_CODEC_FLAG2_FAST)
+            codecCtx.thread_count(1)
             avcodec.avcodec_open2(codecCtx, codec, null as AVDictionary?)
             Log.i(TAG, "avcodec_open2 完成（${codecCtx.width()}x${codecCtx.height()}）")
 
@@ -139,6 +145,7 @@ class StreamDecoder(
             var uScratch: ByteArray? = null
             var vScratch: ByteArray? = null
             var rendered = 0L
+            var lastRenderMs = 0L
 
             fun drainAndRender() {
                 while (avcodec.avcodec_receive_frame(codecCtx, frame) >= 0) {
@@ -158,9 +165,15 @@ class StreamDecoder(
                         onSize(w, h)
                         Log.i(TAG, "FFmpeg 软解就绪: ${w}x${h}")
                     }
+                    // 若管道内已有更新的网络包排队且距上一帧渲染不足 35ms，仅完成 H.264 参考帧解码，
+                    // 跳过耗时的 200 万像素 YUV→RGB 转换，直接追赶最新包，消除积压延迟。
+                    val nowRender = System.currentTimeMillis()
+                    if (rendered > 0L && pipe.backlog() > 2048L && nowRender - lastRenderMs < 35L) {
+                        avutil.av_frame_unref(frame)
+                        continue
+                    }
                     val bitmap = bmp ?: return
-                    // YUV420P → RGB：平面按行 bulk 读入 scratch（消除每像素
-                    // JNI 调用，2M 次 get 是性能瓶颈），再走 Java 数组转换
+                    // YUV420P → RGB：平面按行 bulk 读入 scratch（偶行才读 UV，每次循环算 2 像素共用色度）
                     val yB = frame.data(0)
                     val uB = frame.data(1)
                     val vB = frame.data(2)
@@ -176,33 +189,63 @@ class StreamDecoder(
                         framePixels = px
                     }
                     var idx = 0
+                    val uCols = w shr 1
+                    val pairLimit = w and -2
                     for (row in 0 until h) {
                         yB.position(row.toLong() * yRow)
                         yB.get(yS, 0, w)
-                        val uvRow = row shr 1
-                        val uCols = w shr 1
-                        uB.position(uvRow.toLong() * uRow)
-                        uB.get(uS, 0, uCols)
-                        vB.position(uvRow.toLong() * vRow)
-                        vB.get(vS, 0, uCols)
-                        val yBase = row * w
+                        if ((row and 1) == 0) {
+                            val uvRow = row shr 1
+                            uB.position(uvRow.toLong() * uRow)
+                            uB.get(uS, 0, uCols)
+                            vB.position(uvRow.toLong() * vRow)
+                            vB.get(vS, 0, uCols)
+                        }
                         var col = 0
-                        while (col < w) {
-                            val y = ((yS[col].toInt() and 0xff) - 16) * 1192
-                            val uvi = col shr 1
+                        var uvi = 0
+                        while (col < pairLimit) {
                             val u = (uS[uvi].toInt() and 0xff) - 128
                             val v = (vS[uvi].toInt() and 0xff) - 128
-                            var r = (y + 1634 * v) shr 10
-                            var g = (y - 833 * v - 400 * u) shr 10
-                            var b = (y + 2066 * u) shr 10
-                            if (r < 0) r = 0 else if (r > 255) r = 255
-                            if (g < 0) g = 0 else if (g > 255) g = 255
-                            if (b < 0) b = 0 else if (b > 255) b = 255
-                            px[idx++] = -0x1000000 or (r shl 16) or (g shl 8) or b
-                            col++
+                            uvi++
+                            val rv = 1634 * v
+                            val guv = 833 * v + 400 * u
+                            val bu = 2066 * u
+
+                            val y0 = ((yS[col].toInt() and 0xff) - 16) * 1192
+                            var r0 = (y0 + rv) shr 10
+                            var g0 = (y0 - guv) shr 10
+                            var b0 = (y0 + bu) shr 10
+                            if (r0 < 0) r0 = 0 else if (r0 > 255) r0 = 255
+                            if (g0 < 0) g0 = 0 else if (g0 > 255) g0 = 255
+                            if (b0 < 0) b0 = 0 else if (b0 > 255) b0 = 255
+                            px[idx++] = -0x1000000 or (r0 shl 16) or (g0 shl 8) or b0
+
+                            val y1 = ((yS[col + 1].toInt() and 0xff) - 16) * 1192
+                            var r1 = (y1 + rv) shr 10
+                            var g1 = (y1 - guv) shr 10
+                            var b1 = (y1 + bu) shr 10
+                            if (r1 < 0) r1 = 0 else if (r1 > 255) r1 = 255
+                            if (g1 < 0) g1 = 0 else if (g1 > 255) g1 = 255
+                            if (b1 < 0) b1 = 0 else if (b1 > 255) b1 = 255
+                            px[idx++] = -0x1000000 or (r1 shl 16) or (g1 shl 8) or b1
+
+                            col += 2
+                        }
+                        if (col < w) {
+                            val u = (uS[uvi].toInt() and 0xff) - 128
+                            val v = (vS[uvi].toInt() and 0xff) - 128
+                            val y0 = ((yS[col].toInt() and 0xff) - 16) * 1192
+                            var r0 = (y0 + 1634 * v) shr 10
+                            var g0 = (y0 - 833 * v - 400 * u) shr 10
+                            var b0 = (y0 + 2066 * u) shr 10
+                            if (r0 < 0) r0 = 0 else if (r0 > 255) r0 = 255
+                            if (g0 < 0) g0 = 0 else if (g0 > 255) g0 = 255
+                            if (b0 < 0) b0 = 0 else if (b0 > 255) b0 = 255
+                            px[idx++] = -0x1000000 or (r0 shl 16) or (g0 shl 8) or b0
                         }
                     }
                     bitmap.setPixels(px, 0, w, 0, 0, w, h)
+                    lastRenderMs = nowRender
                     rendered++
                     if (rendered == 1L || rendered % 300 == 0L) {
                         Log.i(TAG, "已解码渲染 $rendered 帧")
@@ -368,7 +411,7 @@ class StreamDecoder(
         /** AVIO 回调共享缓冲 */
         private val avioScratch = ByteArray(256 * 1024)
 
-        /** 管道积压上限：超过即丢到最近关键帧（约 8-10s 的典型码率） */
-        private const val BACKLOG_CAP = 3L * 1024 * 1024
+        /** 管道积压上限：超过即丢到最近关键帧（约 0.5s 码率，避免积压出秒级画面延迟） */
+        private const val BACKLOG_CAP = 512L * 1024
     }
 }

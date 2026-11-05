@@ -40,12 +40,15 @@ const { peerId } = peerFromHash()
 const status = ref<ReverseStreamStatusView | null>(null)
 const notice = ref('')
 const canvasRef = ref<HTMLCanvasElement | null>(null)
+const stageRef = ref<HTMLDivElement | null>(null)
+const imeProxyRef = ref<HTMLTextAreaElement | null>(null)
 const qualityWidth = ref(1920)
 let ctx: CanvasRenderingContext2D | null = null
 let unsubFrame: (() => void) | null = null
 let unsubChanged: (() => void) | null = null
 let unsubNotice: (() => void) | null = null
 let pollTimer: number | null = null
+let noticeTimer: number | null = null
 
 // 工具栏默认折叠（ToDesk 式），点标题栏 chevron 展开；全屏时自动隐藏。
 const toolbarExpanded = ref(false)
@@ -53,12 +56,41 @@ const detailsExpanded = ref(false)
 const isFullscreen = ref(false)
 const toolbarVisible = computed(() => toolbarExpanded.value && !isFullscreen.value)
 
-// 中文输入模式（任务 2.3-3，协议 §4.9 模式互斥）：同一时刻只走一条通道。
-// pinyin（B1，默认）：键盘原始按键直通，平板自带输入法组字；
-// finished（B2/C）：电脑端组字完成后再发送成品文本/粘贴。
-const inputMode = ref<'pinyin' | 'finished'>('pinyin')
+// 输入模式：
+// - direct（默认，中英直输）：隐藏代理输入框跟随画布点击位置，直接唤起电脑本地中/英文输入法，
+//   选词或打字后即刻通过 input.text 提交到平板焦点输入框，功能键/方向键/退格/回车自动走按键事件；
+// - pinyin（按键直通）：键盘原始 VK 按键发给平板，由平板软键盘处理；
+// - finished（文本面板）：展开多行文本框或执行剪贴板粘贴回退。
+const inputMode = ref<'direct' | 'pinyin' | 'finished'>('direct')
 const finishedText = ref('')
 const pasteArmed = ref(false)
+const imePos = ref({ x: 40, y: 40 })
+let isComposing = false
+
+function setNotice(msg: string, autoClearMs = 4000): void {
+  if (noticeTimer !== null) {
+    window.clearTimeout(noticeTimer)
+    noticeTimer = null
+  }
+  notice.value = msg
+  if (msg && autoClearMs > 0) {
+    noticeTimer = window.setTimeout(() => {
+      notice.value = ''
+      noticeTimer = null
+    }, autoClearMs)
+  }
+}
+
+function dismissNotice(): void {
+  setNotice('', 0)
+}
+
+function focusImeProxy(): void {
+  if (inputMode.value === 'finished') return
+  const el = imeProxyRef.value
+  if (!el) return
+  el.focus({ preventScroll: true })
+}
 
 // 控制请求倒计时：状态里没有请求发起时间戳，自首次观测到 pending 起本地计时。
 // 服务端 TTL 30 秒（main/input/session.ts DEFAULT_REQUEST_TTL_MS），显示为约数。
@@ -128,7 +160,7 @@ async function loadStatus(): Promise<void> {
 function drawFrame(frame: ReverseStreamFrameView): void {
   const canvas = canvasRef.value
   if (!canvas) return
-  if (!ctx) ctx = canvas.getContext('2d')
+  if (!ctx) ctx = canvas.getContext('2d', { alpha: false, desynchronized: true })
   if (!ctx) return
   if (canvas.width !== frame.width || canvas.height !== frame.height) {
     canvas.width = frame.width
@@ -136,14 +168,19 @@ function drawFrame(frame: ReverseStreamFrameView): void {
   }
   const expected = frame.width * frame.height * 4
   if (frame.data.length !== expected) return
-  ctx.putImageData(new ImageData(new Uint8ClampedArray(frame.data), frame.width, frame.height), 0, 0)
+  const clamped = new Uint8ClampedArray(
+    frame.data.buffer as ArrayBuffer,
+    frame.data.byteOffset,
+    frame.data.byteLength
+  )
+  ctx.putImageData(new ImageData(clamped, frame.width, frame.height), 0, 0)
 }
 
 async function changeQuality(): Promise<void> {
-  notice.value = ''
+  dismissNotice()
   const res = await window.linkspace.setReverseStreamQuality(peerId, qualityWidth.value)
   if (!res.ok) {
-    notice.value = res.error.message
+    setNotice(res.error.message)
     await loadStatus()
   }
 }
@@ -156,27 +193,39 @@ async function disconnect(): Promise<void> {
 async function toggleClipboard(): Promise<void> {
   const next = !(status.value?.clipboardEnabled ?? false)
   const res = await window.linkspace.setClipboardEnabled(next)
-  if (!res.ok) notice.value = res.error.message
+  if (!res.ok) setNotice(res.error.message)
   await loadStatus()
 }
 
 async function retryInput(): Promise<void> {
-  notice.value = ''
+  dismissNotice()
   const res = await window.linkspace.retryReverseInput(peerId)
-  if (!res.ok) notice.value = res.error.message
+  if (!res.ok) setNotice(res.error.message)
   await loadStatus()
 }
 
-function setInputMode(mode: 'pinyin' | 'finished'): void {
+function setInputMode(mode: 'direct' | 'pinyin' | 'finished'): void {
   if (inputMode.value === mode) return
   pasteArmed.value = false
   inputMode.value = mode
-  // 切出拼音模式时平板上未选词的组字会被下一段成品提交结束（协议 §4.9），
-  // 先明说；切回拼音模式时上一段成品已提交完成，组字状态干净。
-  notice.value =
-    mode === 'finished'
-      ? '已切换到成品输入：平板上未选词的拼音组字将被结束'
-      : '拼音直通：电脑输入法请切英文，打拼音由平板输入法组字'
+  dismissNotice()
+  if (mode !== 'finished') {
+    window.setTimeout(() => focusImeProxy(), 0)
+  }
+}
+
+async function sendDirectText(text: string): Promise<void> {
+  if (!text) return
+  const res = await window.linkspace.sendReverseText(peerId, text).catch(() => null)
+  if (!res) {
+    setNotice('发送失败：主进程无响应')
+    return
+  }
+  if (!res.ok) {
+    setNotice(res.error.message)
+  } else if (notice.value) {
+    dismissNotice()
+  }
 }
 
 async function sendFinishedText(): Promise<void> {
@@ -184,14 +233,15 @@ async function sendFinishedText(): Promise<void> {
   if (!text) return
   const res = await window.linkspace.sendReverseText(peerId, text).catch(() => null)
   if (!res) {
-    notice.value = '发送失败：主进程无响应'
+    setNotice('发送失败：主进程无响应')
     return
   }
   if (!res.ok) {
-    notice.value = res.error.message
+    setNotice(res.error.message)
     return
   }
   finishedText.value = ''
+  dismissNotice()
 }
 
 async function sendPasteToTablet(): Promise<void> {
@@ -205,10 +255,11 @@ async function sendPasteToTablet(): Promise<void> {
   pasteArmed.value = false
   const res = await window.linkspace.sendReversePaste(peerId, text).catch(() => null)
   if (!res) {
-    notice.value = '发送失败：主进程无响应'
+    setNotice('发送失败：主进程无响应')
     return
   }
-  if (!res.ok) notice.value = res.error.message
+  if (!res.ok) setNotice(res.error.message)
+  else dismissNotice()
 }
 
 function onFullscreenChange(): void {
@@ -220,14 +271,16 @@ async function toggleFullscreen(): Promise<void> {
     if (document.fullscreenElement) await document.exitFullscreen()
     else await document.documentElement.requestFullscreen()
   } catch {
-    notice.value = '无法切换全屏：当前环境不支持全屏'
+    setNotice('无法切换全屏：当前环境不支持全屏')
   }
 }
 
 async function sendInput(input: ReverseWindowInput): Promise<void> {
   const res = await window.linkspace.sendReverseInput(input).catch(() => null)
   if (res && !res.ok && res.error.message !== '键鼠控制尚未建立：请等平板确认控制后再操作') {
-    notice.value = res.error.message
+    setNotice(res.error.message)
+  } else if (res?.ok && input.kind !== 'move' && notice.value) {
+    dismissNotice()
   }
 }
 
@@ -247,6 +300,15 @@ function toStreamPoint(e: PointerEvent): { x: number; y: number } | null {
   const y = (e.clientY - rect.top - offsetY) / scale
   if (x < 0 || y < 0 || x > canvas.width || y > canvas.height) return null
   return { x, y }
+}
+
+function updateImePosition(e: PointerEvent): void {
+  const stage = stageRef.value
+  if (!stage) return
+  const r = stage.getBoundingClientRect()
+  const x = Math.min(Math.max(16, e.clientX - r.left), Math.max(16, r.width - 24))
+  const y = Math.min(Math.max(16, e.clientY - r.top), Math.max(16, r.height - 24))
+  imePos.value = { x: Math.round(x), y: Math.round(y) }
 }
 
 function buttonOf(e: PointerEvent): 'left' | 'right' | 'middle' {
@@ -276,7 +338,9 @@ function onPointerMove(e: PointerEvent): void {
 
 function onPointerDown(e: PointerEvent): void {
   e.preventDefault()
-  canvasRef.value?.focus()
+  dismissNotice()
+  updateImePosition(e)
+  focusImeProxy()
   ;(e.target as Element).setPointerCapture?.(e.pointerId)
   const pt = toStreamPoint(e)
   if (!pt) return
@@ -295,6 +359,7 @@ function onPointerDown(e: PointerEvent): void {
 }
 
 function onPointerUp(e: PointerEvent): void {
+  focusImeProxy()
   const pt = toStreamPoint(e)
   if (!pt) return
   const canvas = canvasRef.value
@@ -314,17 +379,90 @@ function onWheel(e: WheelEvent): void {
   void sendInput({ kind: 'wheel', dx: -Math.sign(e.deltaX), dy: -Math.sign(e.deltaY) })
 }
 
-// ---------- 键盘：Chromium keyCode 在 Windows 上就是 Win32 VK 码 ----------
-// 中文输入（任务 2.3-3）：拼音直通模式下原始按键走 input.event，由平板
-// 自带输入法组字（B1）；成品输入模式下键盘门控，改走成品输入框（B2/C）
+// ---------- 本地输入法代理（中英直输模式） ----------
+function onImeCompositionStart(): void {
+  isComposing = true
+}
+
+function onImeCompositionEnd(e: CompositionEvent): void {
+  isComposing = false
+  const el = imeProxyRef.value
+  const text = (el ? el.value : '') || e.data || ''
+  if (el) el.value = ''
+  if (text && inputMode.value === 'direct') {
+    void sendDirectText(text)
+  }
+}
+
+function onImeInput(): void {
+  if (isComposing) return
+  const el = imeProxyRef.value
+  if (!el) return
+  const text = el.value
+  el.value = ''
+  if (text && inputMode.value === 'direct') {
+    void sendDirectText(text)
+  }
+}
+
+function onImePaste(e: ClipboardEvent): void {
+  if (inputMode.value === 'finished') return
+  const text = e.clipboardData?.getData('text/plain') ?? ''
+  if (!text) return
+  e.preventDefault()
+  if (imeProxyRef.value) imeProxyRef.value.value = ''
+  void sendDirectText(text)
+}
+
+// ---------- 键盘：支持中英直输（direct）与按键直通（pinyin） ----------
 function onKey(e: KeyboardEvent, down: boolean): void {
-  // 成品输入模式下键盘不再直通按键（B1/B2 互斥，协议 §4.9）：打字走成品输入框
-  if (inputMode.value !== 'pinyin') return
-  const tag = (e.target as HTMLElement | null)?.tagName
-  if (tag === 'SELECT' || tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'BUTTON') return
-  if (down && e.repeat) return
+  if (inputMode.value === 'finished') return
+  const target = e.target as HTMLElement | null
+  const isProxy = target === imeProxyRef.value
+  const tag = target?.tagName
+  if (!isProxy && (tag === 'SELECT' || tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'BUTTON')) return
+
+  // IME 正在组字（如中文拼音候选阶段，VK_PROCESSKEY=229）时交给浏览器输入法处理
+  if (e.isComposing || isComposing || e.keyCode === 229) return
+
   const vk = e.keyCode
   if (vk < 0 || vk > 255) return
+
+  if (inputMode.value === 'pinyin') {
+    if (down && e.repeat) return
+    e.preventDefault()
+    void sendInput({ kind: 'key', vk, down })
+    return
+  }
+
+  // direct（默认中英直输）：
+  // 1. Ctrl+V / Cmd+V 放行给 paste 事件直接发文本
+  if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === 'v' || e.key === 'V')) {
+    if (!isProxy) focusImeProxy()
+    return
+  }
+  // 2. 其他带 Ctrl/Alt/Meta 的组合键走原始按键（如 Ctrl+A/C/X/Z）
+  if (e.ctrlKey || e.altKey || e.metaKey) {
+    if (down && e.repeat) return
+    e.preventDefault()
+    void sendInput({ kind: 'key', vk, down })
+    return
+  }
+  // 3. 普通可打印单字符（英文字母、数字、空格、标点）：交给隐藏 imeProxy 的 input 事件走 input.text，
+  //    保证大小写和符号与电脑端完全一致
+  if (e.key.length === 1) {
+    if (!isProxy && down) {
+      focusImeProxy()
+      // 若焦点刚切过去导致本次按键未落入 textarea，直接补发该字符
+      void sendDirectText(e.key)
+      e.preventDefault()
+    }
+    return
+  }
+  // 4. 单独按 Shift / CapsLock 用于切换电脑本地中英输入法，不向平板误发修饰键
+  if (vk === 16 || vk === 17 || vk === 18 || vk === 20) return
+
+  // 5. 控制键与导航键（Backspace、Enter、Tab、Esc、方向键、Delete、Home/End 等）走按键事件
   e.preventDefault()
   void sendInput({ kind: 'key', vk, down })
 }
@@ -337,6 +475,11 @@ function onKeyUp(e: KeyboardEvent): void {
   onKey(e, false)
 }
 
+function onWindowFocus(): void {
+  dismissNotice()
+  focusImeProxy()
+}
+
 onMounted(() => {
   void loadStatus()
   unsubFrame = window.linkspace.onReverseStreamFrame(drawFrame)
@@ -346,7 +489,7 @@ onMounted(() => {
   })
   // 平板回的输入失败（协议 4.9 input.error，主进程已译成可执行提示）
   unsubNotice = window.linkspace.onReverseStreamNotice((msg) => {
-    notice.value = msg
+    setNotice(msg)
   })
   pollTimer = window.setInterval(() => {
     now.value = Date.now()
@@ -355,6 +498,8 @@ onMounted(() => {
   document.addEventListener('fullscreenchange', onFullscreenChange)
   window.addEventListener('keydown', onKeyDown)
   window.addEventListener('keyup', onKeyUp)
+  window.addEventListener('focus', onWindowFocus)
+  window.setTimeout(() => focusImeProxy(), 50)
 })
 
 onBeforeUnmount(() => {
@@ -362,19 +507,37 @@ onBeforeUnmount(() => {
   unsubChanged?.()
   unsubNotice?.()
   if (pollTimer !== null) window.clearInterval(pollTimer)
+  if (noticeTimer !== null) window.clearTimeout(noticeTimer)
   if (moveRaf) cancelAnimationFrame(moveRaf)
   document.removeEventListener('fullscreenchange', onFullscreenChange)
   window.removeEventListener('keydown', onKeyDown)
   window.removeEventListener('keyup', onKeyUp)
+  window.removeEventListener('focus', onWindowFocus)
 })
 </script>
 
 <template>
   <div class="rs-view theme-dark">
     <header class="rs-titlebar">
-      <span class="rs-title">{{ peerName }} 的屏幕</span>
-      <span v-if="qualityLabel" class="rs-quality-badge">{{ qualityLabel }}</span>
+      <span class="rs-title">{{ peerName }}</span>
+      <span class="rs-status-inline">
+        <template v-if="!streamRunning">等待平板确认录屏…</template>
+        <template v-else>{{ streamSize }} · {{ inputLabel }}</template>
+      </span>
+      <button v-if="showRetry" class="btn btn--sm rs-inline-btn" @click="retryInput">重试控制</button>
+      <button
+        v-if="stats"
+        class="rs-details-toggle"
+        :aria-expanded="detailsExpanded"
+        @click="detailsExpanded = !detailsExpanded"
+      >
+        {{ detailsExpanded ? stats : '详情' }}
+      </button>
       <span class="topbar__spacer" />
+      <span class="rs-mode-pill" @click="toolbarExpanded = !toolbarExpanded" title="点击展开工具栏切换输入模式">
+        {{ inputMode === 'direct' ? '中英直输' : inputMode === 'pinyin' ? '按键直通' : '文本面板' }}
+      </span>
+      <span v-if="qualityLabel" class="rs-quality-badge">{{ qualityLabel }}</span>
       <button
         v-if="!isFullscreen"
         class="rs-chevron"
@@ -386,10 +549,6 @@ onBeforeUnmount(() => {
       </button>
       <button class="rs-close" title="关闭窗口并结束控制会话" @click="disconnect">×</button>
     </header>
-
-    <div v-if="status?.inputPaused" class="banner banner--warn rs-paused">
-      窗口未获得焦点，输入已暂停 — 点一下本窗口恢复控制（鼠标/键盘不会同步到平板）
-    </div>
 
     <div v-if="toolbarVisible" class="rs-toolbar">
       <div class="rs-toolbar__group">
@@ -408,19 +567,27 @@ onBeforeUnmount(() => {
         <span class="rs-toolbar__group-label">输入</span>
         <button
           class="btn btn--sm"
+          :class="{ 'btn--active': inputMode === 'direct' }"
+          title="中英直输（推荐）：直接在画面上用电脑输入法打中文/英文，选词即上屏"
+          @click="setInputMode('direct')"
+        >
+          中英直输
+        </button>
+        <button
+          class="btn btn--sm"
           :class="{ 'btn--active': inputMode === 'pinyin' }"
-          title="拼音直通（默认）：键盘原始按键发到平板，由平板自带输入法组字、弹候选栏"
+          title="按键直通：将键盘原始按键发到平板，由平板自带输入法组字"
           @click="setInputMode('pinyin')"
         >
-          拼音直通
+          按键直通
         </button>
         <button
           class="btn btn--sm"
           :class="{ 'btn--active': inputMode === 'finished' }"
-          title="成品输入：在电脑端用中文输入法组字完成后发送上屏"
+          title="文本面板：展开长文本编辑框或使用剪贴板粘贴回退"
           @click="setInputMode('finished')"
         >
-          成品输入
+          文本面板
         </button>
       </div>
       <div class="rs-toolbar__group">
@@ -433,52 +600,45 @@ onBeforeUnmount(() => {
         >
           <span class="badge__dot" />剪贴板：{{ status?.clipboardEnabled ? '开' : '关' }}
         </button>
-        <button v-if="showRetry" class="btn btn--sm" @click="retryInput">重试控制</button>
       </div>
       <div class="rs-toolbar__group rs-toolbar__group--danger">
-        <span class="rs-toolbar__group-label">断开</span>
         <button class="btn btn--sm btn--danger" @click="disconnect">断开</button>
       </div>
     </div>
 
-    <div v-if="inputMode === 'pinyin' && streamRunning" class="rs-input-hint">
-      拼音直通：电脑输入法请切英文，打拼音由平板输入法组字、弹候选栏；空格/数字键选词。
-    </div>
     <div v-if="inputMode === 'finished'" class="rs-finished">
       <textarea
         v-model="finishedText"
         class="rs-finished__input"
         rows="2"
-        placeholder="在电脑端用中文输入法组字完成后，点发送上屏（走 input.text，超长自动分段）"
+        placeholder="输入或粘贴多行文本后点发送上屏（走 input.text，超长自动分段）"
       />
       <div class="rs-finished__actions">
         <button class="btn btn--sm" :disabled="!finishedText" @click="sendFinishedText">发送到平板</button>
         <button class="btn btn--sm" :disabled="!finishedText" @click="sendPasteToTablet">
           {{ pasteArmed ? '确认覆盖平板剪贴板并发送' : '粘贴到平板（回退）' }}
         </button>
+        <button class="btn btn--sm" @click="setInputMode('direct')">收起面板</button>
       </div>
     </div>
 
-    <div v-if="notice" class="banner banner--warn">{{ notice }}</div>
-
-    <div class="rs-status">
-      <span v-if="!streamRunning">等待平板确认录屏…（平板点同意后画面出现）</span>
-      <span v-else>{{ streamSize }} · {{ inputLabel }}</span>
-      <button
-        v-if="stats"
-        class="rs-details-toggle"
-        :aria-expanded="detailsExpanded"
-        @click="detailsExpanded = !detailsExpanded"
-      >
-        详情 {{ detailsExpanded ? '▴' : '▾' }}
-      </button>
-    </div>
-    <div v-if="detailsExpanded && stats" class="rs-details">{{ stats }}</div>
-
-    <div class="rs-stage">
+    <div ref="stageRef" class="rs-stage">
+      <textarea
+        ref="imeProxyRef"
+        class="rs-ime-proxy"
+        :style="{ left: `${imePos.x}px`, top: `${imePos.y}px` }"
+        autocomplete="off"
+        autocorrect="off"
+        autocapitalize="off"
+        spellcheck="false"
+        @compositionstart="onImeCompositionStart"
+        @compositionend="onImeCompositionEnd"
+        @input="onImeInput"
+        @paste="onImePaste"
+      />
       <canvas
         ref="canvasRef"
-        :class="['rs-canvas', { 'rs-canvas--paused': status?.inputPaused }]"
+        class="rs-canvas"
         tabindex="0"
         @pointerdown="onPointerDown"
         @pointermove="onPointerMove"
@@ -487,6 +647,10 @@ onBeforeUnmount(() => {
         @wheel.prevent="onWheel"
         @contextmenu.prevent
       />
+      <div v-if="notice" class="rs-toast" role="status">
+        <span class="rs-toast__text">{{ notice }}</span>
+        <button class="rs-toast__close" title="关闭提示" @click="dismissNotice">×</button>
+      </div>
       <div v-if="!streamRunning" class="rs-empty">
         <div class="empty__title">暂无画面</div>
         <div class="empty__hint">
@@ -495,11 +659,6 @@ onBeforeUnmount(() => {
         </div>
       </div>
     </div>
-
-    <footer class="rs-footer">
-      <span>点按 / 滑动 / 滚轮 / 键盘直接落到平板对应位置；右键返回、中键回主页；中文输入：拼音直通（电脑切英文）或成品输入（电脑端组字后发送）。</span>
-      <span>关闭窗口即结束控制会话；全屏时按 Esc 退出全屏。</span>
-    </footer>
   </div>
 </template>
 
@@ -514,16 +673,28 @@ onBeforeUnmount(() => {
 .rs-titlebar {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 8px 12px;
+  gap: 8px;
+  padding: 6px 12px;
   background: var(--surface);
   border-bottom: 1px solid var(--border);
 }
 .rs-title {
   font-weight: 600;
-  font-size: 14px;
+  font-size: 13px;
   white-space: nowrap;
 }
+.rs-status-inline {
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.rs-inline-btn {
+  padding: 2px 8px;
+  font-size: 12px;
+}
+.rs-mode-pill,
 .rs-quality-badge {
   padding: 2px 8px;
   border: 1px solid var(--border);
@@ -532,6 +703,13 @@ onBeforeUnmount(() => {
   color: var(--text-secondary);
   font-size: 12px;
   white-space: nowrap;
+}
+.rs-mode-pill {
+  cursor: pointer;
+}
+.rs-mode-pill:hover {
+  color: var(--text);
+  border-color: var(--accent);
 }
 .rs-chevron,
 .rs-close {
@@ -587,30 +765,15 @@ onBeforeUnmount(() => {
   font-size: 13px;
   white-space: nowrap;
 }
-.rs-status {
-  display: flex;
-  gap: 12px;
-  align-items: center;
-  padding: 6px 12px;
-  font-size: 12px;
-  color: var(--text-secondary);
-  background: var(--surface-2);
-}
 .rs-details-toggle {
-  margin-left: auto;
-  padding: 0;
+  padding: 0 4px;
   border: none;
   background: transparent;
   color: var(--text-secondary);
   font-family: inherit;
   font-size: 12px;
   cursor: pointer;
-}
-.rs-details {
-  padding: 4px 12px;
-  font-size: 12px;
-  color: var(--text-secondary);
-  background: var(--surface-2);
+  white-space: nowrap;
 }
 .rs-stage {
   position: relative;
@@ -620,6 +783,23 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: center;
   overflow: hidden;
+  background: #000;
+}
+.rs-ime-proxy {
+  position: absolute;
+  width: 2px;
+  height: 2px;
+  padding: 0;
+  margin: 0;
+  border: none;
+  outline: none;
+  resize: none;
+  overflow: hidden;
+  opacity: 0;
+  color: transparent;
+  background: transparent;
+  pointer-events: none;
+  z-index: 2;
 }
 .rs-canvas {
   max-width: 100%;
@@ -631,13 +811,39 @@ onBeforeUnmount(() => {
   /* 画面黑边保持纯黑（视频区，非主题色） */
   background: #000;
 }
-.rs-canvas:focus {
-  outline: 1px solid var(--accent);
-  outline-offset: -1px;
+.rs-toast {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: min(90%, 640px);
+  padding: 6px 12px;
+  border-radius: 8px;
+  background: rgba(24, 28, 34, 0.92);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: 12px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
 }
-/* Bug 1：输入暂停时画面变暗，与顶部横条一起提示“输入已暂停” */
-.rs-canvas--paused {
-  opacity: 0.55;
+.rs-toast__text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.rs-toast__close {
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
+  cursor: pointer;
+}
+.rs-toast__close:hover {
+  color: var(--text);
 }
 .rs-empty {
   position: absolute;
@@ -650,13 +856,6 @@ onBeforeUnmount(() => {
   pointer-events: none;
   text-align: center;
   padding: 0 24px;
-}
-.rs-input-hint {
-  padding: 4px 12px;
-  font-size: 12px;
-  color: var(--text-secondary);
-  background: var(--surface-2);
-  border-bottom: 1px solid var(--border);
 }
 .rs-finished {
   padding: 8px 12px;
