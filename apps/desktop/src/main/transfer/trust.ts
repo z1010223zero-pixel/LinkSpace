@@ -26,6 +26,11 @@ export interface TrustEntry {
   fingerprint: string
   scope: TrustScope[]
   trustedAt: number
+  /**
+   * 免二次确认控制授权截止时间戳（毫秒）；
+   * -1 表示永久免确认，0 或 undefined 表示每次需确认，>0 表示截止时间。
+   */
+  noConfirmUntil?: number
 }
 
 export interface TrustStoreOptions {
@@ -103,18 +108,50 @@ export class TrustStore {
 
   /** 新增或更新信任。重复 approve 同一设备时刷新指纹与范围 */
   grant(entry: Omit<TrustEntry, 'trustedAt'> & { trustedAt?: number }): void {
+    const idx = this.entries.findIndex((e) => e.deviceId === entry.deviceId)
+    const prev = idx >= 0 ? this.entries[idx] : undefined
     const next: TrustEntry = {
       deviceId: entry.deviceId,
       displayName: entry.displayName,
       deviceType: entry.deviceType,
       fingerprint: entry.fingerprint,
       scope: entry.scope.length ? entry.scope : this.defaultScope,
-      trustedAt: entry.trustedAt ?? Date.now()
+      trustedAt: entry.trustedAt ?? Date.now(),
+      noConfirmUntil: entry.noConfirmUntil !== undefined ? entry.noConfirmUntil : prev?.noConfirmUntil
     }
-    const idx = this.entries.findIndex((e) => e.deviceId === entry.deviceId)
     if (idx >= 0) this.entries[idx] = next
     else this.entries.push(next)
     this.persist()
+  }
+
+  /** 对端是否在免确认控制有效期内（需同时具备 control scope） */
+  isNoConfirmValid(deviceId: string, now: number = Date.now()): boolean {
+    const entry = this.entries.find((e) => e.deviceId === deviceId)
+    if (!entry || !entry.scope.includes('control')) return false
+    const until = entry.noConfirmUntil ?? 0
+    return until === -1 || until > now
+  }
+
+  /**
+   * 设置免二次确认控制有效期：
+   * - durationMs === -1：永久有效
+   * - durationMs <= 0：清除免确认（恢复每次询问）
+   * - durationMs > 0：从 now 起有效 durationMs 毫秒，同时自动确保包含 control scope
+   */
+  setNoConfirmDuration(deviceId: string, durationMs: number, now: number = Date.now()): boolean {
+    const idx = this.entries.findIndex((e) => e.deviceId === deviceId)
+    if (idx < 0) return false
+    const cur = this.entries[idx]
+    const nextUntil = durationMs === -1 ? -1 : durationMs > 0 ? now + durationMs : 0
+    const nextScope =
+      nextUntil !== 0 && !cur.scope.includes('control') ? [...cur.scope, 'control' as const] : cur.scope
+    this.entries[idx] = {
+      ...cur,
+      scope: nextScope,
+      noConfirmUntil: nextUntil
+    }
+    this.persist()
+    return true
   }
 
   /** 撤销信任。幂等，撤销后该设备所有能力立即失效 */

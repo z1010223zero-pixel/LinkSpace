@@ -119,8 +119,11 @@ const api: LinkSpaceApi = {
   requestInputControl: (peerId: string) =>
     ipcRenderer.invoke('input:request', peerId) as Promise<IpcResult<void>>,
 
-  approveInputControl: (sessionId: string) =>
-    ipcRenderer.invoke('input:approve', sessionId) as Promise<IpcResult<void>>,
+  approveInputControl: (sessionId: string, durationMs?: number) =>
+    ipcRenderer.invoke('input:approve', sessionId, durationMs) as Promise<IpcResult<void>>,
+
+  setNoConfirmDuration: (deviceId: string, durationMs: number) =>
+    ipcRenderer.invoke('trust:setNoConfirmDuration', deviceId, durationMs) as Promise<IpcResult<void>>,
 
   denyInputControl: (sessionId: string) =>
     ipcRenderer.invoke('input:deny', sessionId) as Promise<IpcResult<void>>,

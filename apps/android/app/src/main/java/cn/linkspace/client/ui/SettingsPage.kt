@@ -43,10 +43,12 @@ fun SettingsPage(
     onRenameClick: () -> Unit,
     onExitConfirm: () -> Unit,
     versionName: String,
-    /** 信任清单：勾选过“信任此设备”的已配对设备（免确认标记，Bug 2） */
+    /** 信任清单：处于免确认有效期内的已配对设备（Bug 2） */
     trustedNoConfirm: List<TrustStore.Entry> = emptyList(),
     onRevokeNoConfirm: (String) -> Unit = {},
     onClearNoConfirm: () -> Unit = {},
+    allTrustedDevices: List<TrustStore.Entry> = emptyList(),
+    onSetNoConfirmDuration: (String, Long) -> Unit = { _, _ -> },
     modifier: Modifier = Modifier,
 ) {
     var showExitConfirm by remember { mutableStateOf(false) }
@@ -127,50 +129,79 @@ fun SettingsPage(
             }
         }
 
-        SectionTitle("信任清单")
+        SectionTitle("免确认有效期与信任清单")
         Card(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(LinkSpaceSpacing.lg)) {
                 Text(
-                    "勾选过“信任此设备”的电脑再次请求控制或查看屏幕时，不再弹出 LinkSpace 确认框（系统录屏授权框仍会弹出）。信任默认永久有效；撤销只取消“不再询问”，设备仍保持配对。",
+                    "在免确认有效期内的电脑请求控制或查看屏幕时，不再弹出确认框并直接复用录屏通道。你可随时调整每台已配对电脑的有效期（每次询问 / 1天 / 3天 / 7天 / 30天 / 永久）。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                if (trustedNoConfirm.isEmpty()) {
+                val devicesToShow = if (allTrustedDevices.isNotEmpty()) allTrustedDevices else trustedNoConfirm
+                if (devicesToShow.isEmpty()) {
                     Text(
-                        "暂无信任设备：首次确认框里勾选“信任此设备，以后不再询问”即可加入。",
+                        "暂无已配对设备。",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(top = LinkSpaceSpacing.sm),
                     )
                 } else {
-                    trustedNoConfirm.forEach { entry ->
-                        Row(
-                            Modifier.padding(top = LinkSpaceSpacing.md),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Column(Modifier.weight(1f)) {
-                                Text(entry.displayName, style = MaterialTheme.typography.bodyMedium)
-                                Text(
-                                    "${deviceTypeLabel(entry.deviceType)} · ${entry.deviceId.take(12)}…",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
+                    val nowMs = System.currentTimeMillis()
+                    devicesToShow.forEach { entry ->
+                        val statusText = when {
+                            entry.noConfirmUntil == -1L -> "永久免确认"
+                            entry.noConfirmUntil > nowMs -> {
+                                val remHours = (entry.noConfirmUntil - nowMs) / 3_600_000L
+                                if (remHours >= 24) "免确认还剩 ${(remHours + 12) / 24} 天"
+                                else "免确认还剩 ${remHours.coerceAtLeast(1)} 小时"
                             }
-                            Spacer(Modifier.width(LinkSpaceSpacing.md))
-                            OutlinedButton(onClick = { onRevokeNoConfirm(entry.deviceId) }) {
-                                Text("撤销")
+                            else -> "每次询问"
+                        }
+                        Column(Modifier.padding(top = LinkSpaceSpacing.md)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Column(Modifier.weight(1f)) {
+                                    Text(entry.displayName, style = MaterialTheme.typography.bodyMedium)
+                                    Text(
+                                        "${deviceTypeLabel(entry.deviceType)} · $statusText",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                                if (entry.noConfirmUntil == -1L || entry.noConfirmUntil > nowMs) {
+                                    OutlinedButton(onClick = { onRevokeNoConfirm(entry.deviceId) }) {
+                                        Text("恢复询问")
+                                    }
+                                }
+                            }
+                            Row(
+                                Modifier.padding(top = LinkSpaceSpacing.xs),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                listOf(
+                                    "1天" to 1L * 86_400_000L,
+                                    "3天" to 3L * 86_400_000L,
+                                    "7天" to 7L * 86_400_000L,
+                                    "30天" to 30L * 86_400_000L,
+                                    "永久" to -1L
+                                ).forEach { (label, dur) ->
+                                    TextButton(onClick = { onSetNoConfirmDuration(entry.deviceId, dur) }) {
+                                        Text(label)
+                                    }
+                                }
                             }
                         }
                     }
-                    OutlinedButton(
-                        onClick = { showClearTrustConfirm = true },
-                        colors = ButtonDefaults.outlinedButtonColors(
-                            contentColor = LinkSpaceStatusColors.Danger,
-                        ),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(top = LinkSpaceSpacing.md),
-                    ) { Text("清空全部信任") }
+                    if (trustedNoConfirm.isNotEmpty()) {
+                        OutlinedButton(
+                            onClick = { showClearTrustConfirm = true },
+                            colors = ButtonDefaults.outlinedButtonColors(
+                                contentColor = LinkSpaceStatusColors.Danger,
+                            ),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(top = LinkSpaceSpacing.md),
+                        ) { Text("清空全部免确认授权") }
+                    }
                 }
             }
         }

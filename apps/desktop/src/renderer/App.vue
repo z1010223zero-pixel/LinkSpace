@@ -180,10 +180,11 @@ async function requestReverseControl(deviceId: string): Promise<void> {
   })
 }
 
-async function approveControl(sessionId: string): Promise<void> {
-  const res = await window.linkspace.approveInputControl(sessionId)
+async function approveControl(sessionId: string, durationMs?: number): Promise<void> {
+  const res = await window.linkspace.approveInputControl(sessionId, durationMs)
   if (!res.ok) pushNotice(res.error.message)
   await loadInputState()
+  await loadTrusted()
 }
 
 async function denyControl(sessionId: string): Promise<void> {
@@ -642,6 +643,25 @@ function detailSetEdge(edge: DeviceEdge | ''): void {
   void setEdge(t.deviceId, edge)
 }
 
+async function detailSetNoConfirm(durationMs: number): Promise<void> {
+  const t = selectedTrusted.value
+  if (!t) return
+  const res = await window.linkspace.setNoConfirmDuration(t.deviceId, durationMs)
+  if (!res.ok) {
+    pushNotice(res.error.message)
+    return
+  }
+  pushNotice(
+    durationMs === 0
+      ? `已恢复「${t.displayName}」每次控制需确认`
+      : durationMs === -1
+        ? `已设置「${t.displayName}」永久免确认控制`
+        : `已设置「${t.displayName}」${Math.round(durationMs / (24 * 3600 * 1000))} 天内免确认控制`,
+    'info'
+  )
+  await loadTrusted()
+}
+
 function detailRevoke(): void {
   const t = selectedTrusted.value
   if (!t) return
@@ -847,9 +867,13 @@ const banners = computed<BannerItem[]>(() => {
       id: 'pending',
       level: 'warn',
       text: `${pending.displayName} 请求控制本机的鼠标和键盘。`,
-      hint: '同意后对方可操作本机键鼠，随时可点「拔掉」终止；授权仅本次会话有效，配对本身不授予该权限。',
+      hint: '可选择仅本次同意，或设置免确认有效期（有效期内同一设备再次连入无需重复同意）；随时可点「拔掉」终止。',
       actions: [
-        { id: 'approve', label: '同意', kind: 'primary', busy: busy.value['approve'] },
+        { id: 'approve', label: '仅本次同意', kind: 'primary', busy: busy.value['approve'] },
+        { id: 'approve:3d', label: '3天免确认', kind: 'primary', busy: busy.value['approve'] },
+        { id: 'approve:7d', label: '7天免确认', kind: 'primary', busy: busy.value['approve'] },
+        { id: 'approve:30d', label: '30天免确认', kind: 'primary', busy: busy.value['approve'] },
+        { id: 'approve:forever', label: '永久免确认', kind: 'primary', busy: busy.value['approve'] },
         { id: 'deny', label: '拒绝', kind: 'danger', busy: busy.value['deny'] }
       ]
     })
@@ -898,9 +922,20 @@ async function onBannerAction(bannerId: string, actionId: string): Promise<void>
   const pending = inputState.value?.pending
   switch (actionId) {
     case 'approve':
+    case 'approve:3d':
+    case 'approve:7d':
+    case 'approve:30d':
+    case 'approve:forever':
       if (pending) {
+        const durMap: Record<string, number | undefined> = {
+          approve: undefined,
+          'approve:3d': 3 * 24 * 3600 * 1000,
+          'approve:7d': 7 * 24 * 3600 * 1000,
+          'approve:30d': 30 * 24 * 3600 * 1000,
+          'approve:forever': -1
+        }
         await withBusy('approve', async () => {
-          await approveControl(pending.sessionId)
+          await approveControl(pending.sessionId, durMap[actionId])
         })
       }
       break
@@ -1428,6 +1463,7 @@ onBeforeUnmount(() => {
                   @send-file="detailSendFile"
                   @toggle-clipboard="toggleClipboard"
                   @set-edge="detailSetEdge"
+                  @set-no-confirm="detailSetNoConfirm"
                   @revoke="detailRevoke"
                   @stop-reverse="detailStopReverse"
                 />

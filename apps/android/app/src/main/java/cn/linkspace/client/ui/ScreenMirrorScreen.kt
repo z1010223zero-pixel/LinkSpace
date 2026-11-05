@@ -8,6 +8,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -98,17 +99,26 @@ fun ScreenMirrorScreen(
                 .background(Color.Black)
                 .onSizeChanged { containerPx = it }
         ) {
+            var streamViewRef by remember { mutableStateOf<StreamView?>(null) }
+            val cursorFraction by service.cursorFraction.collectAsStateWithLifecycle()
+            LaunchedEffect(cursorFraction, streamViewRef) {
+                streamViewRef?.setCursor(cursorFraction?.first ?: -1f, cursorFraction?.second ?: -1f)
+            }
             if (videoRect.width > 0 && videoRect.height > 0) {
                 // 自绘 StreamView：解码器（ByteBuffer 模式）产出 Bitmap 直投，
                 // 无 surface 生命周期——本 ROM surface 模式解码活锁，见
                 // StreamDecoder 类注释（2026-10-31 绿块排障定论）
-                val cursorFraction by service.cursorFraction.collectAsStateWithLifecycle()
                 AndroidView(
                     factory = { ctx ->
-                        StreamView(ctx).also { service.attachStreamView(it) }
+                        StreamView(ctx).also {
+                            streamViewRef = it
+                            service.attachStreamView(it)
+                        }
                     },
-                    update = { it.setCursor(cursorFraction?.first ?: -1f, cursorFraction?.second ?: -1f) },
-                    onRelease = { service.attachStreamView(null) },
+                    onRelease = {
+                        streamViewRef = null
+                        service.attachStreamView(null)
+                    },
                     modifier = Modifier
                         .align(Alignment.Center)
                         .size(
@@ -132,8 +142,7 @@ fun ScreenMirrorScreen(
                             // 同一空间，不是对端的屏幕/解码尺寸（此前误用
                             // remoteScreen，落点按倍数缩放全偏，用户实测）
                             val sessionScreen = ownScreen
-                            // move 攒批（触控板同款：16 条或 30ms 合并），点按/
-                            // 拖拽/滚轮前 flush 保序
+                            // move 合并到最新坐标，8ms（120Hz）节流下发，消除排队滞后
                             val moveBatch = mutableListOf<org.json.JSONObject>()
                             var lastFlushAt = 0L
                             fun flushMoves() {
@@ -180,13 +189,16 @@ fun ScreenMirrorScreen(
                                         if (!relativeMode) {
                                             val vx = (c.position.x - videoRect.left).coerceIn(0f, videoRect.width)
                                             val vy = (c.position.y - videoRect.top).coerceIn(0f, videoRect.height)
+                                            val fx = (vx / videoRect.width).coerceIn(0f, 1f)
+                                            val fy = (vy / videoRect.height).coerceIn(0f, 1f)
+                                            streamViewRef?.setCursor(fx, fy)
                                             sendRemote(
                                                 controller,
                                                 listOf(
                                                     InputController.move(
-                                                        (vx / videoRect.width * sessionScreen.w).toInt()
+                                                        (fx * sessionScreen.w).toInt()
                                                             .coerceIn(0, sessionScreen.w - 1),
-                                                        (vy / videoRect.height * sessionScreen.h).toInt()
+                                                        (fy * sessionScreen.h).toInt()
                                                             .coerceIn(0, sessionScreen.h - 1)
                                                     )
                                                 )
@@ -209,22 +221,31 @@ fun ScreenMirrorScreen(
                                                 .coerceIn(0f, (sessionScreen.w - 1).toFloat())
                                             relY = (relY + delta.y * 2.5f)
                                                 .coerceIn(0f, (sessionScreen.h - 1).toFloat())
+                                            streamViewRef?.setCursor(
+                                                (relX / sessionScreen.w).coerceIn(0f, 1f),
+                                                (relY / sessionScreen.h).coerceIn(0f, 1f)
+                                            )
+                                            moveBatch.clear()
                                             moveBatch.add(InputController.move(relX.toInt(), relY.toInt()))
                                         } else {
                                             // 绝对模式：黑边 clamp 后触点按比例进会话空间
                                             val vx = (c.position.x - videoRect.left).coerceIn(0f, videoRect.width)
                                             val vy = (c.position.y - videoRect.top).coerceIn(0f, videoRect.height)
+                                            val fx = (vx / videoRect.width).coerceIn(0f, 1f)
+                                            val fy = (vy / videoRect.height).coerceIn(0f, 1f)
+                                            streamViewRef?.setCursor(fx, fy)
+                                            moveBatch.clear()
                                             moveBatch.add(
                                                 InputController.move(
-                                                    (vx / videoRect.width * sessionScreen.w).toInt()
+                                                    (fx * sessionScreen.w).toInt()
                                                         .coerceIn(0, sessionScreen.w - 1),
-                                                    (vy / videoRect.height * sessionScreen.h).toInt()
+                                                    (fy * sessionScreen.h).toInt()
                                                         .coerceIn(0, sessionScreen.h - 1)
                                                 )
                                             )
                                         }
                                         val now = System.currentTimeMillis()
-                                        if (moveBatch.size >= 16 || now - lastFlushAt >= 30) flushMoves()
+                                        if (now - lastFlushAt >= 8) flushMoves()
                                         c.consume()
                                     }
                                 } else {

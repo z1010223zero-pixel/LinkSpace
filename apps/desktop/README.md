@@ -42,6 +42,13 @@ npm run clean              # 删除 out/
 `verify:mdns` 例外：它必须有 Android 设备在同一局域网，否则必然 FAIL，
 单独跑而不进全套回归。
 
+### 双向免确认控制与低延迟画面传输（2026-11-05 最新）
+
+- **免确认控制有效期**：桌面端 `host.ts` 与 `transfer/trust.ts` 支持设备级免确认控制有效期（`仅本次` / `1天` / `3天` / `7天` / `30天` / `永久`）；控制请求横幅支持一键授权对应时长，设备详情卡提供有效期管理。
+- **锁屏显示器自动唤醒**：在 `input/win32/native.ts` 中通过 `SetThreadExecutionState` 与零位移输入唤醒休眠显示器，反向控制获批时自动执行。
+- **4K 极速切片推流**：在 `screen-stream.ts` 中使用多线程 `fast_bilinear` 硬件下采样与 x264 零缓冲切片参数（`threads=4:sliced-threads=1:rc-lookahead=0:sync-lookahead=0:bframes=0:aud=1`），消除 4K 推流瓶颈；控制通道全链路启用 `TCP_NODELAY`。
+- **反向投屏亮屏解锁**：在 `ReverseStreamView.vue` 顶栏增加「亮屏解锁」按钮，一键发送上滑手势解除平板锁屏。
+
 ### mDNS 组播网卡选择
 
 组播网卡必须显式指定，不能交给库自己选。`multicast-dns` 的

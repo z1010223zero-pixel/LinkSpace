@@ -623,18 +623,19 @@ class LinkSpaceService private constructor(private val appContext: Context) {
     // ---------- 信任设备清单（Bug 2：确认框“以后不再询问”） ----------
 
     /**
-     * 该设备是否被用户标记为信任设备（以后建会话跳过 LinkSpace 确认框）。
-     * 判定只认配对身份 + TrustStore 里的 `control.no-confirm` scope；
-     * 未配对的设备即使 scope 被写坏也到不了这里——scope 只挂在已配对条目上。
+     * 该设备是否被用户标记为免确认信任设备（有效期内建会话跳过确认框）。
      */
     fun isNoConfirmTrusted(deviceId: String): Boolean =
-        trust.hasScope(deviceId, Protocol.SCOPE_NO_CONFIRM)
+        trust.isNoConfirmValid(deviceId)
 
-    /** 用户在确认框勾选“信任此设备”：给已配对设备加上免确认标记，默认永久有效 */
-    fun grantNoConfirmTrust(deviceId: String) {
-        if (trust.grantScope(deviceId, Protocol.SCOPE_NO_CONFIRM)) {
+    /**
+     * 给已配对设备设置免确认有效期：
+     * durationMs < 0 = 永久有效，> 0 = 有效毫秒数，0 = 每次询问
+     */
+    fun grantNoConfirmTrust(deviceId: String, durationMs: Long = -1L) {
+        if (trust.grantNoConfirmDuration(deviceId, durationMs)) {
             _trusted.value = trust.list()
-            Log.i(TAG, "已信任设备 $deviceId：以后不再弹确认框")
+            Log.i(TAG, "已设置设备 $deviceId 免确认有效期 durationMs=$durationMs")
         }
     }
 
@@ -977,12 +978,17 @@ class LinkSpaceService private constructor(private val appContext: Context) {
             paste = { text -> handleScreenPaste(text) },
             listener = object : ControlledInputSession.Listener {
                 override fun onControlRequested(request: ControlledInputSession.ControlRequest) {
+                    LinkSpaceAccessibilityService.wakeAndUnlock(appContext)
                     _controlRequest.value = request
                 }
 
                 override fun onChanged() {
+                    val prevControlled = _controlledBy.value
                     _controlRequest.value = controlledInput.pendingRequest
                     _controlledBy.value = controlledInput.controlledBy
+                    if (prevControlled == null && _controlledBy.value != null) {
+                        LinkSpaceAccessibilityService.wakeAndUnlock(appContext)
+                    }
                     _accessibilityEnabled.value =
                         LinkSpaceAccessibilityService.isEnabled(appContext)
                 }
@@ -1047,18 +1053,25 @@ class LinkSpaceService private constructor(private val appContext: Context) {
                     // 界面不在前台时请求只挂 90s，超时由 TTL 自动拒绝回 error，
                     // 不会静默挂住桌面窗口。
                     Log.i(TAG, "收到 ${request.peerId} 的反向投屏请求，等待本机录屏授权")
+                    LinkSpaceAccessibilityService.wakeAndUnlock(appContext)
                     _reverseStreamRequest.value = request
                 }
 
                 override fun onChanged() {
+                    val prevActive = _reverseStreamStatus.value?.active
                     _reverseStreamRequest.value = reverseScreen.pendingRequest
-                    _reverseStreamStatus.value = reverseScreen.status()
+                    val nextStatus = reverseScreen.status()
+                    _reverseStreamStatus.value = nextStatus
+                    if (prevActive == null && nextStatus.active != null) {
+                        LinkSpaceAccessibilityService.wakeAndUnlock(appContext)
+                    }
                 }
 
                 override fun onError(message: String) {
                     _inputMessage.value = message
                 }
-            }
+            },
+            isAutoApprovePeer = { peerId -> isNoConfirmTrusted(peerId) }
         )
     }
 
@@ -1133,12 +1146,19 @@ class LinkSpaceService private constructor(private val appContext: Context) {
      * [trustDevice] 为 true（确认框里勾了“信任此设备”）时，放行成功
      * 后再给该设备加上免确认标记——放行失败（过期/不存在）不授信。
      */
-    fun approveControl(sessionId: String, trustDevice: Boolean = false) {
+    fun approveControl(sessionId: String, durationMs: Long = 0L) {
         val peerId = controlledInput.pendingRequest
             ?.takeIf { it.sessionId == sessionId }?.peerId
-        if (controlledInput.approve(sessionId) && trustDevice && peerId != null) {
-            grantNoConfirmTrust(peerId)
+        if (controlledInput.approve(sessionId)) {
+            LinkSpaceAccessibilityService.wakeAndUnlock(appContext)
+            if (durationMs != 0L && peerId != null) {
+                grantNoConfirmTrust(peerId, durationMs)
+            }
         }
+    }
+
+    fun approveControl(sessionId: String, trustDevice: Boolean) {
+        approveControl(sessionId, if (trustDevice) -1L else 0L)
     }
 
     /** 确认弹窗“拒绝”/弹窗被划掉：回 session.reject */

@@ -40,6 +40,13 @@
 - [ ] scrcpy 窗口内输入（鼠标键盘 / 中文输入法）与断网恢复仍待人工走查（[`docs/scrcpy-manual-checklist.md`](docs/scrcpy-manual-checklist.md)）
 - [x] 审查报告 2.4 节桌面 P3 全部清完（2026-10-30，5350f65：副屏贴边、载荷收敛、限频与挂起上限等）
 
+**线 2 决策分支最新进展（`decision/line2-accessibility-first`，2026-11-05）**：
+
+- [x] **双向免确认有效期**：电脑控平板与平板控电脑均支持选择免确认有效期（`仅本次` / `1天` / `3天` / `7天` / `30天` / `永久`）；到期前重连无需再次确认，双方均可随时在设备详情/设置中调整有效期或撤销。
+- [x] **锁屏直接唤醒与一键/自动上滑解锁**：电脑发起控制或反向投屏时平板端无障碍自动唤醒息屏并上滑解锁（电脑端反向投屏顶栏亦提供「亮屏解锁」一键按钮）；平板发起控制获批时电脑端自动唤醒睡眠/息屏的显示器。
+- [x] **反向录屏长效保活（零弹窗重连）**：平板端结束推流时解绑编码器 Surface 保持 `MediaProjection` 与 `VirtualDisplay` 跨会话存活（配合 `appops PROJECT_MEDIA allow`），免确认期内再次推流实现零 LinkSpace 弹窗与零系统录屏弹窗。
+- [x] **平板控制电脑超低延迟优化**：桌面端启用多线程切片编码（`threads=4:sliced-threads=1:rc-lookahead=0:sync-lookahead=0:bframes=0:aud=1`）与 `fast_bilinear` 硬件下采样（4K→1080p 达到 ~90fps，零帧缓冲）；全链路启用 `TCP_NODELAY`；平板端采用多线程 `FF_THREAD_SLICE` 与原生 `libswscale`（NEON 加速 YUV420P→RGBA 零拷贝，单帧处理从 ~45ms 降至 ~1.5ms）；触控事件按 120Hz（8ms）合并下发并在触摸瞬间即时本地绘制光标，彻底消除操作迟滞与画面卡顿。
+
 **阶段 4 前置：IddCx 虚拟显示器 —— PoC 进行中**
 
 - [x] EWDK 环境下驱动构建与测试签名（2026-10-30，独立 PoC，不进主构建）

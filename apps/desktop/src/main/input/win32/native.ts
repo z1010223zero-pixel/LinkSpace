@@ -26,6 +26,8 @@ export interface Win32Native {
    * 步长见 INPUT_SIZE），count 为条数。返回是否全部成功。
    */
   sendInput(buf: Buffer, count: number): boolean
+  /** 唤醒休眠/熄屏的显示器（平板发起控制时自动点亮电脑屏幕） */
+  wakeDisplay?(): void
 }
 
 // sink.ts 对本模块只有类型依赖（编译期擦除），无运行时环
@@ -73,6 +75,15 @@ function tryLoad(): Win32Native | null {
     const SendInput = user32.func(
       'uint32_t __stdcall SendInput(uint32_t cInputs, void *pInputs, int cbSize)'
     ) as (count: number, buf: Buffer, cbSize: number) => number
+    let SetThreadExecutionState: ((flags: number) => number) | null = null
+    try {
+      const kernel32 = koffi.load('kernel32.dll')
+      SetThreadExecutionState = kernel32.func(
+        'uint32_t __stdcall SetThreadExecutionState(uint32_t esFlags)'
+      ) as (flags: number) => number
+    } catch {
+      SetThreadExecutionState = null
+    }
 
     return {
       getCursorPos() {
@@ -108,6 +119,20 @@ function tryLoad(): Win32Native | null {
           return SendInput(count, buf, INPUT_SIZE) === count
         } catch {
           return false
+        }
+      },
+      wakeDisplay(): void {
+        try {
+          // ES_SYSTEM_REQUIRED(0x01) | ES_DISPLAY_REQUIRED(0x02)
+          SetThreadExecutionState?.(0x00000003)
+          // 注入一个 0 位移相对鼠标移动（INPUT_MOUSE=0, dwFlags=MOUSEEVENTF_MOVE=0x0001），
+          // 触发系统唤醒熄屏显示器且不改变当前光标位置
+          const buf = Buffer.alloc(INPUT_SIZE)
+          buf.writeUInt32LE(0, 0) // type = INPUT_MOUSE
+          buf.writeUInt32LE(0x0001, 20) // dwFlags = MOUSEEVENTF_MOVE (offset 8 + 12 = 20)
+          SendInput(1, buf, INPUT_SIZE)
+        } catch {
+          /* ignore */
         }
       }
     }

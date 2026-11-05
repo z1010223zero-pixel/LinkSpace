@@ -369,9 +369,10 @@ fun TouchpadScreen(service: LinkSpaceService) {
                                             .coerceIn(0f, (screenW - 1).toFloat())
                                         curY = (curY + delta.y * sensitivity)
                                             .coerceIn(0f, (screenH - 1).toFloat())
+                                        moveBatch.clear()
                                         moveBatch.add(InputController.move(curX.toInt(), curY.toInt()))
                                         val now = System.currentTimeMillis()
-                                        if (moveBatch.size >= 16 || now - lastFlushAt >= 30) flushMoves()
+                                        if (now - lastFlushAt >= 8) flushMoves()
                                         c.consume()
                                     }
                                 }

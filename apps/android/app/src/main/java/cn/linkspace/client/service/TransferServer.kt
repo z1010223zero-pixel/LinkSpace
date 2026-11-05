@@ -281,6 +281,7 @@ class TransferServer(
             } catch (e: IOException) {
                 if (socket.isClosed) return else continue
             }
+            runCatching { conn.tcpNoDelay = true }
             if (!connSlots.tryAcquire()) {
                 Log.w(TAG, "连接数已达上限，拒绝新连接")
                 runCatching { conn.close() }

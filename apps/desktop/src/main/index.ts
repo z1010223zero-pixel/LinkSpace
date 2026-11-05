@@ -135,6 +135,8 @@ const host = new Host({
   extendCreateVirtualDisplay: (preferred) => vddVirtualDisplayManager.create(preferred),
   extendDestroyVirtualDisplay: () => vddVirtualDisplayManager.destroy(),
   inputVirtualScreen: win32 ? () => win32.virtualScreen() : undefined,
+  inputCursorPos: win32 ? () => win32.getCursorPos() : undefined,
+  inputWakeDisplay: win32 ? () => win32.wakeDisplay?.() : undefined,
   inputInject: inputSink
     ? (events) => {
         // 走查诊断：键盘注入链路取证（含 key 的批次低频，move 不打）
@@ -431,6 +433,11 @@ app.whenReady().then(async () => {
       .on('pairRequested', () => {
         runtime.pendingPairings = host.pendingPairings()
         broadcast('pairings:changed')
+      })
+      .on('paired', () => {
+        runtime.pendingPairings = host.pendingPairings()
+        broadcast('pairings:changed')
+        broadcast('trust:changed')
       })
       .on('transferOffered', () => {
         runtime.transfers = host.transferTasks()

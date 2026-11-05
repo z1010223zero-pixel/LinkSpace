@@ -123,18 +123,19 @@ export function resolveStreamEncoder(): StreamEncoder {
  */
 function buildEncodeArgs(scaleWidth: number, encoder: StreamEncoder, tier: number): string[] {
   const args: string[] = [
-    '-vf', `scale='min(${scaleWidth},iw)':-32`,
+    '-filter_threads', '4',
+    '-vf', `scale='min(${scaleWidth},iw)':-32:flags=fast_bilinear`,
     '-c:v', encoder
   ]
   if (encoder === 'libx264') {
     args.push(
       '-preset', 'ultrafast',
       '-tune', 'zerolatency',
-      // zerolatency 默认开 sliced-threads；若只关 sliced-threads 而不锁 threads=1，
-      // x264 会退回帧级多线程（按 CPU 逻辑核数缓冲 16~24 帧，带来近 1 秒编码延迟）。
-      // 显式指定 threads=1:sliced-threads=0:bframes=0:aud=1，兼顾单 slice 兼容性、
-      // 0 帧缓冲延迟与 AUD 帧尾立刻冲刷
-      '-x264-params', 'threads=1:sliced-threads=0:rc-lookahead=0:sync-lookahead=0:bframes=0:aud=1'
+      // 4K 抓屏缩放 + 编码若锁死单线程（threads=1），单帧耗时 >25ms 易掉帧卡顿；
+      // 开启 4 线程 slice 级并行（threads=4:sliced-threads=1）配合 fast_bilinear，
+      // 既保持 0 帧缓冲延迟（区别于 frame-threads），又能跑满 30/60fps，且 Android 端
+      // StreamDecoder（FFmpeg libavcodec 软解，支持多 slice 并行）可零延迟解码。
+      '-x264-params', 'threads=4:sliced-threads=1:rc-lookahead=0:sync-lookahead=0:bframes=0:aud=1'
     )
   }
   // 自适应码率与用户画质档位取交集（必须在 pipe:1 输出 URL 之前，否则被当成第二个输出口忽略）
@@ -241,8 +242,6 @@ export class ScreenStreamService {
           '-hide_banner', '-loglevel', 'error',
           '-fflags', 'nobuffer',
           '-flags', 'low_delay',
-          '-probesize', '32',
-          '-analyzeduration', '0',
           '-thread_queue_size', '4',
           '-f', 'gdigrab',
           // draw_mouse=0：采集不含真实光标——注入移动与采集互相打架会让
@@ -325,8 +324,6 @@ export class ScreenStreamService {
               '-hide_banner', '-loglevel', 'error',
               '-fflags', 'nobuffer',
               '-flags', 'low_delay',
-              '-probesize', '32',
-              '-analyzeduration', '0',
               '-thread_queue_size', '4',
               '-f', 'rawvideo', '-pix_fmt', 'bgra', '-s', `${rect.w}x${rect.h}`,
               '-i', 'pipe:0',

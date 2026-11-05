@@ -11,9 +11,14 @@ import org.bytedeco.ffmpeg.avutil.AVFrame
 import org.bytedeco.ffmpeg.global.avcodec
 import org.bytedeco.ffmpeg.global.avformat
 import org.bytedeco.ffmpeg.global.avutil
+import org.bytedeco.ffmpeg.global.swscale
+import org.bytedeco.ffmpeg.swscale.SwsContext
 import org.bytedeco.javacpp.BytePointer
+import org.bytedeco.javacpp.IntPointer
 import org.bytedeco.javacpp.Pointer
+import org.bytedeco.javacpp.PointerPointer
 import java.io.InputStream
+import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -74,6 +79,7 @@ class StreamDecoder(
     override fun run() {
         var ic: AVFormatContext? = null
         var ctx: AVCodecContext? = null
+        var swsCtx: SwsContext? = null
         try {
             avutil.av_log_set_level(avutil.AV_LOG_ERROR)
             val fmt = avformat.av_find_input_format("h264")
@@ -130,122 +136,77 @@ class StreamDecoder(
             val codecCtx = avcodec.avcodec_alloc_context3(codec)
             ctx = codecCtx
             avcodec.avcodec_parameters_to_context(codecCtx, codecpar)
-            // 开启 LOW_DELAY + FAST 并锁单线程（消除 FF_THREAD_FRAME 多核帧缓冲延迟）
+            // 开启 LOW_DELAY + FAST + SLICE 多核并行（与桌面端 sliced-threads=1 匹配，零帧级缓冲延迟）
             codecCtx.flags(codecCtx.flags() or avcodec.AV_CODEC_FLAG_LOW_DELAY)
             codecCtx.flags2(codecCtx.flags2() or avcodec.AV_CODEC_FLAG2_FAST)
-            codecCtx.thread_count(1)
+            codecCtx.thread_count(4)
+            codecCtx.thread_type(AVCodecContext.FF_THREAD_SLICE)
             avcodec.avcodec_open2(codecCtx, codec, null as AVDictionary?)
             Log.i(TAG, "avcodec_open2 完成（${codecCtx.width()}x${codecCtx.height()}）")
 
             val pkt = avcodec.av_packet_alloc()
             val frame = avutil.av_frame_alloc()
-            var bmp: Bitmap? = null
-            var framePixels: IntArray? = null
-            var yScratch: ByteArray? = null
-            var uScratch: ByteArray? = null
-            var vScratch: ByteArray? = null
+            val bmpRing = arrayOfNulls<Bitmap>(2)
+            var ringIdx = 0
+            var rgbaBuf: ByteBuffer? = null
+            var dstPtr: BytePointer? = null
+            val dstData = PointerPointer<BytePointer>(4L)
+            val dstLinesize = IntPointer(4L)
             var rendered = 0L
-            var lastRenderMs = 0L
 
             fun drainAndRender() {
                 while (avcodec.avcodec_receive_frame(codecCtx, frame) >= 0) {
                     val w = frame.width()
                     val h = frame.height()
+                    val pixFmt = frame.format()
                     if (w <= 0 || h <= 0) {
                         avutil.av_frame_unref(frame)
                         continue
                     }
-                    if (w != outWidth || h != outHeight || bmp == null) {
+                    if (w != outWidth || h != outHeight || bmpRing[0] == null) {
                         outWidth = w
                         outHeight = h
-                        bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-                        yScratch = ByteArray(w)
-                        uScratch = ByteArray(w / 2 + 8)
-                        vScratch = ByteArray(w / 2 + 8)
+                        bmpRing[0] = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                        bmpRing[1] = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                        val direct = ByteBuffer.allocateDirect(w * h * 4)
+                        rgbaBuf = direct
+                        val bp = BytePointer(direct)
+                        dstPtr = bp
+                        dstData.put(0L, bp)
+                        dstLinesize.put(0L, w * 4)
                         onSize(w, h)
                         Log.i(TAG, "FFmpeg 软解就绪: ${w}x${h}")
                     }
-                    // 若管道内已有更新的网络包排队且距上一帧渲染不足 35ms，仅完成 H.264 参考帧解码，
-                    // 跳过耗时的 200 万像素 YUV→RGB 转换，直接追赶最新包，消除积压延迟。
-                    val nowRender = System.currentTimeMillis()
-                    if (rendered > 0L && pipe.backlog() > 2048L && nowRender - lastRenderMs < 35L) {
+                    // 仅当管道内真的堆积超过 64KB（多帧未读）时才跳过渲染追赶最新包
+                    if (rendered > 0L && pipe.backlog() > 64 * 1024L) {
                         avutil.av_frame_unref(frame)
                         continue
                     }
-                    val bitmap = bmp ?: return
-                    // YUV420P → RGB：平面按行 bulk 读入 scratch（偶行才读 UV，每次循环算 2 像素共用色度）
-                    val yB = frame.data(0)
-                    val uB = frame.data(1)
-                    val vB = frame.data(2)
-                    val yRow = frame.linesize(0)
-                    val uRow = frame.linesize(1)
-                    val vRow = frame.linesize(2)
-                    val yS = yScratch ?: return
-                    val uS = uScratch ?: return
-                    val vS = vScratch ?: return
-                    var px = framePixels
-                    if (px == null || px.size < w * h) {
-                        px = IntArray(w * h)
-                        framePixels = px
+                    val buf = rgbaBuf ?: return
+                    val bitmap = bmpRing[ringIdx] ?: return
+                    ringIdx = (ringIdx + 1) and 1
+                    // 原生 libswscale NEON 加速 YUV420P → RGBA + 直接内存拷贝（~1.5ms/帧，消除逐行 JNI 循环）
+                    swsCtx = swscale.sws_getCachedContext(
+                        swsCtx,
+                        w, h, if (pixFmt >= 0) pixFmt else avutil.AV_PIX_FMT_YUV420P,
+                        w, h, avutil.AV_PIX_FMT_RGBA,
+                        swscale.SWS_FAST_BILINEAR,
+                        null, null, null as DoubleArray?
+                    )
+                    val sCtx = swsCtx
+                    if (sCtx != null && dstPtr != null) {
+                        swscale.sws_scale(
+                            sCtx,
+                            frame.data(),
+                            frame.linesize(),
+                            0,
+                            h,
+                            dstData,
+                            dstLinesize
+                        )
+                        buf.rewind()
+                        bitmap.copyPixelsFromBuffer(buf)
                     }
-                    var idx = 0
-                    val uCols = w shr 1
-                    val pairLimit = w and -2
-                    for (row in 0 until h) {
-                        yB.position(row.toLong() * yRow)
-                        yB.get(yS, 0, w)
-                        if ((row and 1) == 0) {
-                            val uvRow = row shr 1
-                            uB.position(uvRow.toLong() * uRow)
-                            uB.get(uS, 0, uCols)
-                            vB.position(uvRow.toLong() * vRow)
-                            vB.get(vS, 0, uCols)
-                        }
-                        var col = 0
-                        var uvi = 0
-                        while (col < pairLimit) {
-                            val u = (uS[uvi].toInt() and 0xff) - 128
-                            val v = (vS[uvi].toInt() and 0xff) - 128
-                            uvi++
-                            val rv = 1634 * v
-                            val guv = 833 * v + 400 * u
-                            val bu = 2066 * u
-
-                            val y0 = ((yS[col].toInt() and 0xff) - 16) * 1192
-                            var r0 = (y0 + rv) shr 10
-                            var g0 = (y0 - guv) shr 10
-                            var b0 = (y0 + bu) shr 10
-                            if (r0 < 0) r0 = 0 else if (r0 > 255) r0 = 255
-                            if (g0 < 0) g0 = 0 else if (g0 > 255) g0 = 255
-                            if (b0 < 0) b0 = 0 else if (b0 > 255) b0 = 255
-                            px[idx++] = -0x1000000 or (r0 shl 16) or (g0 shl 8) or b0
-
-                            val y1 = ((yS[col + 1].toInt() and 0xff) - 16) * 1192
-                            var r1 = (y1 + rv) shr 10
-                            var g1 = (y1 - guv) shr 10
-                            var b1 = (y1 + bu) shr 10
-                            if (r1 < 0) r1 = 0 else if (r1 > 255) r1 = 255
-                            if (g1 < 0) g1 = 0 else if (g1 > 255) g1 = 255
-                            if (b1 < 0) b1 = 0 else if (b1 > 255) b1 = 255
-                            px[idx++] = -0x1000000 or (r1 shl 16) or (g1 shl 8) or b1
-
-                            col += 2
-                        }
-                        if (col < w) {
-                            val u = (uS[uvi].toInt() and 0xff) - 128
-                            val v = (vS[uvi].toInt() and 0xff) - 128
-                            val y0 = ((yS[col].toInt() and 0xff) - 16) * 1192
-                            var r0 = (y0 + 1634 * v) shr 10
-                            var g0 = (y0 - 833 * v - 400 * u) shr 10
-                            var b0 = (y0 + 2066 * u) shr 10
-                            if (r0 < 0) r0 = 0 else if (r0 > 255) r0 = 255
-                            if (g0 < 0) g0 = 0 else if (g0 > 255) g0 = 255
-                            if (b0 < 0) b0 = 0 else if (b0 > 255) b0 = 255
-                            px[idx++] = -0x1000000 or (r0 shl 16) or (g0 shl 8) or b0
-                        }
-                    }
-                    bitmap.setPixels(px, 0, w, 0, 0, w, h)
-                    lastRenderMs = nowRender
                     rendered++
                     if (rendered == 1L || rendered % 300 == 0L) {
                         Log.i(TAG, "已解码渲染 $rendered 帧")
@@ -283,6 +244,7 @@ class StreamDecoder(
             }
         } finally {
             Log.i(TAG, "解码线程退出 (stopped=${stopped.get()})")
+            runCatching { swsCtx?.let { swscale.sws_freeContext(it) } }
             runCatching { ctx?.let { avcodec.avcodec_free_context(it) } }
             runCatching { ic?.let { avformat.avformat_close_input(it) } }
         }

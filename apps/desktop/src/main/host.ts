@@ -108,6 +108,10 @@ export interface HostOptions {
   ) => Promise<{ ok: true; screen: { x: number; y: number; w: number; h: number } } | { ok: false; reason: string }>
   /** 虚拟显示器销毁出口。缺省为空操作 */
   extendDestroyVirtualDisplay?: () => void
+  /** 当前物理光标位置（虚拟屏坐标），用于正向投屏实时推送 screen.cursor */
+  inputCursorPos?: () => { x: number; y: number } | null
+  /** 唤醒休眠/熄屏的显示器（被控会话开始时自动点亮屏幕） */
+  inputWakeDisplay?: () => void
 }
 
 export interface HostEvents {
@@ -229,6 +233,8 @@ export class Host {
   private forwardStreamRegionArgs: string[] = []
   /** screen.stream.start 是否已发出（DD 就绪前失败时不发 stop，避免对端清掉不存在的流） */
   private forwardStreamStarted = false
+  /** 正向投屏实时推送鼠标坐标的定时器（16ms 轮询变化即发 screen.cursor） */
+  private forwardCursorTimer: NodeJS.Timeout | null = null
   /** 锁屏暂停的正向投屏（解锁后按原样重起）；无暂停时 null */
   private pausedForwardStream: {
     peerId: string
@@ -1117,6 +1123,11 @@ export class Host {
             this.approveInputControl(req.sessionId)
             return
           }
+          if (this.trust.isNoConfirmValid(req.peerId)) {
+            log.info(`[trust] 免确认有效期内，自动批准 ${req.peerId} 的键鼠控制请求`)
+            this.approveInputControl(req.sessionId)
+            return
+          }
           this.emit('inputRequested', req)
         }
       }
@@ -1479,6 +1490,11 @@ export class Host {
             void this.approveExtendControl(req.sessionId)
             return
           }
+          if (this.trust.isNoConfirmValid(req.peerId)) {
+            log.info(`[trust] 免确认有效期内，自动批准 ${req.peerId} 的扩展屏请求`)
+            void this.approveExtendControl(req.sessionId)
+            return
+          }
           this.emit('extendRequested', req)
         }
       }
@@ -1591,6 +1607,37 @@ export class Host {
           }
         }, 2000)
         sendTo('screen.stream.start', { w, h, scaleWidth })
+        if (this.forwardCursorTimer) clearInterval(this.forwardCursorTimer)
+        if (this.opts.inputCursorPos) {
+          let lastCursorX = -1
+          let lastCursorY = -1
+          this.forwardCursorTimer = setInterval(() => {
+            if (!this.screenStream.running || this.forwardStreamPeerId !== peerId) {
+              if (this.forwardCursorTimer) {
+                clearInterval(this.forwardCursorTimer)
+                this.forwardCursorTimer = null
+              }
+              return
+            }
+            const pos = this.opts.inputCursorPos?.()
+            if (!pos) return
+            const r = this.forwardStreamRegion
+            const vs = this.opts.inputVirtualScreen?.() ?? { x: 0, y: 0, w, h }
+            const baseX = r ? r.x : vs.x
+            const baseY = r ? r.y : vs.y
+            const curW = r ? r.w : vs.w
+            const curH = r ? r.h : vs.h
+            if (curW <= 0 || curH <= 0) return
+            const lx = pos.x - baseX
+            const ly = pos.y - baseY
+            if (lx < 0 || lx >= curW || ly < 0 || ly >= curH) return
+            if (lx === lastCursorX && ly === lastCursorY) return
+            lastCursorX = lx
+            lastCursorY = ly
+            sendTo('screen.cursor', { x: lx, y: ly, w: curW, h: curH })
+          }, 16)
+          this.forwardCursorTimer.unref?.()
+        }
         log.info(`[screen-stream] 已为 ${peerId} 开启投屏${region ? `（${source === STREAM_SOURCE_VIRTUAL_DISPLAY ? '虚拟显示器' : '显示器'} ${region.w}x${region.h} @ ${region.x},${region.y}）` : '（全桌面）'}`)
       }
       this.streamRegion = region
@@ -1627,6 +1674,10 @@ export class Host {
   private clearForwardStreamState(): void {
     this.forwardStreamPeerId = null
     this.forwardStreamStarted = false
+    if (this.forwardCursorTimer) {
+      clearInterval(this.forwardCursorTimer)
+      this.forwardCursorTimer = null
+    }
   }
 
   /**
@@ -1919,9 +1970,29 @@ export class Host {
     this.inputController?.stop(reason)
   }
 
-  /** UI（被控端）：同意控制请求。会话建立后 control 授权仅在本会话内有效 */
-  approveInputControl(sessionId: string): { ok: boolean; error?: string } {
-    return this.inputCoordinator?.approve(sessionId) ?? { ok: false, error: '主机未启动' }
+  /** UI（被控端）：同意控制请求。可选设置免二次确认有效期（毫秒，-1 永久） */
+  approveInputControl(sessionId: string, durationMs?: number): { ok: boolean; error?: string } {
+    const pendingPeerId = this.inputCoordinator?.pendingRequest?.peerId
+    const res = this.inputCoordinator?.approve(sessionId) ?? { ok: false, error: '主机未启动' }
+    if (res.ok) {
+      this.opts.inputWakeDisplay?.()
+      if (pendingPeerId && typeof durationMs === 'number' && (durationMs === -1 || durationMs > 0)) {
+        this.trust.setNoConfirmDuration(pendingPeerId, durationMs)
+        const entry = this.trust.list().find((e) => e.deviceId === pendingPeerId)
+        if (entry) this.emit('paired', entry)
+      }
+    }
+    return res
+  }
+
+  /** 设置或清除指定已信任设备的免确认控制有效期 */
+  setNoConfirmDuration(deviceId: string, durationMs: number): boolean {
+    const ok = this.trust.setNoConfirmDuration(deviceId, durationMs)
+    if (ok) {
+      const entry = this.trust.list().find((e) => e.deviceId === deviceId)
+      if (entry) this.emit('paired', entry)
+    }
+    return ok
   }
 
   /** UI（被控端）：拒绝控制请求 */
@@ -1956,8 +2027,18 @@ export class Host {
   }
 
   /** UI（被控端）：同意扩展屏请求。同意即创建虚拟显示器，失败不建会话 */
-  async approveExtendControl(sessionId: string): Promise<{ ok: boolean; error?: string }> {
-    return this.extendCoordinator?.approve(sessionId) ?? { ok: false, error: '主机未启动' }
+  async approveExtendControl(sessionId: string, durationMs?: number): Promise<{ ok: boolean; error?: string }> {
+    const pendingPeerId = this.extendCoordinator?.pendingRequest?.peerId
+    const res = await (this.extendCoordinator?.approve(sessionId) ?? Promise.resolve({ ok: false, error: '主机未启动' }))
+    if (res.ok) {
+      this.opts.inputWakeDisplay?.()
+      if (pendingPeerId && typeof durationMs === 'number' && (durationMs === -1 || durationMs > 0)) {
+        this.trust.setNoConfirmDuration(pendingPeerId, durationMs)
+        const entry = this.trust.list().find((e) => e.deviceId === pendingPeerId)
+        if (entry) this.emit('paired', entry)
+      }
+    }
+    return res
   }
 
   /** UI（被控端）：拒绝扩展屏请求 */

@@ -141,6 +141,8 @@ export interface TrustedDevice {
   fingerprint: string
   scope: string[]
   trustedAt: number
+  /** 免二次确认控制截止时间戳（毫秒）；-1 为永久有效，0 或 undefined 为每次需确认 */
+  noConfirmUntil?: number
 }
 
 export interface IpcError {
@@ -291,8 +293,10 @@ export interface LinkSpaceApi {
   inputState(): Promise<InputStateView>
   /** 请求控制对端键鼠（对端会收到确认弹窗） */
   requestInputControl(peerId: string): Promise<IpcResult<void>>
-  /** 被控端：同意控制请求。授权仅本会话内有效 */
-  approveInputControl(sessionId: string): Promise<IpcResult<void>>
+  /** 被控端：同意控制请求。可选设置免二次确认有效期（毫秒，-1 永久） */
+  approveInputControl(sessionId: string, durationMs?: number): Promise<IpcResult<void>>
+  /** 设置或清除指定已信任设备的免确认控制有效期（毫秒，-1 永久，0 取消） */
+  setNoConfirmDuration(deviceId: string, durationMs: number): Promise<IpcResult<void>>
   /** 被控端：拒绝控制请求 */
   denyInputControl(sessionId: string): Promise<IpcResult<void>>
   /** 被控端：随时拔掉正在进行的控制 */

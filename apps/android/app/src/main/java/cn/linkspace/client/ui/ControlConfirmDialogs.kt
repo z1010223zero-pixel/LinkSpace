@@ -72,65 +72,85 @@ private fun TtlCountdownRow(seconds: Int, totalSeconds: Int, timeoutText: String
     }
 }
 
+private data class DurationOption(val label: String, val durationMs: Long)
+
+private val NO_CONFIRM_DURATION_OPTIONS = listOf(
+    DurationOption("仅本次", 0L),
+    DurationOption("1天", 1L * 86_400_000L),
+    DurationOption("3天", 3L * 86_400_000L),
+    DurationOption("7天", 7L * 86_400_000L),
+    DurationOption("30天", 30L * 86_400_000L),
+    DurationOption("永久", -1L)
+)
+
+@Composable
+private fun NoConfirmDurationSelector(
+    selectedMs: Long,
+    onSelect: (Long) -> Unit
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text(
+            "免确认有效期（有效期内再次连接无需弹窗确认）：",
+            fontSize = 12.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        NO_CONFIRM_DURATION_OPTIONS.chunked(3).forEach { rowItems ->
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                rowItems.forEach { opt ->
+                    val selected = selectedMs == opt.durationMs
+                    if (selected) {
+                        Button(
+                            onClick = { onSelect(opt.durationMs) },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text(opt.label, fontSize = 12.sp)
+                        }
+                    } else {
+                        OutlinedButton(
+                            onClick = { onSelect(opt.durationMs) },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text(opt.label, fontSize = 12.sp)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /**
  * 电脑请求控制本机：确认弹窗（协议 9.1）。
- * 30 秒内未确认由会话层自动拒绝；弹窗被划掉按拒绝处理。
- * 倒计时取请求自带的 expiresAt；文案补“单次有效”。
- *
- * 信任设备（Bug 2）：勾选“信任此设备，以后不再询问”再点“允许”，
- * 该设备以后请求控制时直接放行、不再弹框；信任默认永久有效，
- * 在设置页 → 信任清单里可撤销。只省 LinkSpace 自己的确认框，
- * 会话本身仍是单次有效、结束即失效。
+ * 支持选择免确认有效期（仅本次 / 1天 / 3天 / 7天 / 30天 / 永久）。
  */
 @Composable
 fun ControlRequestDialog(
     req: ControlledInputSession.ControlRequest,
-    onApprove: (trustDevice: Boolean) -> Unit,
+    onApprove: (durationMs: Long) -> Unit,
     onDeny: () -> Unit
 ) {
     val totalSeconds = (ControlledInputSession.REQUEST_TTL_MS / 1000).toInt()
     val seconds = rememberTtlRemainingSeconds(req.expiresAt, totalSeconds)
-    var trustDevice by remember { mutableStateOf(false) }
+    var selectedDurationMs by remember { mutableStateOf(7L * 86_400_000L) }
     AlertDialog(
         onDismissRequest = onDeny,
         title = { Text("允许远程控制本机？") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("“${req.displayName.ifEmpty { req.peerId }}”请求在电脑上操作这台平板（点按、滑动、按键）。")
-                Text(
-                    "此次授权单次有效：点了“允许”只放行本次会话，会话结束需重新确认；" +
-                        "会话结束前可随时在首页点“终止控制”拔掉。",
-                    fontSize = 12.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                NoConfirmDurationSelector(
+                    selectedMs = selectedDurationMs,
+                    onSelect = { selectedDurationMs = it }
                 )
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { trustDevice = !trustDevice }
-                ) {
-                    Checkbox(
-                        checked = trustDevice,
-                        onCheckedChange = { trustDevice = it }
-                    )
-                    Text(
-                        "信任此设备，以后不再询问",
-                        fontSize = 12.sp,
-                    )
-                }
-                if (trustDevice) {
-                    Text(
-                        "勾选后，此设备以后请求控制时不再弹出确认框（可在设置 → 信任清单里撤销）。",
-                        fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
                 Spacer(Modifier.height(4.dp))
                 TtlCountdownRow(seconds, totalSeconds, "超时自动拒绝")
             }
         },
         confirmButton = {
-            Button(onClick = { onApprove(trustDevice) }) { Text("允许") }
+            Button(onClick = { onApprove(selectedDurationMs) }) { Text("允许") }
         },
         dismissButton = {
             OutlinedButton(onClick = onDeny) { Text("拒绝（${seconds}s）") }
@@ -140,18 +160,12 @@ fun ControlRequestDialog(
 
 /**
  * 反向投屏请求：电脑想看本机屏幕（线 2 W7）。
- * 每次请求都要过这道确认 + 系统录屏授权框；拒绝/取消都明确回绝，
- * 桌面窗口显示原因。90 秒无人确认由服务侧 TTL 自动拒绝。
- * 倒计时取 requestedAt + REQUEST_TTL_MS；文案补“单次有效”。
- *
- * 信任设备（Bug 2）：与控制确认框同一套“信任此设备，以后不再询问”，
- * 勾选后该设备以后请求看屏幕时直接进系统录屏授权框，不再弹
- * LinkSpace 确认框；系统录屏授权框跳不过，仍要点允许才开录。
+ * 支持选择免确认有效期（仅本次 / 1天 / 3天 / 7天 / 30天 / 永久）。
  */
 @Composable
 fun ReverseStreamRequestDialog(
     req: ReverseScreenStreamer.ReverseStreamRequest,
-    onApprove: (trustDevice: Boolean) -> Unit,
+    onApprove: (durationMs: Long) -> Unit,
     onDeny: () -> Unit
 ) {
     val totalSeconds = (ReverseScreenStreamer.REQUEST_TTL_MS / 1000).toInt()
@@ -159,46 +173,23 @@ fun ReverseStreamRequestDialog(
         req.requestedAt + ReverseScreenStreamer.REQUEST_TTL_MS,
         totalSeconds
     )
-    var trustDevice by remember { mutableStateOf(false) }
+    var selectedDurationMs by remember { mutableStateOf(7L * 86_400_000L) }
     AlertDialog(
         onDismissRequest = onDeny,
         title = { Text("电脑请求查看你的屏幕") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text("对方想在电脑上实时查看这台平板的画面。同意后会弹出系统录屏授权框，只有你点了允许才会开始录屏；随时可以在通知栏停止。")
-                Text(
-                    "此次授权单次有效：同意只开通本次推流，下次需重新确认。",
-                    fontSize = 12.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("对方想在电脑上实时查看这台平板的画面。选择免确认有效期后，有效期内再次连接将直接复用录屏通道，不再弹窗。")
+                NoConfirmDurationSelector(
+                    selectedMs = selectedDurationMs,
+                    onSelect = { selectedDurationMs = it }
                 )
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { trustDevice = !trustDevice }
-                ) {
-                    Checkbox(
-                        checked = trustDevice,
-                        onCheckedChange = { trustDevice = it }
-                    )
-                    Text(
-                        "信任此设备，以后不再询问",
-                        fontSize = 12.sp,
-                    )
-                }
-                if (trustDevice) {
-                    Text(
-                        "勾选后，此设备以后请求查看屏幕时不再弹出确认框，直接进系统录屏授权框（可在设置 → 信任清单里撤销）。",
-                        fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
                 Spacer(Modifier.height(4.dp))
                 TtlCountdownRow(seconds, totalSeconds, "超时自动拒绝")
             }
         },
         confirmButton = {
-            Button(onClick = { onApprove(trustDevice) }) { Text("同意") }
+            Button(onClick = { onApprove(selectedDurationMs) }) { Text("同意") }
         },
         dismissButton = {
             OutlinedButton(onClick = onDeny) { Text("拒绝（${seconds}s）") }

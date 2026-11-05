@@ -204,6 +204,23 @@ async function retryInput(): Promise<void> {
   await loadStatus()
 }
 
+async function wakeAndUnlockTablet(): Promise<void> {
+  dismissNotice()
+  const canvas = canvasRef.value
+  const w = canvas && canvas.width > 0 ? canvas.width : 1920
+  const h = canvas && canvas.height > 0 ? canvas.height : 1080
+  const cx = Math.round(w * 0.5)
+  const startY = Math.round(h * 0.82)
+  const endY = Math.round(h * 0.18)
+  await sendInput({ kind: 'down', b: 'left', x: cx, y: startY, canvasW: w, canvasH: h })
+  const steps = 6
+  for (let i = 1; i <= steps; i++) {
+    const curY = Math.round(startY + ((endY - startY) * i) / steps)
+    await sendInput({ kind: 'move', x: cx, y: curY, canvasW: w, canvasH: h })
+  }
+  await sendInput({ kind: 'up', b: 'left', x: cx, y: endY, canvasW: w, canvasH: h })
+}
+
 function setInputMode(mode: 'direct' | 'pinyin' | 'finished'): void {
   if (inputMode.value === mode) return
   pasteArmed.value = false
@@ -534,6 +551,14 @@ onBeforeUnmount(() => {
         {{ detailsExpanded ? stats : '详情' }}
       </button>
       <span class="topbar__spacer" />
+      <button
+        v-if="streamRunning"
+        class="btn btn--sm rs-inline-btn"
+        title="唤醒平板屏幕并上滑解锁（无密码锁屏可直接进桌面）"
+        @click="wakeAndUnlockTablet"
+      >
+        亮屏解锁
+      </button>
       <span class="rs-mode-pill" @click="toolbarExpanded = !toolbarExpanded" title="点击展开工具栏切换输入模式">
         {{ inputMode === 'direct' ? '中英直输' : inputMode === 'pinyin' ? '按键直通' : '文本面板' }}
       </span>

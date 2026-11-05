@@ -194,6 +194,43 @@ class LinkSpaceAccessibilityService : AccessibilityService(), InputInjector {
         fun releaseAll() {
             instance?.releaseAllState()
         }
+
+        /**
+         * 远程被控启动时唤醒息屏并自动上滑解除锁屏界面（无密码锁屏直接进桌面，有密码则弹出密码框供远程输入）。
+         */
+        @Suppress("DEPRECATION")
+        fun wakeAndUnlock(context: Context) {
+            runCatching {
+                val pm = context.getSystemService(Context.POWER_SERVICE) as? android.os.PowerManager
+                val km = context.getSystemService(Context.KEYGUARD_SERVICE) as? android.app.KeyguardManager
+                val wasInteractive = pm?.isInteractive ?: true
+                val wasLocked = km?.isKeyguardLocked ?: false
+                if (!wasInteractive && pm != null) {
+                    val wl = pm.newWakeLock(
+                        android.os.PowerManager.SCREEN_BRIGHT_WAKE_LOCK or
+                            android.os.PowerManager.ACQUIRE_CAUSES_WAKEUP or
+                            android.os.PowerManager.ON_AFTER_RELEASE,
+                        "linkspace:remote_wake"
+                    )
+                    wl.acquire(5000L)
+                }
+                val svc = instance ?: return@runCatching
+                if (!wasInteractive || wasLocked) {
+                    android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                        runCatching {
+                            val m = svc.resources.displayMetrics
+                            val cx = m.widthPixels / 2f
+                            val startY = m.heightPixels * 0.82f
+                            val endY = m.heightPixels * 0.18f
+                            svc.dispatchStroke(listOf(PointF(cx, startY), PointF(cx, endY)), 220L)
+                            Log.i(TAG, "已触发亮屏与上滑解锁手势 (${m.widthPixels}x${m.heightPixels})")
+                        }
+                    }, if (!wasInteractive) 300L else 80L)
+                }
+            }.onFailure {
+                Log.w(TAG, "wakeAndUnlock 异常: ${it.message}")
+            }
+        }
     }
 
     private val lock = Any()

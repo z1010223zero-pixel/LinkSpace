@@ -11,6 +11,7 @@ export interface DetailDevice {
   scope?: string[]
   fingerprint?: string
   trustedAt?: number
+  noConfirmUntil?: number
 }
 
 const props = defineProps<{
@@ -31,9 +32,27 @@ const emit = defineEmits<{
   (e: 'send-file'): void
   (e: 'toggle-clipboard'): void
   (e: 'set-edge', edge: DeviceEdge | ''): void
+  (e: 'set-no-confirm', durationMs: number): void
   (e: 'revoke'): void
   (e: 'stop-reverse'): void
 }>()
+
+const NO_CONFIRM_OPTIONS: Array<{ value: number; label: string }> = [
+  { value: 0, label: '每次询问' },
+  { value: 24 * 3600 * 1000, label: '1 天免确认' },
+  { value: 3 * 24 * 3600 * 1000, label: '3 天免确认' },
+  { value: 7 * 24 * 3600 * 1000, label: '7 天免确认' },
+  { value: 30 * 24 * 3600 * 1000, label: '30 天免确认' },
+  { value: -1, label: '永久免确认' }
+]
+
+function noConfirmStatusLabel(until?: number): string {
+  if (until === -1) return '当前：永久免确认'
+  if (!until || until <= Date.now()) return '当前：每次需手动确认'
+  const remainHours = Math.max(1, Math.ceil((until - Date.now()) / (3600 * 1000)))
+  if (remainHours >= 24) return `当前：免确认（剩余约 ${Math.ceil(remainHours / 24)} 天）`
+  return `当前：免确认（剩余约 ${remainHours} 小时）`
+}
 
 const EDGE_OPTIONS: Array<{ value: DeviceEdge | ''; label: string }> = [
   { value: '', label: '不参与' },
@@ -169,6 +188,25 @@ function fmtTime(ts?: number): string {
               : '断开'
         }}
       </button>
+    </div>
+
+    <div class="settings-row">
+      <div class="settings-row__text">
+        <div class="settings-row__label">免确认控制有效期</div>
+        <div class="settings-row__hint">
+          有效期内对方请求控制本机无需再弹确认框（{{ noConfirmStatusLabel(props.device.noConfirmUntil) }}）
+        </div>
+      </div>
+      <select
+        class="edge-select"
+        :value="props.device.noConfirmUntil === -1 ? -1 : 0"
+        @change="emit('set-no-confirm', Number(($event.target as HTMLSelectElement).value))"
+      >
+        <option disabled value="0">{{ noConfirmStatusLabel(props.device.noConfirmUntil) }}</option>
+        <option v-for="o in NO_CONFIRM_OPTIONS" :key="o.value" :value="o.value">
+          设为：{{ o.label }}
+        </option>
+      </select>
     </div>
 
     <div v-if="props.device.deviceType === 'win'" class="settings-row">

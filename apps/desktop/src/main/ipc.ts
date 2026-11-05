@@ -52,6 +52,7 @@ const CHANNELS = [
   'pairing:submitCode',
   'trust:list',
   'trust:revoke',
+  'trust:setNoConfirmDuration',
   'transfer:list',
   'transfer:accept',
   'transfer:acceptFor',
@@ -255,6 +256,15 @@ export function registerIpc(
     return { ok: true as const }
   })
 
+  ipcMain.handle('trust:setNoConfirmDuration', async (_e, deviceId: unknown, durationMs: unknown) => {
+    if (typeof deviceId !== 'string' || !deviceId) return fail('缺少设备 ID')
+    if (typeof durationMs !== 'number' || !Number.isFinite(durationMs)) return fail('有效期参数不合法')
+    const ok = host.setNoConfirmDuration(deviceId, durationMs)
+    if (!ok) return fail('设备不在信任清单中')
+    broadcast(getWindow, 'trust:changed')
+    return { ok: true as const }
+  })
+
   // ---------- 文件传输 ----------
 
   invoke('transfer:list', () => host.transferTasks())
@@ -436,10 +446,12 @@ export function registerIpc(
     return r.ok ? { ok: true as const } : fail(r.error)
   })
 
-  ipcMain.handle('input:approve', (_e, sessionId: unknown) => {
+  ipcMain.handle('input:approve', (_e, sessionId: unknown, durationMs?: unknown) => {
     if (typeof sessionId !== 'string' || !sessionId) return fail('缺少会话 ID')
-    const r = host.approveInputControl(sessionId)
+    const dur = typeof durationMs === 'number' && Number.isFinite(durationMs) ? durationMs : undefined
+    const r = host.approveInputControl(sessionId, dur)
     broadcast(getWindow, 'input:changed')
+    broadcast(getWindow, 'trust:changed')
     return r.ok ? { ok: true as const } : fail(r.error ?? '批准失败')
   })
 
@@ -465,10 +477,12 @@ export function registerIpc(
   // requestExtendControl/stopExtendControl 已就绪（无头环路覆盖），
   // 只等对端。
   // approve 是异步的（虚拟显示器创建上限约 30s），渲染层 await 本调用。
-  ipcMain.handle('extend:approve', async (_e, sessionId: unknown) => {
+  ipcMain.handle('extend:approve', async (_e, sessionId: unknown, durationMs?: unknown) => {
     if (typeof sessionId !== 'string' || !sessionId) return fail('缺少会话 ID')
-    const r = await host.approveExtendControl(sessionId)
+    const dur = typeof durationMs === 'number' && Number.isFinite(durationMs) ? durationMs : undefined
+    const r = await host.approveExtendControl(sessionId, dur)
     broadcast(getWindow, 'extend:changed')
+    broadcast(getWindow, 'trust:changed')
     return r.ok ? { ok: true as const } : fail(r.error ?? '批准失败')
   })
 

@@ -83,7 +83,8 @@ class ReverseScreenStreamer(
     private val localScreen: () -> InputController.Screen,
     private val send: (peerId: String, type: String, payload: JSONObject.() -> Unit) -> Unit,
     private val sendBinary: (peerId: String, data: ByteArray) -> Unit,
-    private val listener: Listener? = null
+    private val listener: Listener? = null,
+    private val isAutoApprovePeer: (String) -> Boolean = { false }
 ) {
 
     interface Listener {
@@ -213,6 +214,14 @@ class ReverseScreenStreamer(
             sendError(peerId, "resource busy")
             return
         }
+        // 免确认有效期内且 MediaProjection 仍存活：直接复用已持有的录屏通道，零弹窗开流
+        if (projection != null && virtualDisplay != null && isAutoApprovePeer(peerId)) {
+            Log.i(TAG, "免确认设备 $peerId 请求反向投屏（${scaleWidth}p），直接复用已持有 MediaProjection 零弹窗开流")
+            val req = ReverseStreamRequest(peerId, scaleWidth, System.currentTimeMillis())
+            if (reuseProjectionFor(req)) {
+                return
+            }
+        }
         queueRequest(peerId, scaleWidth)
     }
 
@@ -258,9 +267,8 @@ class ReverseScreenStreamer(
         }
         val a = active
         if (a != null && a.peerId == peerId) {
-            // 对端主动停：停推流并回 stop 确认（与桌面端 screen.stream.stop
-            // 回声对称）
-            stopInternal("对端停止反向投屏", notifyPeer = true)
+            // 对端主动停：停推流并回 stop 确认，保留 MediaProjection 以便免确认期内复用
+            stopInternal("对端停止反向投屏", notifyPeer = true, releaseProjection = false)
             return
         }
         val p = pending
@@ -275,30 +283,29 @@ class ReverseScreenStreamer(
     /** 本机主动停止反向投屏（UI 关闭 / 服务退出） */
     @Synchronized
     fun stop() {
-        stopInternal("本机停止反向投屏", notifyPeer = true)
+        stopInternal("本机停止反向投屏", notifyPeer = true, releaseProjection = false)
     }
 
-    /** 连接断开：推流立即失效（断线恢复的源端半边） */
+    /** 连接断开：推流立即失效（保留 MediaProjection 供免确认重连复用） */
     @Synchronized
     fun onPeerDisconnected(peerId: String) {
         if (active?.peerId == peerId || pending?.peerId == peerId) {
-            stopInternal("对端连接断开", notifyPeer = false)
+            stopInternal("对端连接断开", notifyPeer = false, releaseProjection = false)
         }
     }
 
-    /** 信任撤销：比断连更优先的终止理由，立即掐断 */
+    /** 信任撤销：比断连更优先的终止理由，立即掐断并彻底释放录屏令牌 */
     @Synchronized
     fun onTrustRevoked(peerId: String) {
         if (active?.peerId == peerId || pending?.peerId == peerId) {
-            stopInternal("信任已被撤销", notifyPeer = false)
+            stopInternal("信任已被撤销", notifyPeer = false, releaseProjection = true)
         }
     }
 
     /** 系统停掉了录屏（用户从通知栏停止或授权被收回） */
     @Synchronized
     fun onProjectionStopped() {
-        if (active == null) return
-        stopInternal("系统停掉了录屏", notifyPeer = true)
+        stopInternal("系统停掉了录屏", notifyPeer = active != null, releaseProjection = true)
     }
 
     /** 出站写线程确认一批字节已写出（背压回填） */
@@ -409,7 +416,54 @@ class ReverseScreenStreamer(
         return w to h
     }
 
+    private fun reuseProjectionFor(req: ReverseStreamRequest): Boolean {
+        val vd = virtualDisplay ?: return false
+        val screen = localScreen()
+        val (w, h) = computeDims(req.scaleWidth, screen)
+        val preset = STREAM_PRESETS.firstOrNull { it.width == req.scaleWidth } ?: STREAM_PRESETS[1]
+        val bitrateBps = currentBitrateBps(preset)
+        stopEncoderOnly()
+        val handle = createEncoder(w, h, bitrateBps) ?: return false
+        return try {
+            val dpi = appContext.resources.displayMetrics.densityDpi
+            vd.setSurface(handle.surface)
+            vd.resize(w, h, dpi)
+            encoderHandle = handle
+            tier = 0
+            congestionScore = 0
+            queuedBytes.set(0)
+            dropping = false
+            active = ActiveStream(req.peerId, req.scaleWidth, w, h, handle.name, System.currentTimeMillis())
+            startProbe()
+            sendStart(active!!)
+            handle.start()
+            Log.i(TAG, "复用已缓存 MediaProjection 启动反向投屏 → ${req.peerId}（${w}x$h，编码器=${handle.name}）")
+            listener?.onChanged()
+            true
+        } catch (e: Exception) {
+            Log.w(TAG, "复用缓存 MediaProjection 失败，回退重申请: ${e.message}")
+            handle.stop()
+            releaseCachedProjection()
+            false
+        }
+    }
+
+    private fun releaseCachedProjection() {
+        val vd = virtualDisplay
+        virtualDisplay = null
+        if (vd != null) runCatching { vd.release() }
+        val proj = projection
+        val cb = projectionCallback
+        projection = null
+        projectionCallback = null
+        if (cb != null && proj != null) runCatching { proj.unregisterCallback(cb) }
+        if (proj != null) runCatching { proj.stop() }
+    }
+
     private fun startEncoderFor(req: ReverseStreamRequest, projection: MediaProjection) {
+        if (this.projection != null && this.projection !== projection) {
+            releaseCachedProjection()
+        }
         val screen = localScreen()
         val (w, h) = computeDims(req.scaleWidth, screen)
         val preset = STREAM_PRESETS.firstOrNull { it.width == req.scaleWidth } ?: STREAM_PRESETS[1]
@@ -483,7 +537,7 @@ class ReverseScreenStreamer(
         stopEncoderOnly()
         val handle = createEncoder(w, h, bitrateBps)
         if (handle == null) {
-            stopInternal("编码器重启失败", notifyPeer = true)
+            stopInternal("编码器重启失败", notifyPeer = true, releaseProjection = false)
             return
         }
         val dpi = appContext.resources.displayMetrics.densityDpi
@@ -528,22 +582,18 @@ class ReverseScreenStreamer(
         h?.let { runCatching { it.stop() } }
     }
 
-    private fun stopInternal(reason: String, notifyPeer: Boolean) {
+    private fun stopInternal(reason: String, notifyPeer: Boolean, releaseProjection: Boolean = false) {
         val a = active
         clearTimer()
         stopProbe()
         pending = null
         active = null
+        // 先将 VirtualDisplay 的 surface 置空再停编码器，保持 VirtualDisplay 与 MediaProjection 存活可复用
+        runCatching { virtualDisplay?.surface = null }
         stopEncoderOnly()
-        val vd = virtualDisplay
-        virtualDisplay = null
-        if (vd != null) runCatching { vd.release() }
-        val proj = projection
-        val cb = projectionCallback
-        projection = null
-        projectionCallback = null
-        if (cb != null && proj != null) runCatching { proj.unregisterCallback(cb) }
-        if (proj != null) runCatching { proj.stop() }
+        if (releaseProjection) {
+            releaseCachedProjection()
+        }
         queuedBytes.set(0)
         dropping = false
         if (a != null && notifyPeer) {
@@ -551,7 +601,7 @@ class ReverseScreenStreamer(
                 put("direction", Protocol.STREAM_DIRECTION_REVERSE)
             }
         }
-        Log.i(TAG, "反向投屏停止：$reason")
+        Log.i(TAG, "反向投屏停止：$reason (releaseProjection=$releaseProjection)")
         listener?.onChanged()
     }
 

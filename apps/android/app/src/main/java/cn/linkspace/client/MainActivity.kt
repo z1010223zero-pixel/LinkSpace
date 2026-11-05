@@ -323,8 +323,8 @@ fun MainScreen(service: LinkSpaceService, onClipboardToggle: (Boolean) -> Unit) 
         val req = reverseRequest!!
         ReverseStreamRequestDialog(
             req = req,
-            onApprove = { trust ->
-                if (trust) service.grantNoConfirmTrust(req.peerId)
+            onApprove = { durationMs ->
+                if (durationMs != 0L) service.grantNoConfirmTrust(req.peerId, durationMs)
                 captureRequest = req
                 val manager =
                     context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as android.media.projection.MediaProjectionManager
@@ -339,12 +339,12 @@ fun MainScreen(service: LinkSpaceService, onClipboardToggle: (Boolean) -> Unit) 
     // 确认 UI 未弹出时不放行任何输入。同上，控制会话激活时
     // early return 会跳过挂在后面的框，一并提到前面。
     // 信任设备由会话层直接放行（Bug 2），到不了这里；这里只处理
-    // 未信任设备的确认，勾选“信任此设备”随放行一起授信。
+    // 未信任设备的确认，选择免确认有效期随放行一起授信。
     if (controlRequest != null) {
         val req = controlRequest!!
         ControlRequestDialog(
             req = req,
-            onApprove = { trust -> service.approveControl(req.sessionId, trust) },
+            onApprove = { durationMs -> service.approveControl(req.sessionId, durationMs) },
             onDeny = { service.denyControl(req.sessionId) }
         )
     }
@@ -500,8 +500,13 @@ fun MainScreen(service: LinkSpaceService, onClipboardToggle: (Boolean) -> Unit) 
                                 },
                                 versionName = versionName,
                                 trustedNoConfirm = trusted.filter {
-                                    it.scope.contains(Protocol.SCOPE_NO_CONFIRM)
+                                    service.isNoConfirmTrusted(it.deviceId)
                                 },
+                                onSetNoConfirmDuration = { deviceId, durationMs ->
+                                    service.grantNoConfirmTrust(deviceId, durationMs)
+                                    board.success("已更新免确认有效期")
+                                },
+                                allTrustedDevices = trusted,
                                 onRevokeNoConfirm = { deviceId ->
                                     val name = trusted.firstOrNull { it.deviceId == deviceId }?.displayName
                                         ?: deviceId

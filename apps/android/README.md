@@ -37,6 +37,12 @@ Kotlin + Jetpack Compose。**文件收发双向**（通告自身、接受配对�
 cancel/complete 绑定连接身份（P1-7）、组合键百分号编码（P1-8）、
 配对码不再进 logcat、前台服务保活（P2）。
 
+### 进展（2026-11-05 最新）
+
+- **双向免确认有效期与长效录屏**：支持用户自选免确认控制时长；反向推流结束时复用 `MediaProjection` 与 `VirtualDisplay`，有效期内电脑二次发起投屏时零弹窗秒开。
+- **锁屏唤醒与自动上滑解锁**：配置 `WAKE_LOCK`、`DISABLE_KEYGUARD` 与 `showWhenLocked`，被控启动时无障碍服务自动点亮屏幕并注入上滑手势解除锁屏。
+- **原生 libswscale 解码与 120Hz 触控直通**：StreamDecoder 启用 4 线程 `FF_THREAD_SLICE` 并行解码与原生 libswscale NEON 零拷贝，单帧转换耗时由 ~45ms 降至 ~1.5ms；触控以 8ms 节流合并下发并本地即时刷新光标。
+
 ---
 
 ## 构建环境

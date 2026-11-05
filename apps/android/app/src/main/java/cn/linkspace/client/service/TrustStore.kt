@@ -19,7 +19,9 @@ class TrustStore(private val file: File) {
         val deviceType: String,
         val fingerprint: String,
         val scope: List<String>,
-        val trustedAt: Long
+        val trustedAt: Long,
+        /** 免确认控制到期时间戳（epoch ms）：-1 表示永久有效，>0 表示到期时间，0 表示每次询问 */
+        val noConfirmUntil: Long = 0L
     )
 
     private val entries = mutableListOf<Entry>()
@@ -32,13 +34,22 @@ class TrustStore(private val file: File) {
             entries.clear()
             for (i in 0 until arr.length()) {
                 val o = arr.getJSONObject(i)
+                val scopeList = o.getJSONArray("scope").let { a -> (0 until a.length()).map { a.getString(it) } }
+                val rawUntil = if (o.has("noConfirmUntil")) {
+                    o.optLong("noConfirmUntil", 0L)
+                } else if (scopeList.contains(Protocol.SCOPE_NO_CONFIRM)) {
+                    -1L
+                } else {
+                    0L
+                }
                 entries += Entry(
                     deviceId = o.getString("deviceId"),
                     displayName = o.getString("displayName"),
                     deviceType = o.getString("deviceType"),
                     fingerprint = o.getString("fingerprint"),
-                    scope = o.getJSONArray("scope").let { a -> (0 until a.length()).map { a.getString(it) } },
-                    trustedAt = o.getLong("trustedAt")
+                    scope = scopeList,
+                    trustedAt = o.getLong("trustedAt"),
+                    noConfirmUntil = rawUntil
                 )
             }
         }.onFailure {
@@ -47,12 +58,61 @@ class TrustStore(private val file: File) {
         }
     }
 
+    private fun isEntryNoConfirmValid(e: Entry, now: Long): Boolean {
+        if (e.noConfirmUntil == -1L) return true
+        if (e.noConfirmUntil > now) return true
+        return false
+    }
+
+    @Synchronized
+    fun isNoConfirmValid(deviceId: String, now: Long = System.currentTimeMillis()): Boolean {
+        val e = entries.firstOrNull { it.deviceId == deviceId } ?: return false
+        return isEntryNoConfirmValid(e, now)
+    }
+
+    @Synchronized
+    fun noConfirmUntilOf(deviceId: String): Long =
+        entries.firstOrNull { it.deviceId == deviceId }?.noConfirmUntil ?: 0L
+
+    /**
+     * 设置免确认有效期：
+     * - durationMs < 0：永久免确认（noConfirmUntil = -1L）
+     * - durationMs > 0：自当前起持续 durationMs 毫秒（noConfirmUntil = now + durationMs）
+     * - durationMs == 0：取消免确认（noConfirmUntil = 0L）
+     */
+    @Synchronized
+    fun grantNoConfirmDuration(
+        deviceId: String,
+        durationMs: Long,
+        now: Long = System.currentTimeMillis()
+    ): Boolean {
+        val idx = entries.indexOfFirst { it.deviceId == deviceId }
+        if (idx < 0) return false
+        val cur = entries[idx]
+        val targetUntil = when {
+            durationMs < 0L -> -1L
+            durationMs > 0L -> now + durationMs
+            else -> 0L
+        }
+        val targetScope = if (targetUntil != 0L) {
+            if (cur.scope.contains(Protocol.SCOPE_NO_CONFIRM)) cur.scope else cur.scope + Protocol.SCOPE_NO_CONFIRM
+        } else {
+            cur.scope - Protocol.SCOPE_NO_CONFIRM
+        }
+        if (cur.noConfirmUntil == targetUntil && cur.scope == targetScope) return false
+        entries[idx] = cur.copy(scope = targetScope, noConfirmUntil = targetUntil)
+        persist()
+        return true
+    }
+
     @Synchronized
     fun isKnown(deviceId: String): Boolean = entries.any { it.deviceId == deviceId }
 
     @Synchronized
-    fun hasScope(deviceId: String, scope: String): Boolean =
-        entries.any { it.deviceId == deviceId && it.scope.contains(scope) }
+    fun hasScope(deviceId: String, scope: String): Boolean {
+        if (scope == Protocol.SCOPE_NO_CONFIRM) return isNoConfirmValid(deviceId)
+        return entries.any { it.deviceId == deviceId && it.scope.contains(scope) }
+    }
 
     /**
      * 按设备 ID 前缀判定授权，发送方向专用。
@@ -63,8 +123,13 @@ class TrustStore(private val file: File) {
      * 唯一性由指纹保证，不存在误配空间。
      */
     @Synchronized
-    fun hasScopeFor(deviceIdPrefix: String, scope: String): Boolean =
-        entries.any { it.deviceId.startsWith(deviceIdPrefix) && it.scope.contains(scope) }
+    fun hasScopeFor(deviceIdPrefix: String, scope: String): Boolean {
+        if (scope == Protocol.SCOPE_NO_CONFIRM) {
+            val now = System.currentTimeMillis()
+            return entries.any { it.deviceId.startsWith(deviceIdPrefix) && isEntryNoConfirmValid(it, now) }
+        }
+        return entries.any { it.deviceId.startsWith(deviceIdPrefix) && it.scope.contains(scope) }
+    }
 
     @Synchronized
     fun fingerprintOf(deviceId: String): String? =
@@ -105,6 +170,9 @@ class TrustStore(private val file: File) {
      */
     @Synchronized
     fun grantScope(deviceId: String, scope: String): Boolean {
+        if (scope == Protocol.SCOPE_NO_CONFIRM) {
+            return grantNoConfirmDuration(deviceId, -1L)
+        }
         val idx = entries.indexOfFirst { it.deviceId == deviceId }
         if (idx < 0 || entries[idx].scope.contains(scope)) return false
         entries[idx] = entries[idx].copy(scope = entries[idx].scope + scope)
@@ -118,6 +186,9 @@ class TrustStore(private val file: File) {
      */
     @Synchronized
     fun revokeScope(deviceId: String, scope: String): Boolean {
+        if (scope == Protocol.SCOPE_NO_CONFIRM) {
+            return grantNoConfirmDuration(deviceId, 0L)
+        }
         val idx = entries.indexOfFirst { it.deviceId == deviceId }
         if (idx < 0 || !entries[idx].scope.contains(scope)) return false
         entries[idx] = entries[idx].copy(scope = entries[idx].scope - scope)
@@ -133,8 +204,13 @@ class TrustStore(private val file: File) {
     fun clearScope(scope: String): Int {
         var changed = 0
         for (i in entries.indices) {
-            if (entries[i].scope.contains(scope)) {
-                entries[i] = entries[i].copy(scope = entries[i].scope - scope)
+            val hasIt = entries[i].scope.contains(scope) ||
+                (scope == Protocol.SCOPE_NO_CONFIRM && entries[i].noConfirmUntil != 0L)
+            if (hasIt) {
+                entries[i] = entries[i].copy(
+                    scope = entries[i].scope - scope,
+                    noConfirmUntil = if (scope == Protocol.SCOPE_NO_CONFIRM) 0L else entries[i].noConfirmUntil
+                )
                 changed++
             }
         }
@@ -166,6 +242,7 @@ class TrustStore(private val file: File) {
                     put("fingerprint", e.fingerprint)
                     put("scope", JSONArray(e.scope))
                     put("trustedAt", e.trustedAt)
+                    put("noConfirmUntil", e.noConfirmUntil)
                 }
             )
         }

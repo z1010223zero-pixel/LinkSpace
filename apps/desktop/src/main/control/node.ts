@@ -211,6 +211,7 @@ export class ControlNode {
         socket.destroy()
         return
       }
+      ;(socket as TLSSocket).setNoDelay?.(true)
       this.wss!.handleUpgrade(req, socket, head, (ws) => this.accept(ws))
     })
   }
@@ -231,6 +232,7 @@ export class ControlNode {
         socket.destroy()
         return
       }
+      ;(socket as TLSSocket).setNoDelay?.(true)
       this.wss!.handleUpgrade(req, socket, head, (ws) => this.accept(ws))
     })
     await new Promise<void>((resolve) => server.listen(port, '127.0.0.1', resolve))
@@ -277,6 +279,13 @@ export class ControlNode {
   }
 
   private wrap(ws: WebSocket): Connection {
+    // 关闭 Nagle 算法（TCP_NODELAY）：视频流与高频键鼠包对 40~200ms 的
+    // Nagle + Delayed ACK 攒包极其敏感，必须在 TLS socket 与底层 TCP socket 上都开启
+    const rawSock = (ws as unknown as {
+      _socket?: { setNoDelay?: (noDelay?: boolean) => void; _parent?: { setNoDelay?: (noDelay?: boolean) => void } }
+    })._socket
+    rawSock?.setNoDelay?.(true)
+    rawSock?._parent?.setNoDelay?.(true)
     // 限频滑窗（审查 P2-5）：per-connection 闭包，连接关闭随 conn 回收
     const rateWindow = new Map<string, number[]>()
     // id 去重（协议 §3）：per-connection 闭包，连接关闭随 conn 回收
