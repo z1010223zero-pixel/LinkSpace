@@ -1,5 +1,6 @@
 package cn.linkspace.client.ui
 
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -9,6 +10,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Switch
@@ -49,6 +51,8 @@ fun SettingsPage(
     onClearNoConfirm: () -> Unit = {},
     allTrustedDevices: List<TrustStore.Entry> = emptyList(),
     onSetNoConfirmDuration: (String, Long) -> Unit = { _, _ -> },
+    streamMode: String = "auto",
+    onSelectStreamMode: (String) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     var showExitConfirm by remember { mutableStateOf(false) }
@@ -102,6 +106,29 @@ fun SettingsPage(
                 }
                 Spacer(Modifier.width(LinkSpaceSpacing.md))
                 Switch(checked = clipboardEnabled, onCheckedChange = onClipboardToggle)
+            }
+        }
+
+        SectionTitle("远控串流模式（平板控电脑）")
+        Card(Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(LinkSpaceSpacing.lg)) {
+                Text(
+                    "高性能硬解：采用桌面 DXGI 抓屏 + 显卡硬件编码（QSV/NVENC/AMF）+ 平板 MediaCodec Surface 硬解直投，60fps 低延迟、画质稳定。兼容软解：采用 gdigrab + libx264 + FFmpeg 软解。「自动」默认优先走高性能硬解，不支持时自动回退兼容软解。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Row(
+                    Modifier.padding(top = LinkSpaceSpacing.sm),
+                    horizontalArrangement = Arrangement.spacedBy(LinkSpaceSpacing.sm),
+                ) {
+                    STREAM_MODE_OPTIONS.forEach { (label, value) ->
+                        FilterChip(
+                            selected = streamMode == value,
+                            onClick = { onSelectStreamMode(value) },
+                            label = { Text(label) }
+                        )
+                    }
+                }
             }
         }
 

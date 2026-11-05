@@ -48,6 +48,11 @@ class LinkSpaceService private constructor(private val appContext: Context) {
 
         private const val KEY_DISPLAY_NAME = "displayName"
         private const val KEY_CLIPBOARD_SYNC = "clipboardSyncEnabled"
+        private const val KEY_STREAM_MODE = "streamMode"
+        const val STREAM_MODE_AUTO = "auto"
+        const val STREAM_MODE_FAST = "fast"
+        const val STREAM_MODE_COMPAT = "compat"
+        private const val MSG_SCREEN_STREAM_KEYFRAME = "screen.stream.keyframe"
         /** 同时挂起的配对请求上限，与桌面端 MAX_PENDING 一致 */
         private const val MAX_PENDING_PAIRINGS = 8
         /** 配对码最大错误次数，超过即断开对端连接（与桌面端 maxAttempts 一致） */
@@ -163,6 +168,7 @@ class LinkSpaceService private constructor(private val appContext: Context) {
             ?: (android.os.Build.MODEL ?: "Android")
         _selfName.value = displayName
         _clipboardEnabled.value = prefs.getBoolean(KEY_CLIPBOARD_SYNC, false)
+        _streamMode.value = prefs.getString(KEY_STREAM_MODE, STREAM_MODE_AUTO) ?: STREAM_MODE_AUTO
 
         val srv = TransferServer(
             identity = identity,
@@ -1372,8 +1378,11 @@ class LinkSpaceService private constructor(private val appContext: Context) {
                     if (++recvFrames % 200 == 0) {
                         Log.i(TAG, "已收视频块 $recvFrames 个 / ${recvBytes / 1e6}MB")
                     }
+                    val fastDec = fastStreamDecoder
                     val decoder = streamDecoder
-                    if (decoder != null) {
+                    if (fastDec != null) {
+                        fastDec.feed(frame.second)
+                    } else if (decoder != null) {
                         decoder.feed(frame.second)
                     } else {
                         synchronized(pendingVideo) { pendingVideo.add(frame.second) }
@@ -1442,7 +1451,8 @@ class LinkSpaceService private constructor(private val appContext: Context) {
                     Protocol.TYPE_SCREEN_STREAM_REQUEST -> reverseScreen.onRequest(from, payload)
                     // ---------- 屏幕投屏 ----------
                     Protocol.TYPE_SCREEN_STREAM_START -> {
-                        Log.i(TAG, "收到投屏启动 w=${payload.optInt("w")} h=${payload.optInt("h")}")
+                        val mode = payload.optString("mode", "")
+                        Log.i(TAG, "收到投屏启动 mode=$mode w=${payload.optInt("w")} h=${payload.optInt("h")}")
                         _streamScaleWidth.value = payload.optInt("scaleWidth", lastStreamScaleWidth)
                         streamFallbackSize = payload.optInt("w", 1920) to payload.optInt("h", 1080)
                         _screenStream.value = ScreenStreamInfo(
@@ -1450,17 +1460,25 @@ class LinkSpaceService private constructor(private val appContext: Context) {
                             streamFallbackSize.second
                         )
                         // 重投屏场景：残留解码器（断流路径被 stopped 吞掉回调
-                        // 的旧实例）会把新流挡死，先清再建。渲染与解码解耦
-                        // （ByteBuffer 模式），无需渲染面到位即可起解
-                        streamDecoder?.shutdown()
-                        streamDecoder = null
+                        // 的旧实例）会把新流挡死，先清再建。
+                        shutdownStreamDecoders()
                         synchronized(pendingVideo) { pendingVideo.clear() }
-                        startStreamDecoder()
+                        if (mode == STREAM_MODE_FAST) {
+                            val streamW = payload.optInt("streamW", payload.optInt("w", 1920))
+                            val streamH = payload.optInt("streamH", payload.optInt("h", 1080))
+                            val fps = payload.optInt("fps", 60)
+                            _streamStats.value = "硬解连接中…"
+                            streamRenderView?.get()?.clearBitmap()
+                            startFastStreamDecoder(streamW, streamH, fps)
+                        } else {
+                            _streamStats.value = "兼容软解…"
+                            startStreamDecoder()
+                        }
                     }
                     Protocol.TYPE_SCREEN_STREAM_STOP -> handleScreenStreamStop(from, payload)
                     Protocol.TYPE_SCREEN_STREAM_ERROR -> {
-                        streamDecoder?.shutdown()
-                        streamDecoder = null
+                        shutdownStreamDecoders()
+                        _streamStats.value = null
                         _screenStream.value = null
                         _inputMessage.value = payload.optString("message", "投屏失败")
                     }
@@ -1496,7 +1514,7 @@ class LinkSpaceService private constructor(private val appContext: Context) {
             // 主动关闭（stopAll/换目标）时 outbound 已被置空，不再误报
             if (outbound?.conn === conn) {
                 outbound = null
-                val wasStreaming = _screenStream.value != null || streamDecoder != null
+                val wasStreaming = _screenStream.value != null || streamDecoder != null || fastStreamDecoder != null
                 input.onPeerDisconnected(fullId)
                 controlledInput.onPeerDisconnected(fullId)
                 displayExtend.onPeerDisconnected(fullId)
@@ -1572,6 +1590,15 @@ class LinkSpaceService private constructor(private val appContext: Context) {
     /** 观看页挂载/更新时回调；传 null = 页面销毁 */
     fun attachStreamView(view: cn.linkspace.client.StreamView?) {
         streamRenderView = view?.let { java.lang.ref.WeakReference(it) }
+        if (view != null) {
+            view.onSurfaceChanged = { s -> fastStreamDecoder?.setSurface(s) }
+            fastStreamDecoder?.setSurface(view.currentSurface)
+            if (fastStreamDecoder != null) {
+                view.clearBitmap()
+            }
+        } else {
+            fastStreamDecoder?.setSurface(null)
+        }
     }
 
     /**
@@ -1626,8 +1653,8 @@ class LinkSpaceService private constructor(private val appContext: Context) {
         val out = outbound
         outbound = null
         _screenStream.value = null
-        streamDecoder?.shutdown()
-        streamDecoder = null
+        _streamStats.value = null
+        shutdownStreamDecoders()
         synchronized(pendingVideo) { pendingVideo.clear() }
         if (out != null) {
             out.jobs.cancel()
@@ -1665,8 +1692,49 @@ class LinkSpaceService private constructor(private val appContext: Context) {
     private val _streamScaleWidth = MutableStateFlow(1920)
     val streamScaleWidth: StateFlow<Int> = _streamScaleWidth
 
-    /** 进行中的投屏解码器。null = 无投屏 */
+    /** 串流模式偏好：auto（默认，优先高性能硬解） / fast（高性能硬解） / compat（兼容软解） */
+    private val _streamMode = MutableStateFlow(STREAM_MODE_AUTO)
+    val streamMode: StateFlow<String> = _streamMode
+
+    /** 当前会话是否因硬解异常自动降级到兼容模式 */
+    @Volatile
+    private var fastSessionFallback = false
+
+    /** 实时串流状态文案（供 StreamTopBar 显示帧率/码率/解码耗时） */
+    private val _streamStats = MutableStateFlow<String?>(null)
+    val streamStats: StateFlow<String?> = _streamStats
+
+    fun setStreamMode(mode: String) {
+        val clean = when (mode) {
+            STREAM_MODE_FAST, STREAM_MODE_COMPAT, STREAM_MODE_AUTO -> mode
+            else -> STREAM_MODE_AUTO
+        }
+        prefs.edit().putString(KEY_STREAM_MODE, clean).apply()
+        val changed = _streamMode.value != clean
+        _streamMode.value = clean
+        fastSessionFallback = false
+        if (changed && _screenStream.value != null) {
+            requestScreenStream(
+                displayIndex = lastStreamDisplayIndex,
+                scaleWidth = lastStreamScaleWidth,
+                source = lastStreamSource,
+                force = true
+            )
+        }
+    }
+
+    /** 进行中的兼容软解解码器。null = 未走软解 */
     private var streamDecoder: StreamDecoder? = null
+    /** 进行中的高性能硬解解码器。null = 未走硬解 */
+    private var fastStreamDecoder: FastStreamDecoder? = null
+
+    private fun shutdownStreamDecoders() {
+        streamDecoder?.shutdown()
+        streamDecoder = null
+        fastStreamDecoder?.shutdown()
+        fastStreamDecoder = null
+    }
+
     /** 桌面回 start 时填的虚拟屏尺寸（触控映射的回退基准） */
     @Volatile
     var streamFallbackSize: Pair<Int, Int> = 1920 to 1080
@@ -1697,8 +1765,9 @@ class LinkSpaceService private constructor(private val appContext: Context) {
             return
         }
         val resolvedSource = source ?: lastStreamSource
+        val anyDecoder = streamDecoder != null || fastStreamDecoder != null
         // 同一分辨率重复请求直接忽略；换分辨率则允许重建推流
-        if (!force && streamDecoder != null && scaleWidth == lastStreamScaleWidth &&
+        if (!force && anyDecoder && scaleWidth == lastStreamScaleWidth &&
             resolvedSource == lastStreamSource
         ) return
         // 换分辨率时如果不指定显示器，沿用当前选屏，避免再次弹显示器清单；
@@ -1711,14 +1780,36 @@ class LinkSpaceService private constructor(private val appContext: Context) {
         lastStreamSource = resolvedSource
         _streamScaleWidth.value = scaleWidth
         pendingVideo.clear()
+        val wantFast = resolvedSource == Protocol.STREAM_SOURCE_SCREEN &&
+            _streamMode.value != STREAM_MODE_COMPAT &&
+            !fastSessionFallback
+        val dm = appContext.resources.displayMetrics
+        val dmLong = maxOf(dm.widthPixels, dm.heightPixels).coerceAtLeast(1280)
+        val dmShort = minOf(dm.widthPixels, dm.heightPixels).coerceAtLeast(720)
+        val boxW = scaleWidth.coerceIn(1280, 3840)
+        val boxH = (boxW.toLong() * dmShort / dmLong).toInt().coerceIn(720, 2160)
         val text = envelope(Protocol.TYPE_SCREEN_STREAM_REQUEST, out.peerId) {
             // 带 display 的请求直接选屏；不带则被控端回显示器清单
             if (resolvedDisplayIndex >= 0) put("display", resolvedDisplayIndex)
             put("scaleWidth", scaleWidth)
             put("source", resolvedSource)
+            if (wantFast) {
+                put("mode", STREAM_MODE_FAST)
+                put(
+                    "fast",
+                    JSONObject().apply {
+                        put("w", boxW)
+                        put("h", boxH)
+                        put("fps", 60)
+                    }
+                )
+            }
         }.toString()
         outboundWriter.execute { runCatching { client.sendText(out.conn, text) } }
-        Log.i(TAG, "投屏请求已发（display=$resolvedDisplayIndex, scaleWidth=$scaleWidth, source=$resolvedSource）")
+        Log.i(
+            TAG,
+            "投屏请求已发（display=$resolvedDisplayIndex, scaleWidth=$scaleWidth, source=$resolvedSource, fast=$wantFast）"
+        )
     }
 
     /**
@@ -1802,7 +1893,7 @@ class LinkSpaceService private constructor(private val appContext: Context) {
     private fun startAnrWatchdog() {
         if (anrWatchdog?.isAlive == true) return
         anrWatchdog = Thread({
-            while (streamDecoder != null || streamRenderView?.get() != null) {
+            while (streamDecoder != null || fastStreamDecoder != null || streamRenderView?.get() != null) {
                 val done = java.util.concurrent.atomic.AtomicBoolean(false)
                 mainHandler.post { done.set(true) }
                 Thread.sleep(3000)
@@ -1825,6 +1916,56 @@ class LinkSpaceService private constructor(private val appContext: Context) {
         }, "linkspace-anr-watchdog").apply { isDaemon = true; start() }
     }
 
+    private fun startFastStreamDecoder(streamW: Int, streamH: Int, fps: Int) {
+        if (fastStreamDecoder != null) return
+        startAnrWatchdog()
+        var decoderRef: FastStreamDecoder? = null
+        val decoder = FastStreamDecoder(
+            streamWidth = streamW,
+            streamHeight = streamH,
+            fps = fps,
+            initialSurface = streamRenderView?.get()?.currentSurface,
+            onStats = { stat ->
+                if (fastStreamDecoder === decoderRef) {
+                    _streamStats.value = stat
+                }
+            },
+            onRequestKeyframe = {
+                val out = outbound ?: return@FastStreamDecoder
+                val text = envelope(MSG_SCREEN_STREAM_KEYFRAME, out.peerId) {}.toString()
+                outboundWriter.execute { runCatching { client.sendText(out.conn, text) } }
+            },
+            onFallback = { reason ->
+                if (fastStreamDecoder !== decoderRef) return@FastStreamDecoder
+                Log.w(TAG, "高性能硬解回退兼容软解: $reason")
+                fastStreamDecoder?.shutdown()
+                fastStreamDecoder = null
+                fastSessionFallback = true
+                _streamStats.value = "正在切换兼容模式…"
+                requestScreenStream(
+                    displayIndex = lastStreamDisplayIndex,
+                    scaleWidth = lastStreamScaleWidth,
+                    source = lastStreamSource,
+                    force = true
+                )
+            },
+            onEnded = { reason ->
+                if (fastStreamDecoder !== decoderRef) return@FastStreamDecoder
+                _inputMessage.value = reason
+                _screenStream.value = null
+                _streamStats.value = null
+                fastStreamDecoder?.shutdown()
+                fastStreamDecoder = null
+            }
+        )
+        decoderRef = decoder
+        fastStreamDecoder = decoder
+        synchronized(pendingVideo) {
+            while (pendingVideo.isNotEmpty()) decoder.feed(pendingVideo.poll())
+        }
+        decoder.start()
+    }
+
     private fun startStreamDecoder() {
         if (streamDecoder != null) return
         startAnrWatchdog()
@@ -1843,6 +1984,7 @@ class LinkSpaceService private constructor(private val appContext: Context) {
                 if (streamDecoder !== decoderRef) return@StreamDecoder
                 _inputMessage.value = reason
                 _screenStream.value = null
+                _streamStats.value = null
                 // 解码线程的任何死亡（断流/内部错误）都必须同时清掉引用：
                 // 残留的非空 streamDecoder 会让下次投屏请求被挡死（真机踩过）
                 streamDecoder?.shutdown()
@@ -1854,6 +1996,11 @@ class LinkSpaceService private constructor(private val appContext: Context) {
                 // 解码实际尺寸（流内 SPS）回灌 UI：letterbox 等比渲染以它为准
                 // （session.start 时声明的尺寸可能与 ffmpeg 实际推流输出不同）
                 _screenStream.value = ScreenStreamInfo(w, h)
+            },
+            onStats = { stat ->
+                if (streamDecoder === decoderRef) {
+                    _streamStats.value = stat
+                }
             }
         )
         decoderRef = decoder
@@ -1873,8 +2020,9 @@ class LinkSpaceService private constructor(private val appContext: Context) {
             }.toString()
             outboundWriter.execute { runCatching { client.sendText(out.conn, text) } }
         }
-        streamDecoder?.shutdown()
-        streamDecoder = null
+        fastSessionFallback = false
+        shutdownStreamDecoders()
+        _streamStats.value = null
         _screenStream.value = null
     }
 
@@ -1888,7 +2036,8 @@ class LinkSpaceService private constructor(private val appContext: Context) {
      * 属于发消息对端的流，旁观连接的 stop 够不着别人的流。
      */
     private fun handleScreenStreamStop(from: String, payload: JSONObject) {
-        val forwardLive = (streamDecoder != null || _screenStream.value != null) && outbound?.peerId == from
+        val forwardLive = (streamDecoder != null || fastStreamDecoder != null || _screenStream.value != null) &&
+            outbound?.peerId == from
         val reverseLive = reverseScreen.pendingRequest?.peerId == from ||
             reverseScreen.activeStream?.peerId == from
         val rawDirection: String? =
@@ -1899,8 +2048,8 @@ class LinkSpaceService private constructor(private val appContext: Context) {
             return
         }
         if (direction == Protocol.STREAM_DIRECTION_FORWARD) {
-            streamDecoder?.shutdown()
-            streamDecoder = null
+            shutdownStreamDecoders()
+            _streamStats.value = null
             _screenStream.value = null
         } else {
             reverseScreen.onStop(from, direction)

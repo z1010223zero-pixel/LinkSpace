@@ -223,6 +223,7 @@ fun MainScreen(service: LinkSpaceService, onClipboardToggle: (Boolean) -> Unit) 
     val reverseRequest by service.reverseStreamRequest.collectAsStateWithLifecycle()
     val reverseStatus by service.reverseStreamStatus.collectAsStateWithLifecycle()
     val clipboardEnabled by service.clipboardEnabled.collectAsStateWithLifecycle()
+    val streamMode by service.streamMode.collectAsStateWithLifecycle()
     val selfName by service.selfName.collectAsStateWithLifecycle()
     val fingerprintText by service.fingerprintText.collectAsStateWithLifecycle()
     val port by service.port.collectAsStateWithLifecycle()
@@ -516,6 +517,11 @@ fun MainScreen(service: LinkSpaceService, onClipboardToggle: (Boolean) -> Unit) 
                                 onClearNoConfirm = {
                                     service.clearNoConfirmTrust()
                                     board.success("已清空信任清单，下次全部重新确认")
+                                },
+                                streamMode = streamMode,
+                                onSelectStreamMode = { mode ->
+                                    service.setStreamMode(mode)
+                                    board.success("串流模式已切换")
                                 },
                             )
                         }

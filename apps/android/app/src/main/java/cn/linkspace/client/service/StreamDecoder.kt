@@ -52,7 +52,9 @@ class StreamDecoder(
     /** 每个解码完成的帧（复用 Bitmap 实例，提交合流由 StreamView 负责） */
     private val onFrame: (Bitmap) -> Unit,
     /** 流内 SPS 解出后的实际画面尺寸（触控映射基准），解码线程外回调 */
-    private val onSize: (Int, Int) -> Unit = { _, _ -> }
+    private val onSize: (Int, Int) -> Unit = { _, _ -> },
+    /** 每秒遥测文案（供标题栏展示） */
+    private val onStats: (String) -> Unit = {}
 ) : Thread("linkspace-stream-decode") {
 
     private val stopped = AtomicBoolean(false)
@@ -163,6 +165,8 @@ class StreamDecoder(
             val dstData = PointerPointer<BytePointer>(4L)
             val dstLinesize = IntPointer(4L)
             var rendered = 0L
+            var statFrames = 0
+            var statWindowAt = System.currentTimeMillis()
 
             fun drainAndRender() {
                 while (avcodec.avcodec_receive_frame(codecCtx, localFrame) >= 0) {
@@ -219,6 +223,14 @@ class StreamDecoder(
                         bitmap.copyPixelsFromBuffer(buf)
                     }
                     rendered++
+                    statFrames++
+                    val now = System.currentTimeMillis()
+                    if (now - statWindowAt >= 1000L) {
+                        val fps = (statFrames * 1000f / (now - statWindowAt)).toInt()
+                        onStats("兼容软解 ${fps}fps")
+                        statFrames = 0
+                        statWindowAt = now
+                    }
                     if (rendered == 1L || rendered % 300 == 0L) {
                         Log.i(TAG, "已解码渲染 $rendered 帧")
                     }

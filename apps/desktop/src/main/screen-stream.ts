@@ -31,6 +31,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { createWriteStream } from 'node:fs'
 import { log } from './log'
+import { AuSplitter } from './fast-stream'
 
 /** 码率档位（B-3）：tier 0 不限速（超快零延迟优先），往下逐级封顶 */
 export const TIERS: Array<{ label: string; bps: number | null }> = [
@@ -240,6 +241,7 @@ export class ScreenStreamService {
     this.scaleWidth = scaleWidth
     this.regionArgs = regionArgs
     this.encoder = resolveStreamEncoder()
+    this.fastMode = false
     const args = streamFrom
       ? [
           '-hide_banner', '-loglevel', 'error',
@@ -268,6 +270,108 @@ export class ScreenStreamService {
     this.ddRect = null
     this.ddCapturePath = null
     this.launchEncoder(ffmpegPath, args, onChunk, scaleWidth)
+  }
+
+  /**
+   * 启动高性能推流（"fast" 模式）：ddagrab + GPU 硬编，stdout 的 Annex-B 按
+   * 访问单元切开，一帧一次 onAu。复用 proc / stop / onEnded，宿主的停流、
+   * 锁屏暂停、意外退出处理对它同样生效。码率档位在此模式下不重启编码器，
+   * setTier 被忽略（固定 CBR，拥塞靠宿主的发送侧策略处理）。
+   */
+  startFast(opts: {
+    ffmpegPath: string
+    args: string[]
+    onAu: (au: Buffer, key: boolean) => void
+    /** 首帧看门狗：3s 内未产出任何 AU 或进程提前报错退出时触发，供宿主降级/回退兼容模式 */
+    onFastFailed?: (reason: string) => void
+  }): void {
+    if (this.proc) {
+      log.warn('[screen-stream] 发现残留推流进程，先停再启')
+      this.stop()
+    }
+    this.fastMode = true
+    this.streamSource = 'screen'
+    this.ddRect = null
+    this.ddCapturePath = null
+    const splitter = new AuSplitter()
+    const proc = spawn(opts.ffmpegPath, opts.args, { windowsHide: true })
+    let emittedAny = false
+    let flushTimer: NodeJS.Timeout | null = null
+    const clearFlush = (): void => {
+      if (flushTimer) {
+        clearTimeout(flushTimer)
+        flushTimer = null
+      }
+    }
+    const emitAu = (au: Buffer, key: boolean): void => {
+      if (!emittedAny) {
+        emittedAny = true
+        clearTimeout(firstFrameWatchdog)
+      }
+      opts.onAu(au, key)
+    }
+    const firstFrameWatchdog = setTimeout(() => {
+      if (this.proc !== proc || emittedAny) return
+      const tail = this.stderrTail.slice(-2).join(' | ')
+      log.warn(`[screen-stream] ffmpeg(fast) 3s 内未产出首帧，触发降级（${tail || '无 stderr'}）`)
+      clearFlush()
+      this.proc = null
+      try {
+        proc.kill()
+      } catch {
+        /* ignore */
+      }
+      opts.onFastFailed?.(tail || '3s timeout without frame')
+    }, 3000)
+    firstFrameWatchdog.unref?.()
+    this.stderrTail = []
+    proc.stderr.on('data', (chunk: Buffer) => {
+      const line = chunk.toString().trim()
+      if (!line) return
+      this.stderrTail.push(line)
+      if (this.stderrTail.length > 20) this.stderrTail.shift()
+      log.warn(`[screen-stream] ffmpeg(fast): ${line}`)
+    })
+    proc.stdout.on('data', (chunk: Buffer) => {
+      if (this.proc !== proc) return
+      clearFlush()
+      for (const { au, key } of splitter.push(chunk)) emitAu(au, key)
+      // ffmpeg 开启 -flush_packets 1 时，单帧 <64KB 一次 write 完整到达，立即冲刷当前 AU，
+      // 消除「等下一帧 AUD 才吐上一帧」的 16.7ms 延迟与静止画面尾帧滞留；
+      // 若恰好填满 64KB 管道块（大 IDR 帧被拆包），等 3ms 让尾包合入再冲刷。
+      if (chunk.length < 65536) {
+        const tail = splitter.flushPending()
+        if (tail) emitAu(tail.au, tail.key)
+      } else {
+        flushTimer = setTimeout(() => {
+          flushTimer = null
+          if (this.proc !== proc) return
+          const tail = splitter.flushPending()
+          if (tail) emitAu(tail.au, tail.key)
+        }, 3)
+      }
+    })
+    proc.on('exit', (code) => {
+      clearTimeout(firstFrameWatchdog)
+      clearFlush()
+      log.info(`[screen-stream] ffmpeg(fast) 退出（code=${code}）`)
+      if (this.proc === proc) {
+        this.proc = null
+        if (!emittedAny && opts.onFastFailed) {
+          const tail = this.stderrTail.slice(-2).join(' | ')
+          opts.onFastFailed(`code=${code} ${tail}`)
+        } else {
+          this.onEnded?.()
+        }
+      }
+    })
+    this.proc = proc
+    log.info('[screen-stream] 高性能推流已启动（ddagrab + 硬编 → 按帧 WS 二进制）')
+  }
+
+  /** 当前是否高性能模式（宿主据此决定码率自适应、关键帧请求的处理方式） */
+  get isFast(): boolean {
+    return this.fastMode && this.proc != null
   }
 
   /**
@@ -301,6 +405,7 @@ export class ScreenStreamService {
       log.warn('[screen-stream] 发现残留推流进程，先停再启')
       this.stop()
     }
+    this.fastMode = false
     this.streamSource = 'virtual-display'
     this.ddRect = { ...rect }
     this.ddCapturePath = ddCapturePath
@@ -480,6 +585,8 @@ export class ScreenStreamService {
 
   /** 拥塞回调查询：宿主采样 backlog 后调用；换档通过重启 ffmpeg 实现 */
   setTier(tier: number): void {
+    // 高性能模式固定 CBR，不靠重启编码器换档（重启=断流+重新起关键帧=画面抖）
+    if (this.fastMode) return
     const clamped = Math.max(0, Math.min(tier, TIERS.length - 1))
     if (clamped === this.tier) return
     const wasRunning = this.proc != null
@@ -518,6 +625,7 @@ export class ScreenStreamService {
   private ddProc: ChildProcessWithoutNullStreams | null = null
   private ddReadyTimer: NodeJS.Timeout | null = null
   private encoder: StreamEncoder = 'libx264'
+  private fastMode = false
   private teeStream: import('node:fs').WriteStream | null = null
 
   /** 当前推流帧源（宿主锁屏恢复、状态查询用） */

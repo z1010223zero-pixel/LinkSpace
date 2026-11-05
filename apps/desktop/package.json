@@ -24,6 +24,7 @@
     "verify:clipboard": "node scripts/build-verify-clipboard.mjs",
     "verify:input": "node scripts/build-verify-input.mjs",
     "verify:extend": "node scripts/build-verify-extend.mjs",
+    "verify:fast": "node scripts/build-verify-fast.mjs",
     "verify:vdd-driver": "node scripts/build-verify-vdd-driver.mjs",
     "verify:binding": "node scripts/build-verify-binding.mjs",
     "verify:mdns": "node scripts/build-mdns-test.mjs",

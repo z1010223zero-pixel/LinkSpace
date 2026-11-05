@@ -5,26 +5,28 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.Rect
+import android.graphics.SurfaceTexture
+import android.view.Surface
+import android.view.TextureView
 import android.view.View
+import android.widget.FrameLayout
 
 /**
- * 投屏画面渲染视图：解码线程产出 Bitmap，主线程 [submit] 后 invalidate
- * 重绘。等比拉伸填满视图（黑边由外层 letterbox 布局负责）。
+ * 投屏画面双模渲染视图：
  *
- * 为什么是自绘 View 而不是 TextureView/SurfaceView：解码走 ByteBuffer
- * 模式（本 ROM surface 模式活锁，见 StreamDecoder 类注释），帧数据以
- * Bitmap 形态交付，自绘是零依赖、无 surface 生命周期的渲染面。
+ * - **高性能硬解模式（fast）**：底层 [TextureView] 提供 [Surface]，由 `FastStreamDecoder`
+ *   硬件 `MediaCodec` 零 CPU 拷贝直投 GPU 纹理渲染；顶层 [overlayView] 背景透明，只画远端光标。
+ * - **兼容软解模式（compat）**：解码线程产出 [Bitmap] 经 [submit] 交给 [overlayView] 绘制，
+ *   并在其上叠加远端光标。
  */
-class StreamView(context: Context) : View(context) {
+class StreamView(context: Context) : FrameLayout(context) {
 
     private val paint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG)
     private val dst = Rect()
     private val cursorPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = android.graphics.Paint.Style.FILL
+        style = Paint.Style.FILL
     }
 
-    /** invalidate 已排队未消费（合流：解码再快主线程也只按 vsync 重绘一次，
-     *  否则解码线程的逐帧 post 会洪泛主线程把输入事件饿出 ANR） */
     @Volatile
     private var invalidateQueued = false
 
@@ -35,43 +37,86 @@ class StreamView(context: Context) : View(context) {
     @Volatile
     private var cursorFraction: Pair<Float, Float>? = null
 
-    /** 解码线程任意线程调用；位图实例由解码器复用，onDraw 时可能正被
-     *  下一帧覆盖（视觉撕裂可容忍，绝不阻塞解码） */
+    @Volatile
+    var currentSurface: Surface? = null
+        private set
+
+    /** Surface 就绪或销毁时回调（供 LinkSpaceService 绑定到 FastStreamDecoder） */
+    var onSurfaceChanged: ((Surface?) -> Unit)? = null
+
+    private val textureView = TextureView(context)
+    private val overlayView = object : View(context) {
+        override fun onDraw(canvas: Canvas) {
+            invalidateQueued = false
+            val bmp = bitmap
+            if (bmp != null) {
+                dst.set(0, 0, width, height)
+                canvas.drawBitmap(bmp, null, dst, paint)
+            }
+            // 光标覆盖层：白底黑圈圆点（采集已 draw_mouse=0，光标在平板侧合成）
+            cursorFraction?.let { (fx, fy) ->
+                if (fx in 0f..1f && fy in 0f..1f) {
+                    val cx = fx * width
+                    val cy = fy * height
+                    cursorPaint.color = android.graphics.Color.WHITE
+                    canvas.drawCircle(cx, cy, 14f, cursorPaint)
+                    cursorPaint.color = android.graphics.Color.BLACK
+                    cursorPaint.strokeWidth = 4f
+                    cursorPaint.style = Paint.Style.STROKE
+                    canvas.drawCircle(cx, cy, 14f, cursorPaint)
+                    cursorPaint.style = Paint.Style.FILL
+                }
+            }
+        }
+    }
+
+    init {
+        textureView.isOpaque = false
+        textureView.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+            override fun onSurfaceTextureAvailable(st: SurfaceTexture, width: Int, height: Int) {
+                currentSurface?.release()
+                val s = Surface(st)
+                currentSurface = s
+                onSurfaceChanged?.invoke(s)
+            }
+
+            override fun onSurfaceTextureSizeChanged(st: SurfaceTexture, width: Int, height: Int) = Unit
+
+            override fun onSurfaceTextureDestroyed(st: SurfaceTexture): Boolean {
+                onSurfaceChanged?.invoke(null)
+                currentSurface?.release()
+                currentSurface = null
+                return true
+            }
+
+            override fun onSurfaceTextureUpdated(st: SurfaceTexture) = Unit
+        }
+        addView(textureView, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
+        addView(overlayView, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
+    }
+
+    /** 兼容软解模式：提交一帧 Bitmap 重绘 */
     fun submit(bmp: Bitmap) {
         bitmap = bmp
-        if (!invalidateQueued) {
-            invalidateQueued = true
-            postInvalidateOnAnimation()
-        }
+        queueOverlayInvalidate()
     }
 
-    /** 解码线程/控制流更新光标比例，按 vsync 合流重绘 */
+    /** 切换到高性能硬解模式时清掉软解位图，露出底层 TextureView 硬解画面 */
+    fun clearBitmap() {
+        bitmap = null
+        queueOverlayInvalidate()
+    }
+
+    /** 更新远端光标比例，按 vsync 合流重绘覆盖层 */
     fun setCursor(fx: Float, fy: Float) {
         cursorFraction = fx to fy
-        if (!invalidateQueued) {
-            invalidateQueued = true
-            postInvalidateOnAnimation()
-        }
+        queueOverlayInvalidate()
     }
 
-    override fun onDraw(canvas: Canvas) {
-        invalidateQueued = false
-        val bmp = bitmap ?: return
-        dst.set(0, 0, width, height)
-        canvas.drawBitmap(bmp, null, dst, paint)
-        // 光标覆盖层：白底黑圈圆点（采集已 draw_mouse=0，光标只能本地画）
-        cursorFraction?.let { (fx, fy) ->
-            if (fx in 0f..1f && fy in 0f..1f) {
-                val cx = fx * width
-                val cy = fy * height
-                cursorPaint.color = android.graphics.Color.WHITE
-                canvas.drawCircle(cx, cy, 14f, cursorPaint)
-                cursorPaint.color = android.graphics.Color.BLACK
-                cursorPaint.strokeWidth = 4f
-                cursorPaint.style = android.graphics.Paint.Style.STROKE
-                canvas.drawCircle(cx, cy, 14f, cursorPaint)
-                cursorPaint.style = android.graphics.Paint.Style.FILL
-            }
+    private fun queueOverlayInvalidate() {
+        if (!invalidateQueued) {
+            invalidateQueued = true
+            overlayView.postInvalidateOnAnimation()
         }
     }
 }

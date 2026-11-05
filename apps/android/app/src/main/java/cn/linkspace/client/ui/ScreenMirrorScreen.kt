@@ -67,6 +67,8 @@ fun ScreenMirrorScreen(
     // 用户 2026-10-31 提出可切换）
     var relativeMode by remember { mutableStateOf(false) }
     val streamScaleWidth by service.streamScaleWidth.collectAsStateWithLifecycle()
+    val streamMode by service.streamMode.collectAsStateWithLifecycle()
+    val streamStats by service.streamStats.collectAsStateWithLifecycle()
     val density = LocalDensity.current
 
     // letterbox：容器尺寸 + 视频显示矩形（等比缩放置中，黑边留白）
@@ -275,7 +277,7 @@ fun ScreenMirrorScreen(
             StreamTopBar(
                 deviceName = peerName,
                 scaleWidth = streamScaleWidth,
-                // latencyText 暂不传：服务层无延迟字段，见 StreamTopBar 头注释
+                latencyText = streamStats,
                 relativeMode = relativeMode,
                 onToggleMode = { relativeMode = !relativeMode },
                 clipboardEnabled = clipboardEnabled,
@@ -284,6 +286,8 @@ fun ScreenMirrorScreen(
                     service.requestScreenStream(displayIndex = -1, scaleWidth = width)
                 },
                 onClose = { service.stopScreenStream() },
+                streamMode = streamMode,
+                onSelectStreamMode = { mode -> service.setStreamMode(mode) },
                 modifier = Modifier.align(Alignment.TopCenter)
             )
             // 悬浮控制球（ToDesk 式）：拖动可停靠任意位置，点按展开菜单。

@@ -44,6 +44,33 @@ import type { InputEvent, ScreenSize } from './input/protocol'
 import { InputLayoutStore } from './input/layout'
 import { ScreenStreamService, ScreenStreamReceiver, STREAM_QUALITY_PRESETS, STREAM_RECONNECT_BACKOFFS_MS, STREAM_DIRECTION_FORWARD, STREAM_DIRECTION_REVERSE, STREAM_SOURCE_VIRTUAL_DISPLAY, resolveStreamStopDirection, type ReverseStreamFrame, type ReverseStreamStatus, type ScreenStreamSource } from './screen-stream'
 import { log } from './log'
+import {
+  FAST_CODEC_H264,
+  buildFastArgs,
+  computeFastBitrate,
+  computeFastSize,
+  packFastFrame,
+  pickFastCandidate,
+  resolveDxgiOutputIdx,
+  type FastCandidate,
+  type FastParams
+} from './fast-stream'
+
+/**
+ * 解析平板的高性能模式请求：payload.mode === 'fast'，payload.fast = { w, h, fps }
+ * 给出平板期望的画面盒子（像素）与帧率。缺字段/非法返回 null（走兼容模式）。
+ */
+function parseFastRequest(
+  payload: Record<string, unknown>
+): { boxW: number; boxH: number; fps: number } | null {
+  if (payload.mode !== 'fast') return null
+  const f = payload.fast as { w?: unknown; h?: unknown; fps?: unknown } | undefined
+  if (!f || typeof f.w !== 'number' || typeof f.h !== 'number') return null
+  const boxW = Math.min(3840, Math.max(320, Math.round(f.w)))
+  const boxH = Math.min(2160, Math.max(240, Math.round(f.h)))
+  const fps = typeof f.fps === 'number' ? Math.min(60, Math.max(24, Math.round(f.fps))) : 60
+  return { boxW, boxH, fps }
+}
 
 export interface HostOptions {
   displayName: string
@@ -235,6 +262,8 @@ export class Host {
   private forwardStreamStarted = false
   /** 正向投屏实时推送鼠标坐标的定时器（16ms 轮询变化即发 screen.cursor） */
   private forwardCursorTimer: NodeJS.Timeout | null = null
+  /** 最近一次投屏用的高性能通路参数（请求关键帧时原样重启）；兼容模式为 null */
+  private forwardFast: { cand: FastCandidate; params: FastParams } | null = null
   /** 正向推流码率自适应积压采样定时器（避免换档叠加泄漏） */
   private forwardBacklogTimer: NodeJS.Timeout | null = null
   /** 最近一次虚拟显示器异步销毁 Promise，供 stop() 退出前等待完成 */
@@ -374,6 +403,10 @@ export class Host {
     this.wireRenameBridge()
     this.wireExtendBridge()
     this.wireInputBridge()
+
+    if (this.opts.screenFfmpegPath) {
+      void pickFastCandidate(this.opts.screenFfmpegPath).catch(() => {})
+    }
 
     log.info(`LinkSpace 主机已启动，id=${this.deviceId}，端口=${port}`)
   }
@@ -1291,7 +1324,60 @@ export class Host {
             `${region.w}x${region.h}`
           ]
         : []
+      // 高性能模式（平板请求 mode=fast）：探测 ddagrab + 硬编通路，通过则走新路线，
+      // 任何一步不满足都静默回退兼容模式（start 消息不带 mode，平板据此选解码器）。
+      const fastReq = parseFastRequest(payload)
+      if (fastReq && region) {
+        const envOut = process.env.LINKSPACE_DDAGRAB_OUTPUT
+        const outputIdx =
+          envOut !== undefined
+            ? Number(envOut)
+            : resolveDxgiOutputIdx(this.opts.screenDdCapturePath, region, Number(requested))
+        const size = computeFastSize(region.w, region.h, fastReq.boxW, fastReq.boxH)
+        const params: FastParams = {
+          outputIdx: Number.isFinite(outputIdx) ? outputIdx : 0,
+          width: size.width,
+          height: size.height,
+          fps: fastReq.fps,
+          bitrate: computeFastBitrate(size.width, size.height, fastReq.fps)
+        }
+        const ffmpegPath = this.opts.screenFfmpegPath
+        void pickFastCandidate(ffmpegPath, params)
+          .then((cand) => {
+            if (cand) {
+              this.startForwardStream(peerId, 'screen', region, scaleWidth, regionArgs, { cand, params })
+            } else {
+              log.warn('[fast-stream] 无可用高性能通路，回退兼容模式')
+              this.startForwardStream(peerId, 'screen', region, scaleWidth, regionArgs)
+            }
+          })
+          .catch((err) => {
+            log.warn(`[fast-stream] 探测异常，回退兼容模式: ${String(err)}`)
+            this.startForwardStream(peerId, 'screen', region, scaleWidth, regionArgs)
+          })
+        return
+      }
       this.startForwardStream(peerId, 'screen', region, scaleWidth, regionArgs)
+    })
+    // 平板解码异常/丢帧后请求关键帧：高性能模式下重启编码器即得到新 IDR
+    //（ffmpeg 子进程无法带外强制关键帧；原生编码助手阶段再做真正的按需 IDR）。
+    control.on('screen.stream.keyframe', (conn) => {
+      const peerId = conn.peerId
+      if (!peerId || this.forwardStreamPeerId !== peerId || !this.screenStream.isFast) return
+      const fast = this.forwardFast
+      const region = this.forwardStreamRegion
+      if (!fast || !region) return
+      log.info('[fast-stream] 平板请求关键帧，重启编码器')
+      this.screenStream.stop()
+      this.clearForwardStreamState()
+      this.startForwardStream(
+        peerId,
+        'screen',
+        region,
+        this.forwardStreamScaleWidth,
+        this.forwardStreamRegionArgs,
+        fast
+      )
     })
     control.on('screen.stream.stop', (conn, msg) => {
       if (!conn.peerId) return
@@ -1550,7 +1636,9 @@ export class Host {
     source: ScreenStreamSource,
     region: { x: number; y: number; w: number; h: number } | null,
     scaleWidth: number,
-    regionArgs: string[] = []
+    regionArgs: string[] = [],
+    /** 高性能模式参数（已探测通过）；缺省走兼容模式 */
+    fast?: { cand: FastCandidate; params: FastParams }
   ): void {
     const conn = this.peers.get(peerId)
     const ffmpegPath = this.opts.screenFfmpegPath
@@ -1559,6 +1647,7 @@ export class Host {
       this.peers.get(peerId)?.send(type, payload)
     }
     try {
+      this.forwardFast = fast ?? null
       let streamBytesSent = 0
       let sentHash = createHash('sha256')
       let bytesInCurrentMb = 0
@@ -1638,7 +1727,20 @@ export class Host {
             this.screenStream.setTier(this.screenStreamCurrentTier)
           }
         }, 2000)
-        sendTo('screen.stream.start', { w, h, scaleWidth })
+        sendTo('screen.stream.start', {
+          w,
+          h,
+          scaleWidth,
+          ...(fast
+            ? {
+                mode: 'fast',
+                codec: FAST_CODEC_H264,
+                fps: fast.params.fps,
+                streamW: fast.params.width,
+                streamH: fast.params.height
+              }
+            : {})
+        })
         if (this.forwardCursorTimer) clearInterval(this.forwardCursorTimer)
         if (this.opts.inputCursorPos) {
           let lastCursorX = -1
@@ -1673,6 +1775,86 @@ export class Host {
         log.info(`[screen-stream] 已为 ${peerId} 开启投屏${region ? `（${source === STREAM_SOURCE_VIRTUAL_DISPLAY ? '虚拟显示器' : '显示器'} ${region.w}x${region.h} @ ${region.x},${region.y}）` : '（全桌面）'}`)
       }
       this.streamRegion = region
+      if (fast) {
+        // 高性能模式：一帧一个 WS 二进制消息（9 字节帧头 + 访问单元）。
+        // 每 2s 汇总一条发送遥测（帧数/码率/最大积压），Phase 0 测量用。
+        let statFrames = 0
+        let statBytes = 0
+        let statMaxBacklog = 0
+        let statKeys = 0
+        let statDropped = 0
+        let waitKey = false
+        let statSince = Date.now()
+        const onAu = (au: Buffer, key: boolean): void => {
+          const c = this.peers.get(peerId)
+          if (!c) return
+          const backlog = c.backlog()
+          statMaxBacklog = Math.max(statMaxBacklog, backlog)
+          // 发送积压超过 1MB（约 0.7s 码率）：丢弃非关键帧并**持续丢到下一个 IDR**
+          // （丢了参考帧后的 P 帧解出来是花的，不如冻结在最后一帧），避免延迟无限堆高；
+          // 关键帧一律放行（解码器的恢复点）
+          if (key) {
+            waitKey = false
+          } else if (waitKey || backlog > 1_000_000) {
+            waitKey = true
+            statDropped++
+            return
+          }
+          statFrames++
+          statBytes += au.length
+          if (key) statKeys++
+          c.sendBinary(packFastFrame(au, key, Date.now()))
+          const now = Date.now()
+          if (now - statSince >= 2000) {
+            const sec = (now - statSince) / 1000
+            log.info(
+              `[fast-stream] ${(statFrames / sec).toFixed(1)}fps ${((statBytes * 8) / sec / 1e6).toFixed(1)}Mbps ` +
+                `关键帧${statKeys} 丢帧${statDropped} 最大积压${statMaxBacklog}B`
+            )
+            statFrames = 0
+            statBytes = 0
+            statKeys = 0
+            statDropped = 0
+            statMaxBacklog = 0
+            statSince = now
+          }
+        }
+        this.screenStream.startFast({
+          ffmpegPath,
+          args: buildFastArgs(fast.cand, fast.params),
+          onAu,
+          onFastFailed: (reason) => {
+            if (this.forwardStreamPeerId !== peerId) return
+            if (fast.cand.zeroCopy) {
+              const cpuScaleCand: FastCandidate = {
+                id: `${fast.cand.encoder}/cpu-scale`,
+                encoder: fast.cand.encoder,
+                zeroCopy: false
+              }
+              log.warn(`[fast-stream] ${fast.cand.id} 首帧失败（${reason}），降级 ${cpuScaleCand.id}`)
+              this.clearForwardStreamState()
+              this.startForwardStream(peerId, 'screen', region, scaleWidth, regionArgs, {
+                cand: cpuScaleCand,
+                params: fast.params
+              })
+            } else {
+              log.warn(`[fast-stream] ${fast.cand.id} 首帧失败（${reason}），自动回退兼容模式`)
+              this.clearForwardStreamState()
+              this.startForwardStream(peerId, 'screen', region, scaleWidth, regionArgs)
+            }
+          }
+        })
+        this.opts.inputWakeDisplay?.()
+        log.info(
+          `[fast-stream] 已启动 ${fast.cand.id} ${fast.params.width}x${fast.params.height}@${fast.params.fps} ` +
+            `${(fast.params.bitrate / 1e6).toFixed(1)}Mbps output_idx=${fast.params.outputIdx}`
+        )
+        afterStarted(
+          region?.w ?? this.opts.inputVirtualScreen?.().w ?? 1920,
+          region?.h ?? this.opts.inputVirtualScreen?.().h ?? 1080
+        )
+        return
+      }
       if (source === STREAM_SOURCE_VIRTUAL_DISPLAY && region && this.opts.screenDdCapturePath) {
         this.screenStream.startDd({
           ffmpegPath,

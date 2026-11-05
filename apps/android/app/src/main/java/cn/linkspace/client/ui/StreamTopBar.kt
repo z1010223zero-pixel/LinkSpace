@@ -40,6 +40,13 @@ internal val STREAM_RESOLUTION_OPTIONS = listOf(
     "2160p" to 3840
 )
 
+/** 串流管线模式三档：自动（优先硬解，失败回退软解）/ 高性能硬解 / 兼容软解 */
+internal val STREAM_MODE_OPTIONS = listOf(
+    "自动 (推荐)" to "auto",
+    "高性能硬解" to "fast",
+    "兼容软解" to "compat"
+)
+
 /** scaleWidth → 画质徽章文案；档位外的值不编档位名，只写宽度。 */
 internal fun streamQualityLabel(scaleWidth: Int): String =
     STREAM_RESOLUTION_OPTIONS.firstOrNull { it.second == scaleWidth }?.first
@@ -71,6 +78,8 @@ fun StreamTopBar(
     onClipboardToggle: (Boolean) -> Unit,
     onSelectScaleWidth: (Int) -> Unit,
     onClose: () -> Unit,
+    streamMode: String = "auto",
+    onSelectStreamMode: (String) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var expanded by remember { mutableStateOf(false) }
@@ -192,6 +201,29 @@ fun StreamTopBar(
                                 selectedLabelColor = androidx.compose.ui.graphics.Color.White
                             )
                         )
+                    }
+
+                    // 串流管线：自动 / 高性能硬解（DXGI+硬编+Surface硬解） / 兼容软解
+                    Text(
+                        "串流引擎",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(LinkSpaceSpacing.sm)) {
+                        STREAM_MODE_OPTIONS.forEach { (label, modeValue) ->
+                            FilterChip(
+                                selected = streamMode == modeValue,
+                                onClick = {
+                                    onSelectStreamMode(modeValue)
+                                    expanded = false
+                                },
+                                label = { Text(label, fontSize = 12.sp) },
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = LinkSpaceColors.Brand,
+                                    selectedLabelColor = androidx.compose.ui.graphics.Color.White
+                                )
+                            )
+                        }
                     }
 
                     // 控制：剪贴板同步开关（与首页同一开关，同一回调）
