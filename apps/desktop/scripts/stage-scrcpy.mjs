@@ -16,7 +16,9 @@ const dest = join(process.cwd(), 'vendor', 'scrcpy')
 function findSource() {
   const candidates = []
   if (process.env.LINKSPACE_SCRCPY_DIR) candidates.push(process.env.LINKSPACE_SCRCPY_DIR)
-  const local = process.env.LOCALAPPDATA
+  const local =
+    process.env.LOCALAPPDATA ||
+    (process.env.USERPROFILE ? join(process.env.USERPROFILE, 'AppData', 'Local') : null)
   if (local) {
     candidates.push(
       join(
