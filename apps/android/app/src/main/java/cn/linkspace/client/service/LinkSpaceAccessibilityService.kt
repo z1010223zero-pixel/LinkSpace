@@ -98,8 +98,8 @@ class LinkSpaceAccessibilityService : AccessibilityService(), InputInjector {
     companion object {
         private const val TAG = "LinkSpace/A11y"
 
-        /** 点按手势时长 */
-        private const val TAP_MS = 60L
+        /** 点按手势时长（40ms，提升点按敏捷度） */
+        private const val TAP_MS = 40L
 
         /** 滚轮折算的一段滑动时长 */
         private const val WHEEL_SWIPE_MS = 120L
@@ -196,7 +196,7 @@ class LinkSpaceAccessibilityService : AccessibilityService(), InputInjector {
         }
 
         /**
-         * 远程被控启动时唤醒息屏并自动上滑解除锁屏界面（无密码锁屏直接进桌面，有密码则弹出密码框供远程输入）。
+         * 远程被控启动或请求唤醒时唤醒息屏并自动上滑解除锁屏界面（无密码锁屏直接进桌面，有密码则弹出密码框供远程输入）。
          */
         @Suppress("DEPRECATION")
         fun wakeAndUnlock(context: Context) {
@@ -214,18 +214,38 @@ class LinkSpaceAccessibilityService : AccessibilityService(), InputInjector {
                     )
                     wl.acquire(5000L)
                 }
+
+                // 优先通过活动 Activity 请求系统解锁锁屏（API 26+：无密码锁屏可直接瞬时解锁进桌面）
+                val act = cn.linkspace.client.MainActivity.currentActivity
+                if (act != null && km != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    act.runOnUiThread {
+                        runCatching { km.requestDismissKeyguard(act, null) }
+                    }
+                }
+
                 val svc = instance ?: return@runCatching
                 if (!wasInteractive || wasLocked) {
-                    android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                    val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+                    val performSwipe = {
                         runCatching {
                             val m = svc.resources.displayMetrics
                             val cx = m.widthPixels / 2f
-                            val startY = m.heightPixels * 0.82f
-                            val endY = m.heightPixels * 0.18f
-                            svc.dispatchStroke(listOf(PointF(cx, startY), PointF(cx, endY)), 220L)
+                            val startY = m.heightPixels * 0.85f
+                            val endY = m.heightPixels * 0.15f
+                            svc.dispatchStroke(listOf(PointF(cx, startY), PointF(cx, endY)), 250L)
                             Log.i(TAG, "已触发亮屏与上滑解锁手势 (${m.widthPixels}x${m.heightPixels})")
                         }
-                    }, if (!wasInteractive) 300L else 80L)
+                    }
+                    // 屏幕息屏点亮动画需要约 400ms，在 450ms 与 950ms 注入上滑解锁手势
+                    val firstDelay = if (!wasInteractive) 450L else 80L
+                    mainHandler.postDelayed({ performSwipe() }, firstDelay)
+                    if (wasLocked || !wasInteractive) {
+                        mainHandler.postDelayed({
+                            if (km?.isKeyguardLocked == true) {
+                                performSwipe()
+                            }
+                        }, firstDelay + 500L)
+                    }
                 }
             }.onFailure {
                 Log.w(TAG, "wakeAndUnlock 异常: ${it.message}")
@@ -331,6 +351,10 @@ class LinkSpaceAccessibilityService : AccessibilityService(), InputInjector {
                 null
             }
             is DecodedEvent.Down -> {
+                val pm = getSystemService(Context.POWER_SERVICE) as? android.os.PowerManager
+                if (pm?.isInteractive == false) {
+                    wakeAndUnlock(this)
+                }
                 if (!buttonTracker.onDown(ev.button)) {
                     Log.i(TAG, "重复 down（已有按键按住），忽略")
                     return null
@@ -419,8 +443,8 @@ class LinkSpaceAccessibilityService : AccessibilityService(), InputInjector {
                 (points[i].y - points[i - 1].y).toDouble()
             ).toFloat()
         }
-        // 约 4px/ms，下限 100ms、上限 1500ms。
-        return (100 + dist / 4).toLong().coerceIn(100, 1500)
+        // 约 6px/ms，下限 40ms、上限 800ms，大幅降低手势排队与跟随迟滞感。
+        return (40 + dist / 6).toLong().coerceIn(40, 800)
     }
 
     /**

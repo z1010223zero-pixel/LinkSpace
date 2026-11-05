@@ -55,6 +55,8 @@ const toolbarExpanded = ref(false)
 const detailsExpanded = ref(false)
 const isFullscreen = ref(false)
 const toolbarVisible = computed(() => toolbarExpanded.value && !isFullscreen.value)
+const showUnlockModal = ref(false)
+const unlockTab = ref<'pin' | 'pattern'>('pin')
 
 // 输入模式：
 // - direct（默认，中英直输）：隐藏代理输入框跟随画布点击位置，直接唤起电脑本地中/英文输入法，
@@ -210,15 +212,95 @@ async function wakeAndUnlockTablet(): Promise<void> {
   const w = canvas && canvas.width > 0 ? canvas.width : 1920
   const h = canvas && canvas.height > 0 ? canvas.height : 1080
   const cx = Math.round(w * 0.5)
-  const startY = Math.round(h * 0.82)
-  const endY = Math.round(h * 0.18)
+  const startY = Math.round(h * 0.85)
+  const endY = Math.round(h * 0.15)
   await sendInput({ kind: 'down', b: 'left', x: cx, y: startY, canvasW: w, canvasH: h })
-  const steps = 6
+  const steps = 8
   for (let i = 1; i <= steps; i++) {
     const curY = Math.round(startY + ((endY - startY) * i) / steps)
     await sendInput({ kind: 'move', x: cx, y: curY, canvasW: w, canvasH: h })
   }
   await sendInput({ kind: 'up', b: 'left', x: cx, y: endY, canvasW: w, canvasH: h })
+  setNotice('已向平板发送唤醒与上滑解锁手势。若平板设有密码，请打开「锁屏辅助」输入 PIN 或图案。', 5000)
+}
+
+async function tapPinKey(digit: string): Promise<void> {
+  const canvas = canvasRef.value
+  const w = canvas && canvas.width > 0 ? canvas.width : 1920
+  const h = canvas && canvas.height > 0 ? canvas.height : 1080
+  const cx = w * 0.5
+  // 横屏平板标准 PIN 键盘相对坐标
+  const colOffset = w * 0.095
+  const rowY = [0.44 * h, 0.54 * h, 0.64 * h, 0.74 * h]
+  const colX = [cx - colOffset, cx, cx + colOffset]
+
+  let targetX = cx
+  let targetY = rowY[1]
+  switch (digit) {
+    case '1': targetX = colX[0]; targetY = rowY[0]; break
+    case '2': targetX = colX[1]; targetY = rowY[0]; break
+    case '3': targetX = colX[2]; targetY = rowY[0]; break
+    case '4': targetX = colX[0]; targetY = rowY[1]; break
+    case '5': targetX = colX[1]; targetY = rowY[1]; break
+    case '6': targetX = colX[2]; targetY = rowY[1]; break
+    case '7': targetX = colX[0]; targetY = rowY[2]; break
+    case '8': targetX = colX[1]; targetY = rowY[2]; break
+    case '9': targetX = colX[2]; targetY = rowY[2]; break
+    case '0': targetX = colX[1]; targetY = rowY[3]; break
+    case 'backspace': targetX = colX[0]; targetY = rowY[3]; break
+    case 'enter': targetX = colX[2]; targetY = rowY[3]; break
+  }
+  const tx = Math.round(targetX)
+  const ty = Math.round(targetY)
+  await sendInput({ kind: 'down', b: 'left', x: tx, y: ty, canvasW: w, canvasH: h })
+  await sendInput({ kind: 'up', b: 'left', x: tx, y: ty, canvasW: w, canvasH: h })
+}
+
+let isPatternDragging = false
+let patternLastIdx = -1
+
+function patternDotPos(idx: number, w: number, h: number): { x: number; y: number } {
+  const col = (idx % 3) - 1
+  const row = Math.floor(idx / 3) - 1
+  const cx = w * 0.5
+  const cy = h * 0.56
+  const dx = w * 0.08
+  const dy = h * 0.12
+  return {
+    x: Math.round(cx + col * dx),
+    y: Math.round(cy + row * dy)
+  }
+}
+
+async function startPattern(idx: number): Promise<void> {
+  isPatternDragging = true
+  patternLastIdx = idx
+  const canvas = canvasRef.value
+  const w = canvas && canvas.width > 0 ? canvas.width : 1920
+  const h = canvas && canvas.height > 0 ? canvas.height : 1080
+  const p = patternDotPos(idx, w, h)
+  await sendInput({ kind: 'down', b: 'left', x: p.x, y: p.y, canvasW: w, canvasH: h })
+}
+
+async function hoverPattern(idx: number): Promise<void> {
+  if (!isPatternDragging || idx === patternLastIdx) return
+  patternLastIdx = idx
+  const canvas = canvasRef.value
+  const w = canvas && canvas.width > 0 ? canvas.width : 1920
+  const h = canvas && canvas.height > 0 ? canvas.height : 1080
+  const p = patternDotPos(idx, w, h)
+  await sendInput({ kind: 'move', x: p.x, y: p.y, canvasW: w, canvasH: h })
+}
+
+async function endPattern(): Promise<void> {
+  if (!isPatternDragging) return
+  isPatternDragging = false
+  const canvas = canvasRef.value
+  const w = canvas && canvas.width > 0 ? canvas.width : 1920
+  const h = canvas && canvas.height > 0 ? canvas.height : 1080
+  const p = patternDotPos(patternLastIdx >= 0 ? patternLastIdx : 4, w, h)
+  await sendInput({ kind: 'up', b: 'left', x: p.x, y: p.y, canvasW: w, canvasH: h })
+  patternLastIdx = -1
 }
 
 function setInputMode(mode: 'direct' | 'pinyin' | 'finished'): void {
@@ -559,6 +641,15 @@ onBeforeUnmount(() => {
       >
         亮屏解锁
       </button>
+      <button
+        v-if="streamRunning"
+        class="btn btn--sm rs-inline-btn"
+        :class="{ 'btn--active': showUnlockModal }"
+        title="锁屏密码/图案解锁辅助（当屏幕呈黑屏保护时盲输密码）"
+        @click="showUnlockModal = !showUnlockModal"
+      >
+        锁屏辅助
+      </button>
       <span class="rs-mode-pill" @click="toolbarExpanded = !toolbarExpanded" title="点击展开工具栏切换输入模式">
         {{ inputMode === 'direct' ? '中英直输' : inputMode === 'pinyin' ? '按键直通' : '文本面板' }}
       </span>
@@ -675,6 +766,64 @@ onBeforeUnmount(() => {
       <div v-if="notice" class="rs-toast" role="status">
         <span class="rs-toast__text">{{ notice }}</span>
         <button class="rs-toast__close" title="关闭提示" @click="dismissNotice">×</button>
+      </div>
+
+      <!-- 锁屏解锁辅助面板（针对 Android 隐私保护黑屏下的盲输需求） -->
+      <div v-if="showUnlockModal" class="rs-unlock-helper">
+        <div class="rs-unlock-helper__header">
+          <span class="rs-unlock-helper__title">锁屏辅助解锁</span>
+          <button class="rs-toast__close" @click="showUnlockModal = false">×</button>
+        </div>
+        <div class="rs-unlock-helper__tip">
+          受 Android 系统隐私保护机制（FLAG_SECURE）限制，锁屏与密码界面无法录屏捕获（黑屏）。若设有锁屏密码，请在下方辅助输入，解锁后画面将自动恢复：
+        </div>
+        <div class="rs-unlock-helper__tabs">
+          <button
+            class="btn btn--sm"
+            :class="{ 'btn--active': unlockTab === 'pin' }"
+            @click="unlockTab = 'pin'"
+          >
+            数字 PIN 键盘
+          </button>
+          <button
+            class="btn btn--sm"
+            :class="{ 'btn--active': unlockTab === 'pattern' }"
+            @click="unlockTab = 'pattern'"
+          >
+            九宫格图案
+          </button>
+          <button class="btn btn--sm" title="再次发送上滑解锁手势" @click="wakeAndUnlockTablet">再次上滑</button>
+        </div>
+
+        <div v-if="unlockTab === 'pin'" class="rs-pin-pad">
+          <div class="rs-pin-pad__grid">
+            <button
+              v-for="d in ['1', '2', '3', '4', '5', '6', '7', '8', '9', 'backspace', '0', 'enter']"
+              :key="d"
+              class="rs-pin-btn"
+              :class="{ 'rs-pin-btn--act': d === 'backspace' || d === 'enter' }"
+              @click="tapPinKey(d)"
+            >
+              {{ d === 'backspace' ? '⌫' : d === 'enter' ? '↵' : d }}
+            </button>
+          </div>
+        </div>
+
+        <div v-if="unlockTab === 'pattern'" class="rs-pattern-pad">
+          <div class="rs-pattern-hint">在下方按住鼠标划动连线：</div>
+          <div class="rs-pattern-grid">
+            <div
+              v-for="idx in [0, 1, 2, 3, 4, 5, 6, 7, 8]"
+              :key="idx"
+              class="rs-pattern-dot-wrapper"
+              @pointerdown.prevent="startPattern(idx)"
+              @pointerenter.prevent="hoverPattern(idx)"
+              @pointerup.prevent="endPattern"
+            >
+              <div class="rs-pattern-dot" />
+            </div>
+          </div>
+        </div>
       </div>
       <div v-if="!streamRunning" class="rs-empty">
         <div class="empty__title">暂无画面</div>
@@ -919,5 +1068,112 @@ onBeforeUnmount(() => {
   color: var(--text-secondary);
   background: var(--surface);
   border-top: 1px solid var(--border);
+}
+.rs-unlock-helper {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 330px;
+  max-width: 90%;
+  background: rgba(22, 26, 32, 0.95);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px;
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.65);
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.rs-unlock-helper__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.rs-unlock-helper__title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+.rs-unlock-helper__tip {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.4;
+}
+.rs-unlock-helper__tabs {
+  display: flex;
+  gap: 6px;
+}
+.rs-pin-pad__grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin-top: 4px;
+}
+.rs-pin-btn {
+  height: 44px;
+  border-radius: 8px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: 18px;
+  font-weight: 500;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  user-select: none;
+  transition: all 0.15s ease;
+}
+.rs-pin-btn:hover {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+.rs-pin-btn:active {
+  transform: scale(0.95);
+}
+.rs-pin-btn--act {
+  font-size: 15px;
+  background: rgba(255, 255, 255, 0.05);
+}
+.rs-pattern-pad {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+.rs-pattern-hint {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.rs-pattern-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+  padding: 16px;
+  background: rgba(0, 0, 0, 0.3);
+  border-radius: 8px;
+  touch-action: none;
+}
+.rs-pattern-dot-wrapper {
+  width: 44px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+.rs-pattern-dot {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--text-secondary);
+  transition: background 0.15s ease;
+}
+.rs-pattern-dot-wrapper:hover .rs-pattern-dot {
+  background: var(--accent);
+  transform: scale(1.3);
 }
 </style>

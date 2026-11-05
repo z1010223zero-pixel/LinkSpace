@@ -298,6 +298,11 @@ fun ScreenMirrorScreen(
                 scaleWidth = streamScaleWidth,
                 onSelectScaleWidth = { width -> service.requestScreenStream(displayIndex = -1, scaleWidth = width) },
                 onExit = { service.stopScreenStream() },
+                streamMode = streamMode,
+                onSelectStreamMode = { mode -> service.setStreamMode(mode) },
+                clipboardEnabled = clipboardEnabled,
+                onToggleClipboard = { onClipboardToggle(!clipboardEnabled) },
+                latencyText = streamStats,
                 modifier = Modifier.align(Alignment.TopEnd)
             )
         }

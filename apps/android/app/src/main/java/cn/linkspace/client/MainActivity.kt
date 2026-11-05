@@ -55,6 +55,21 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
+
+    companion object {
+        @Volatile
+        var currentActivity: MainActivity? = null
+    }
+
+    override fun onStart() {
+        super.onStart()
+        currentActivity = this
+    }
+
+    override fun onDestroy() {
+        if (currentActivity === this) currentActivity = null
+        super.onDestroy()
+    }
     /**
      * 剪贴板同步只在界面前台时运行。
      *
@@ -153,6 +168,11 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        currentActivity = this
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O_MR1) {
+            setShowWhenLocked(true)
+            setTurnScreenOn(true)
+        }
         val service = LinkSpaceService.get(this)
         // 前台服务随应用启动：保活连接，杀后台不再「随时消失」（任务 B-③）
         cn.linkspace.client.service.LinkSpaceForegroundService.start(this)

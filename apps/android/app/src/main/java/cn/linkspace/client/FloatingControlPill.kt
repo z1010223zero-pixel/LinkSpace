@@ -2,16 +2,23 @@ package cn.linkspace.client
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -33,28 +40,25 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import cn.linkspace.client.ui.LinkSpaceShapes
 import cn.linkspace.client.ui.LinkSpaceSpacing
+import cn.linkspace.client.ui.LinkSpaceStatusColors
+import cn.linkspace.client.ui.STREAM_MODE_OPTIONS
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
 /** 小球直径 52dp（用户 2026-10-31“右上角按钮点不到”重做方案的尺寸，不动）。 */
 private val PillSize = 52.dp
 
-/** 菜单宽 190dp。 */
-private val PillMenuWidth = 190.dp
+/** 菜单宽 210dp（容纳分辨率、串流引擎与剪贴板选项）。 */
+private val PillMenuWidth = 210.dp
 
 /**
  * 投屏悬浮控制球（ToDesk 式交互，用户 2026-10-31 提出「右上角按钮经常
  * 点不到」后重做）：
  * - 小球可拖动到屏幕任意位置，松手自动吸附到最近左右边缘——永远不会
  *   被系统状态栏遮挡，也不挡常看区域
- * - 点按小球展开控制菜单（触控模式切换 / 退出投屏），菜单项为大号
- *   Surface，hit 区远大于此前的文字按钮
+ * - 点按小球展开控制菜单（触控模式 / 分辨率 / 串流引擎 / 剪贴板 / 退出投屏），
+ *   项为大号 Surface，hit 区充裕。
  * - 球面字标随模式变化：「指」= 点哪指哪，「跟」= 滑动跟随
- *
- * B 线 token 收敛（2026-11-02）：圆角 / 尺寸 / 字号改接 LinkSpaceTheme（小球专属尺寸留本文件私有常量）；
- * 颜色改走 ScreenMirrorScreen 深色 token 包裹内的 MaterialTheme
- * （surface / onSurface，画面窗口深色 token 的实际形态），
- * 黑 / 白字面值不变，可拖动吸附与菜单行为一律不动。
  */
 @Composable
 fun FloatingControlPill(
@@ -63,6 +67,11 @@ fun FloatingControlPill(
     scaleWidth: Int,
     onSelectScaleWidth: (Int) -> Unit,
     onExit: () -> Unit,
+    streamMode: String = "auto",
+    onSelectStreamMode: (String) -> Unit = {},
+    clipboardEnabled: Boolean = false,
+    onToggleClipboard: () -> Unit = {},
+    latencyText: String? = null,
     modifier: Modifier = Modifier
 ) {
     val density = LocalDensity.current
@@ -96,26 +105,60 @@ fun FloatingControlPill(
 
         // 菜单：贴在小球左侧
         if (menuExpanded && offset.x >= 0) {
+            val scrollState = rememberScrollState()
             Surface(
                 shape = LinkSpaceShapes.large,
-                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.85f),
-                shadowElevation = 6.dp,
+                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f),
+                shadowElevation = 8.dp,
                 modifier = Modifier
                     .offset {
                         IntOffset(
                             (offset.x - with(density) { PillMenuWidth.toPx().roundToInt() })
                                 .coerceAtLeast(marginPx),
-                            offset.y
+                            offset.y.coerceIn(
+                                marginPx,
+                                (containerSize.height - with(density) { 440.dp.toPx().roundToInt() })
+                                    .coerceAtLeast(marginPx)
+                            )
                         )
                     }
+                    .size(width = PillMenuWidth, height = androidx.compose.ui.unit.Dp.Unspecified)
             ) {
-                Column(Modifier.padding(6.dp)) {
+                Column(
+                    modifier = Modifier
+                        .padding(6.dp)
+                        .heightIn(max = 440.dp)
+                        .verticalScroll(scrollState)
+                ) {
+                    if (latencyText != null) {
+                        Text(
+                            latencyText,
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
+                        )
+                    }
                     MenuAction(
                         label = if (relativeMode) "触控：滑动跟随 ✓" else "触控：点哪指哪 ✓",
                         onClick = {
                             onToggleMode()
                             menuExpanded = false
                         }
+                    )
+                    HorizontalDivider(
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.1f),
+                        modifier = Modifier.padding(vertical = 4.dp)
+                    )
+                    StreamEngineMenu(
+                        currentMode = streamMode,
+                        onSelect = { mode ->
+                            onSelectStreamMode(mode)
+                            menuExpanded = false
+                        }
+                    )
+                    HorizontalDivider(
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.1f),
+                        modifier = Modifier.padding(vertical = 4.dp)
                     )
                     ResolutionMenu(
                         currentWidth = scaleWidth,
@@ -124,10 +167,29 @@ fun FloatingControlPill(
                             menuExpanded = false
                         }
                     )
-                    MenuAction(label = "退出投屏", onClick = {
-                        onExit()
-                        menuExpanded = false
-                    })
+                    HorizontalDivider(
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.1f),
+                        modifier = Modifier.padding(vertical = 4.dp)
+                    )
+                    MenuAction(
+                        label = if (clipboardEnabled) "剪贴板同步：开启 ✓" else "剪贴板同步：关闭",
+                        onClick = {
+                            onToggleClipboard()
+                            menuExpanded = false
+                        }
+                    )
+                    HorizontalDivider(
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.1f),
+                        modifier = Modifier.padding(vertical = 4.dp)
+                    )
+                    MenuAction(
+                        label = "退出投屏",
+                        labelColor = LinkSpaceStatusColors.Danger,
+                        onClick = {
+                            onExit()
+                            menuExpanded = false
+                        }
+                    )
                 }
             }
         }
@@ -205,6 +267,27 @@ private val RESOLUTION_OPTIONS = listOf(
 )
 
 @Composable
+private fun StreamEngineMenu(
+    currentMode: String,
+    onSelect: (String) -> Unit
+) {
+    Column {
+        Text(
+            "串流引擎",
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+            fontSize = 12.sp,
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 4.dp)
+        )
+        STREAM_MODE_OPTIONS.forEach { (label, modeValue) ->
+            MenuAction(
+                label = if (modeValue == currentMode) "$label ✓" else label,
+                onClick = { onSelect(modeValue) }
+            )
+        }
+    }
+}
+
+@Composable
 private fun ResolutionMenu(
     currentWidth: Int,
     onSelect: (Int) -> Unit
@@ -226,7 +309,11 @@ private fun ResolutionMenu(
 }
 
 @Composable
-private fun MenuAction(label: String, onClick: () -> Unit) {
+private fun MenuAction(
+    label: String,
+    labelColor: Color = Color.Unspecified,
+    onClick: () -> Unit
+) {
     Surface(
         color = Color.Transparent,
         onClick = onClick,
@@ -235,10 +322,10 @@ private fun MenuAction(label: String, onClick: () -> Unit) {
     ) {
         Text(
             label,
-            color = MaterialTheme.colorScheme.onSurface,
-            fontSize = 14.sp,
+            color = if (labelColor != Color.Unspecified) labelColor else MaterialTheme.colorScheme.onSurface,
+            fontSize = 13.sp,
             modifier = Modifier
-                .padding(horizontal = 14.dp, vertical = 12.dp)
+                .padding(horizontal = 14.dp, vertical = 10.dp)
                 .fillMaxWidth()
         )
     }

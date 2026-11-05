@@ -691,10 +691,9 @@ class ReverseScreenStreamer(
                     MediaFormat.KEY_BITRATE_MODE,
                     MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR
                 )
-                // 静止画面每 33ms 重复上一帧，防解码管道饿死；高刷屏（120/144Hz）
-                // 限制送入编码器的帧率为 STREAM_FPS，避免 CBR 按 30fps 计单帧比特预算
-                // 却按 144fps 塞帧导致码率飙到 ~25Mbps；关 B 帧并开低延迟实时优先级。
-                setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 33_333L)
+                // 静止画面每 16.6ms 重复上一帧，防解码管道饿死；高刷屏（120/144Hz）
+                // 限制送入编码器的帧率为 STREAM_FPS（60fps），提升顺滑感；关 B 帧并开低延迟实时优先级。
+                setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 16_666L)
                 setInteger(MediaFormat.KEY_PRIORITY, 0)
                 setInteger(MediaFormat.KEY_OPERATING_RATE, STREAM_FPS)
                 setInteger("vendor.qti-ext-enc-low-latency.enable", 1)
@@ -846,10 +845,10 @@ class ReverseScreenStreamer(
                     ?: return@setOnImageAvailableListener
                 try {
                     if (!started.get()) return@setOnImageAvailableListener
-                    // 30fps 节流：VirtualDisplay 按屏幕刷新率出图，
+                    // 60fps 节流：VirtualDisplay 按屏幕刷新率出图，
                     // 高于编码帧率只会白耗 CPU
                     val now = SystemClock.uptimeMillis()
-                    if (now - lastRecordMs < 33) return@setOnImageAvailableListener
+                    if (now - lastRecordMs < 16) return@setOnImageAvailableListener
                     lastRecordMs = now
                     val bmp = imageToBitmap(img)
                     val frame = converter.convert(bmp) ?: return@setOnImageAvailableListener
@@ -968,9 +967,9 @@ class ReverseScreenStreamer(
         const val REQUEST_TTL_MS = 90_000L
 
         const val DEFAULT_SCALE_WIDTH = 1920
-        const val STREAM_FPS = 30
+        const val STREAM_FPS = 60
 
-        /** GOP 30（1s 一个 IDR，丢帧后 1s 内自愈，与线 1 的 -g 30 一致） */
+        /** GOP 60（1s 一个 IDR，丢帧后 1s 内自愈，与线 1 的 -g 60 一致） */
         const val KEYFRAME_INTERVAL_S = 1
 
         /** 单个 WS 二进制帧上限（桌面 ws 库单 Buffer 不分片、单帧 ≤64KB，见 LinkSpaceClient 注释） */
@@ -987,12 +986,12 @@ class ReverseScreenStreamer(
         private val START_CODE = byteArrayOf(0, 0, 0, 1)
         private val AUD_NAL = byteArrayOf(0, 0, 0, 1, 0x09, 0xf0.toByte())
 
-        /** 分辨率档位（协议 4.7，与 protocol.json streamQualityPresets 同值） */
+        /** 分辨率档位（协议 4.7，与 protocol.json streamQualityPresets 同值，升级为 60fps 高帧率） */
         val STREAM_PRESETS = listOf(
-            StreamPreset("720p", 1280, 30, 4_000_000),
-            StreamPreset("1080p", 1920, 30, 8_000_000),
-            StreamPreset("1440p", 2560, 30, 14_000_000),
-            StreamPreset("2160p", 3840, 30, 24_000_000)
+            StreamPreset("720p", 1280, 60, 6_000_000),
+            StreamPreset("1080p", 1920, 60, 16_000_000),
+            StreamPreset("1440p", 2560, 60, 26_000_000),
+            StreamPreset("2160p", 3840, 60, 40_000_000)
         )
 
         /** 码率档位（协议 4.7，与 protocol.json streamTiers 同值） */
