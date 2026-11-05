@@ -232,6 +232,7 @@ object ControlledInputInjector {
         0x10 -> KeyEvent.KEYCODE_SHIFT_LEFT
         0x11 -> KeyEvent.KEYCODE_CTRL_LEFT
         0x12 -> KeyEvent.KEYCODE_ALT_LEFT
+        0x14 -> KeyEvent.KEYCODE_CAPS_LOCK
         0x1B -> KeyEvent.KEYCODE_ESCAPE
         0x20 -> KeyEvent.KEYCODE_SPACE
         0x21 -> KeyEvent.KEYCODE_PAGE_UP
@@ -242,6 +243,7 @@ object ControlledInputInjector {
         0x26 -> KeyEvent.KEYCODE_DPAD_UP
         0x27 -> KeyEvent.KEYCODE_DPAD_RIGHT
         0x28 -> KeyEvent.KEYCODE_DPAD_DOWN
+        0x2D -> KeyEvent.KEYCODE_INSERT
         0x2E -> KeyEvent.KEYCODE_FORWARD_DEL
         0x30 -> KeyEvent.KEYCODE_0
         0x31 -> KeyEvent.KEYCODE_1
@@ -306,6 +308,12 @@ object ControlledInputInjector {
         0x79 -> KeyEvent.KEYCODE_F10
         0x7A -> KeyEvent.KEYCODE_F11
         0x7B -> KeyEvent.KEYCODE_F12
+        0xA0 -> KeyEvent.KEYCODE_SHIFT_LEFT
+        0xA1 -> KeyEvent.KEYCODE_SHIFT_RIGHT
+        0xA2 -> KeyEvent.KEYCODE_CTRL_LEFT
+        0xA3 -> KeyEvent.KEYCODE_CTRL_RIGHT
+        0xA4 -> KeyEvent.KEYCODE_ALT_LEFT
+        0xA5 -> KeyEvent.KEYCODE_ALT_RIGHT
         0xBA -> KeyEvent.KEYCODE_SEMICOLON
         0xBB -> KeyEvent.KEYCODE_EQUALS
         0xBC -> KeyEvent.KEYCODE_COMMA

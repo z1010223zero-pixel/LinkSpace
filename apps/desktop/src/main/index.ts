@@ -374,7 +374,13 @@ function startInputLoop(): void {
     inputCapture = new Win32InputCapture({
       native: win32,
       screen: size,
-      onEvents: (events) => host.sendInputEvents(events),
+      onEvents: (events) => {
+        // 反向窗口会话的指针与键盘由窗口自身（ReverseStreamView → reverse-stream:input）
+        // 按流画布坐标采集；全局轮询在窗口聚焦时处于 control 态以屏蔽边缘穿越，
+        // 但不重复外发桌面坐标系的鼠标/按键事件，避免与画布事件双发冲突。
+        if (host.reverseInputScreen() !== null) return
+        host.sendInputEvents(events)
+      },
       onEdgeMove: (x, y) => edgeSwitcher.feed(x, y)
     })
     inputTimer = setInterval(() => inputCapture?.tick(), INPUT_TICK_MS)

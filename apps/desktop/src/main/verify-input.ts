@@ -732,6 +732,24 @@ function testWin32(): void {
     const c1 = evts[evts.length - 2]
     const c2 = evts[evts.length - 1]
     check('超长采集按 64 条分批', c1.length === 64 && c2.length === 6, `${c1.length}+${c2.length}`)
+
+    // 左右区分修饰键（0xA0..0xA5）跳过，避免与通用修饰键（0x10..0x12）双发
+    for (let vk = 0x08; vk < 0x08 + 70; vk++) f.release(vk)
+    cap.tick()
+    const modBase = evts.length
+    f.press(0x11)
+    f.press(0xa2)
+    f.press(0x56)
+    cap.tick()
+    const modBatch = evts[modBase] ?? []
+    check(
+      'Ctrl+V 采集跳过 0xA2 左右修饰重复码',
+      evts.length === modBase + 1 &&
+        modBatch.length === 2 &&
+        (modBatch[0] as { vk?: number }).vk === 0x11 &&
+        (modBatch[1] as { vk?: number }).vk === 0x56,
+      JSON.stringify(modBatch)
+    )
   }
 }
 

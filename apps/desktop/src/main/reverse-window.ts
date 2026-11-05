@@ -131,6 +131,9 @@ export class ReverseWindowManager {
         nodeIntegration: false
       }
     })
+    // 移除默认应用菜单（含 editMenu 的 Ctrl+V/Ctrl+C/Ctrl+Z 原生快捷键拦截），
+    // 确保画面窗口内的组合键直接落到渲染层 keydown 转发给平板。
+    win.removeMenu()
     win.on('ready-to-show', () => win.show())
     // 与主窗口同款防护：渲染层被注入后导航到攻击者页面是一律拦下的逃逸路径
     win.webContents.on('will-navigate', (event, url) => {

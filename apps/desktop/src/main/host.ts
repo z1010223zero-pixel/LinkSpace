@@ -1326,7 +1326,6 @@ export class Host {
     // reverseStreamFrame 事件渲染，控制入口与窗口本身不在本批。
     control.onBinary((conn, data) => {
       if (!conn.peerId || conn.peerId !== this.reverseStreamPeerId) return
-      if (!this.reverseStreamReceiver.running) return
       this.reverseStreamReceiver.feed(data)
     })
     control.on('screen.stream.start', (conn, msg) => {
@@ -1342,6 +1341,8 @@ export class Host {
         this.stopReverseReceiver('本机缺少 ffmpeg，无法解码')
         return
       }
+      const prevStatus = this.reverseStreamReceiver.status()
+      const sizeChanged = w > 0 && h > 0 && (prevStatus.width !== w || prevStatus.height !== h)
       if (w > 0 && h > 0) this.reverseStreamReceiver.setExpectedSize(w, h)
       this.reverseStreamScaleWidth = scaleWidth
       this.reverseStreamReconnectAttempt = 0
@@ -1353,9 +1354,11 @@ export class Host {
           this.stopReverseReceiver('解码器意外退出')
         }
       }
-      this.reverseStreamReceiver.start(this.opts.screenFfmpegPath, (frame) => {
-        this.emit('reverseStreamFrame', frame)
-      })
+      if (!this.reverseStreamReceiver.running || sizeChanged) {
+        this.reverseStreamReceiver.start(this.opts.screenFfmpegPath, (frame) => {
+          this.emit('reverseStreamFrame', frame)
+        })
+      }
       log.info(`[screen-stream] 反向投屏已开始（${peerId}，${w}x${h} @ ${scaleWidth}p）`)
       this.emit('reverseStreamChanged')
       // W7：流一开即请求键鼠控制——窗口的输入走 input.event（与线 1

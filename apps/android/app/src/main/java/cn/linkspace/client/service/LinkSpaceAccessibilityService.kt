@@ -503,15 +503,24 @@ class LinkSpaceAccessibilityService : AccessibilityService(), InputInjector {
 
     private fun metaStateLocked(): Int {
         var meta = 0
-        if (heldKeys.contains(KeyEvent.KEYCODE_SHIFT_LEFT) ||
-            heldKeys.contains(KeyEvent.KEYCODE_SHIFT_RIGHT)
-        ) meta = meta or KeyEvent.META_SHIFT_ON
-        if (heldKeys.contains(KeyEvent.KEYCODE_CTRL_LEFT) ||
-            heldKeys.contains(KeyEvent.KEYCODE_CTRL_RIGHT)
-        ) meta = meta or KeyEvent.META_CTRL_ON
-        if (heldKeys.contains(KeyEvent.KEYCODE_ALT_LEFT) ||
-            heldKeys.contains(KeyEvent.KEYCODE_ALT_RIGHT)
-        ) meta = meta or KeyEvent.META_ALT_ON
+        if (heldKeys.contains(KeyEvent.KEYCODE_SHIFT_LEFT)) {
+            meta = meta or KeyEvent.META_SHIFT_ON or KeyEvent.META_SHIFT_LEFT_ON
+        }
+        if (heldKeys.contains(KeyEvent.KEYCODE_SHIFT_RIGHT)) {
+            meta = meta or KeyEvent.META_SHIFT_ON or KeyEvent.META_SHIFT_RIGHT_ON
+        }
+        if (heldKeys.contains(KeyEvent.KEYCODE_CTRL_LEFT)) {
+            meta = meta or KeyEvent.META_CTRL_ON or KeyEvent.META_CTRL_LEFT_ON
+        }
+        if (heldKeys.contains(KeyEvent.KEYCODE_CTRL_RIGHT)) {
+            meta = meta or KeyEvent.META_CTRL_ON or KeyEvent.META_CTRL_RIGHT_ON
+        }
+        if (heldKeys.contains(KeyEvent.KEYCODE_ALT_LEFT)) {
+            meta = meta or KeyEvent.META_ALT_ON or KeyEvent.META_ALT_LEFT_ON
+        }
+        if (heldKeys.contains(KeyEvent.KEYCODE_ALT_RIGHT)) {
+            meta = meta or KeyEvent.META_ALT_ON or KeyEvent.META_ALT_RIGHT_ON
+        }
         return meta
     }
 

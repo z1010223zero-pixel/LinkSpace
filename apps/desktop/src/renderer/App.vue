@@ -594,7 +594,9 @@ const recentTrusted = computed(() =>
 )
 
 /** 局域网内其他设备：发现到的未配对设备（已配对的已在信任清单里，不重复出现） */
-const unpairedDiscovered = computed(() => discovered.value.filter((d) => !d.paired))
+const unpairedDiscovered = computed(() =>
+  discovered.value.filter((d) => !trusted.value.some((t) => t.deviceId.startsWith(d.idPrefix)))
+)
 
 // ---------- 设备页选中态 ----------
 const selectedId = ref('')

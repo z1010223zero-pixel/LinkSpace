@@ -175,7 +175,27 @@ class ControlledInputInjectorTest {
         assertEquals(KeyEvent.KEYCODE_DPAD_LEFT, ControlledInputInjector.vkToKeyCode(0x25))
         assertEquals(KeyEvent.KEYCODE_F1, ControlledInputInjector.vkToKeyCode(0x70))
         assertEquals(KeyEvent.KEYCODE_SPACE, ControlledInputInjector.vkToKeyCode(0x20))
+        assertEquals(KeyEvent.KEYCODE_CAPS_LOCK, ControlledInputInjector.vkToKeyCode(0x14))
+        assertEquals(KeyEvent.KEYCODE_INSERT, ControlledInputInjector.vkToKeyCode(0x2D))
+        assertEquals(KeyEvent.KEYCODE_SHIFT_LEFT, ControlledInputInjector.vkToKeyCode(0xA0))
+        assertEquals(KeyEvent.KEYCODE_SHIFT_RIGHT, ControlledInputInjector.vkToKeyCode(0xA1))
+        assertEquals(KeyEvent.KEYCODE_CTRL_LEFT, ControlledInputInjector.vkToKeyCode(0xA2))
+        assertEquals(KeyEvent.KEYCODE_CTRL_RIGHT, ControlledInputInjector.vkToKeyCode(0xA3))
+        assertEquals(KeyEvent.KEYCODE_ALT_LEFT, ControlledInputInjector.vkToKeyCode(0xA4))
+        assertEquals(KeyEvent.KEYCODE_ALT_RIGHT, ControlledInputInjector.vkToKeyCode(0xA5))
         assertNull(ControlledInputInjector.vkToKeyCode(0x01))
         assertNull(ControlledInputInjector.vkToKeyCode(0xFF))
+    }
+
+    @Test
+    fun `reverse stream annexB prefix and normalizeNals avoid duplicate start codes`() {
+        val annexB4 = byteArrayOf(0, 0, 0, 1, 0x67, 0x42, 0x00, 0x1f)
+        val annexB3 = byteArrayOf(0, 0, 1, 0x68, 0xce.toByte(), 0x3c, 0x80.toByte())
+        val avcc = byteArrayOf(0, 0, 0, 4, 0x67, 0x42, 0x00, 0x1f)
+        assertTrue(ReverseScreenStreamer.hasAnnexBPrefix(annexB4))
+        assertTrue(ReverseScreenStreamer.hasAnnexBPrefix(annexB3))
+        assertTrue(!ReverseScreenStreamer.hasAnnexBPrefix(avcc))
+        assertTrue(ReverseScreenStreamer.normalizeNals(annexB4).contentEquals(annexB4))
+        assertTrue(ReverseScreenStreamer.normalizeNals(avcc).contentEquals(annexB4))
     }
 }

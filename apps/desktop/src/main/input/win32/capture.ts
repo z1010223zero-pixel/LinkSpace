@@ -160,6 +160,9 @@ export class Win32InputCapture {
     }
 
     for (let vk = KEY_POLL_MIN; vk <= KEY_POLL_MAX; vk++) {
+      // Win32 GetAsyncKeyState 在按下修饰键时会同时置位通用码（0x10..0x12）与
+      // 左右区分码（0xA0..0xA5），跳过 0xA0..0xA5 避免单次按键双发及被控端拒批。
+      if (vk >= 0xa0 && vk <= 0xa5) continue
       const down = this.deps.native.isKeyDown(vk)
       if (down && !this.keys.has(vk)) {
         this.keys.add(vk)

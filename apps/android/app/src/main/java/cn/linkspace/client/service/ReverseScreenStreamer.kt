@@ -123,6 +123,8 @@ class ReverseScreenStreamer(
     /** 编码器句柄：MediaCodec 与软编的公共面 */
     private interface EncoderHandle {
         val name: String
+        val surface: android.view.Surface
+        fun start()
         fun setBitrate(bps: Int)
         fun stop()
     }
@@ -137,6 +139,7 @@ class ReverseScreenStreamer(
     private var probeTimer: java.util.Timer? = null
     private var projection: MediaProjection? = null
     private var projectionCallback: MediaProjection.Callback? = null
+    private var virtualDisplay: android.hardware.display.VirtualDisplay? = null
     private var encoderHandle: EncoderHandle? = null
 
     @Volatile
@@ -420,7 +423,7 @@ class ReverseScreenStreamer(
         projection.registerCallback(cb, null)
         projectionCallback = cb
         this.projection = projection
-        val handle = createEncoder(projection, w, h, bitrateBps)
+        val handle = createEncoder(w, h, bitrateBps)
         if (handle == null) {
             runCatching { projection.unregisterCallback(cb) }
             projectionCallback = null
@@ -430,6 +433,30 @@ class ReverseScreenStreamer(
             listener?.onChanged()
             return
         }
+        val dpi = appContext.resources.displayMetrics.densityDpi
+        val vd = runCatching {
+            projection.createVirtualDisplay(
+                "LinkSpaceReverse",
+                w,
+                h,
+                dpi,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                handle.surface,
+                null,
+                null
+            )
+        }.getOrNull()
+        if (vd == null) {
+            handle.stop()
+            runCatching { projection.unregisterCallback(cb) }
+            projectionCallback = null
+            this.projection = null
+            sendError(req.peerId, "投屏启动失败：虚拟显示器创建失败")
+            listener?.onError("投屏启动失败：虚拟显示器创建失败")
+            listener?.onChanged()
+            return
+        }
+        virtualDisplay = vd
         encoderHandle = handle
         tier = 0
         congestionScore = 0
@@ -437,25 +464,31 @@ class ReverseScreenStreamer(
         dropping = false
         active = ActiveStream(req.peerId, req.scaleWidth, w, h, handle.name, System.currentTimeMillis())
         startProbe()
+        // 先登记 active 并发出 screen.stream.start，再启动编码输出线程：
+        // 避免首帧 SPS/PPS/IDR 因 active 尚为空被丢弃，或先于 start 消息到达对端。
         sendStart(active!!)
+        handle.start()
         Log.i(TAG, "反向投屏已启动 → ${req.peerId}（${w}x$h，编码器=${handle.name}）")
         listener?.onChanged()
     }
 
-    /** 同对端换分辨率：复用已持有的 MediaProjection，直接重启编码器 */
+    /** 同对端换分辨率：复用已持有的 MediaProjection 与 VirtualDisplay，直接切换 surface/resize 并重启编码器 */
     private fun restartEncoder(newScaleWidth: Int) {
         val a = active ?: return
-        val proj = projection ?: return
+        val vd = virtualDisplay ?: return
         val screen = localScreen()
         val (w, h) = computeDims(newScaleWidth, screen)
         val preset = STREAM_PRESETS.firstOrNull { it.width == newScaleWidth } ?: STREAM_PRESETS[1]
         val bitrateBps = currentBitrateBps(preset)
         stopEncoderOnly()
-        val handle = createEncoder(proj, w, h, bitrateBps)
+        val handle = createEncoder(w, h, bitrateBps)
         if (handle == null) {
             stopInternal("编码器重启失败", notifyPeer = true)
             return
         }
+        val dpi = appContext.resources.displayMetrics.densityDpi
+        vd.setSurface(handle.surface)
+        vd.resize(w, h, dpi)
         encoderHandle = handle
         tier = 0
         congestionScore = 0
@@ -463,13 +496,13 @@ class ReverseScreenStreamer(
         dropping = false
         active = a.copy(scaleWidth = newScaleWidth, width = w, height = h, encoder = handle.name)
         sendStart(active!!)
+        handle.start()
         Log.i(TAG, "反向投屏已换分辨率 → ${w}x$h（编码器=${handle.name}）")
         listener?.onChanged()
     }
 
     /** MediaCodec 优先，失败回落软编；两者都起不来返回 null */
     private fun createEncoder(
-        projection: MediaProjection,
         width: Int,
         height: Int,
         bitrateBps: Int
@@ -477,12 +510,12 @@ class ReverseScreenStreamer(
         val sink: (ByteArray, Boolean) -> Unit = { bytes, isKey -> emitEncoded(bytes, isKey) }
         try {
             Log.i(TAG, "反向投屏优先用 MediaCodec 硬编（${width}x$height @ ${bitrateBps / 1_000_000.0}Mbps）")
-            return MediaCodecEncoder(projection, width, height, bitrateBps, sink)
+            return MediaCodecEncoder(width, height, bitrateBps, sink)
         } catch (e: Exception) {
             Log.w(TAG, "MediaCodec 编码器启动失败，回落软编（JavaCV/libx264）: ${e.javaClass.simpleName}: ${e.message}")
         }
         try {
-            return SoftwareEncoder(projection, width, height, bitrateBps, sink)
+            return SoftwareEncoder(width, height, bitrateBps, sink)
         } catch (e: Exception) {
             Log.e(TAG, "软编启动也失败: ${e.javaClass.simpleName}: ${e.message}")
             return null
@@ -502,6 +535,9 @@ class ReverseScreenStreamer(
         pending = null
         active = null
         stopEncoderOnly()
+        val vd = virtualDisplay
+        virtualDisplay = null
+        if (vd != null) runCatching { vd.release() }
         val proj = projection
         val cb = projectionCallback
         projection = null
@@ -575,17 +611,16 @@ class ReverseScreenStreamer(
     // ---------- MediaCodec 编码器（优先） ----------
 
     private inner class MediaCodecEncoder(
-        private val projection: MediaProjection,
         private val width: Int,
         private val height: Int,
         private var bitrateBps: Int,
         private val sink: (ByteArray, Boolean) -> Unit
     ) : EncoderHandle {
         override val name: String = "mediacodec"
+        override val surface: android.view.Surface get() = inputSurface
 
         private val codec: MediaCodec
         private val inputSurface: android.view.Surface
-        private val virtualDisplay: android.hardware.display.VirtualDisplay
         private val stopped = AtomicBoolean(false)
         private val drainThread: Thread
 
@@ -606,25 +641,27 @@ class ReverseScreenStreamer(
                     MediaFormat.KEY_BITRATE_MODE,
                     MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR
                 )
+                // 静止画面每 100ms 重复上一帧，防解码管道饿死；高刷屏（120/144Hz）
+                // 限制送入编码器的帧率为 STREAM_FPS，避免 CBR 按 30fps 计单帧比特预算
+                // 却按 144fps 塞帧导致码率飙到 ~25Mbps；关 B 帧消除重排延迟。
+                setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 100_000L)
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                    setFloat(MediaFormat.KEY_MAX_FPS_TO_ENCODER, STREAM_FPS.toFloat())
+                    setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
+                }
             }
             codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
             codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
             inputSurface = codec.createInputSurface()
             codec.start()
-            val dpi = appContext.resources.displayMetrics.densityDpi
-            virtualDisplay = projection.createVirtualDisplay(
-                "LinkSpaceReverse",
-                width,
-                height,
-                dpi,
-                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                inputSurface,
-                null,
-                null
-            )
             drainThread = Thread({ drainLoop() }, "linkspace-reverse-encode").apply {
                 isDaemon = true
-                start()
+            }
+        }
+
+        override fun start() {
+            if (!stopped.get() && !drainThread.isAlive) {
+                drainThread.start()
             }
         }
 
@@ -641,7 +678,6 @@ class ReverseScreenStreamer(
 
         override fun stop() {
             if (!stopped.compareAndSet(false, true)) return
-            runCatching { virtualDisplay.release() }
             runCatching { codec.stop() }
             runCatching { codec.release() }
             runCatching { inputSurface.release() }
@@ -703,11 +739,15 @@ class ReverseScreenStreamer(
                 val sps = fmt.getByteBuffer("csd-0")?.duplicate()?.toByteArray()
                 val pps = fmt.getByteBuffer("csd-1")?.duplicate()?.toByteArray()
                 if (sps != null && pps != null) {
-                    val out = ByteArrayOutputStream()
-                    out.write(START_CODE)
-                    out.write(sps)
-                    out.write(START_CODE)
-                    out.write(pps)
+                    // Android MediaCodec 的 csd-0/csd-1 通常已自带 00 00 00 01 起始码，
+                    // 先走 normalizeNals 并在未带起始码时才补，防止拼出双起始码空 NAL。
+                    val spsAnnexB = normalizeNals(sps)
+                    val ppsAnnexB = normalizeNals(pps)
+                    val out = ByteArrayOutputStream(spsAnnexB.size + ppsAnnexB.size + 8)
+                    if (!hasAnnexBPrefix(spsAnnexB)) out.write(START_CODE)
+                    out.write(spsAnnexB)
+                    if (!hasAnnexBPrefix(ppsAnnexB)) out.write(START_CODE)
+                    out.write(ppsAnnexB)
                     csd = out.toByteArray()
                 }
             } catch (e: Exception) {
@@ -719,41 +759,31 @@ class ReverseScreenStreamer(
     // ---------- JavaCV/libx264 软编（回落） ----------
 
     private inner class SoftwareEncoder(
-        private val projection: MediaProjection,
         private val width: Int,
         private val height: Int,
         private var bitrateBps: Int,
         private val sink: (ByteArray, Boolean) -> Unit
     ) : EncoderHandle {
         override val name: String = "ffmpeg-soft"
+        override val surface: android.view.Surface get() = imageReader.surface
 
+        private val started = AtomicBoolean(false)
         private val stopped = AtomicBoolean(false)
         private val recorderLock = Any()
         private val imgThread = HandlerThread("linkspace-reverse-img").apply { start() }
         private val imageReader: ImageReader
-        private val virtualDisplay: android.hardware.display.VirtualDisplay
         private val converter = AndroidFrameConverter()
         private var recorder: FFmpegFrameRecorder
         private var lastRecordMs = 0L
 
         init {
             imageReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
-            val dpi = appContext.resources.displayMetrics.densityDpi
-            virtualDisplay = projection.createVirtualDisplay(
-                "LinkSpaceReverse",
-                width,
-                height,
-                dpi,
-                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                imageReader.surface,
-                null,
-                null
-            )
             imageReader.setOnImageAvailableListener({ reader ->
                 if (stopped.get()) return@setOnImageAvailableListener
                 val img = runCatching { reader.acquireLatestImage() }.getOrNull()
                     ?: return@setOnImageAvailableListener
                 try {
+                    if (!started.get()) return@setOnImageAvailableListener
                     // 30fps 节流：VirtualDisplay 按屏幕刷新率出图，
                     // 高于编码帧率只会白耗 CPU
                     val now = SystemClock.uptimeMillis()
@@ -775,6 +805,10 @@ class ReverseScreenStreamer(
             recorder = newRecorder(bitrateBps)
         }
 
+        override fun start() {
+            started.set(true)
+        }
+
         override fun setBitrate(bps: Int) {
             bitrateBps = bps
             // FFmpegFrameRecorder 的码率只在 start() 时读入，改档需重启
@@ -793,7 +827,6 @@ class ReverseScreenStreamer(
         override fun stop() {
             if (!stopped.compareAndSet(false, true)) return
             runCatching { imageReader.setOnImageAvailableListener(null, null) }
-            runCatching { virtualDisplay.release() }
             runCatching { imageReader.close() }
             synchronized(recorderLock) {
                 runCatching { recorder.stop(); recorder.release() }
@@ -907,6 +940,18 @@ class ReverseScreenStreamer(
             StreamTier("t3-1.5M", 1_500_000)
         )
 
+        /** 是否已带 Annex-B 起始码（00 00 00 01 或 00 00 01） */
+        fun hasAnnexBPrefix(bytes: ByteArray): Boolean {
+            if (bytes.size >= 4 &&
+                bytes[0] == 0.toByte() && bytes[1] == 0.toByte() &&
+                bytes[2] == 0.toByte() && bytes[3] == 1.toByte()
+            ) return true
+            if (bytes.size >= 3 &&
+                bytes[0] == 0.toByte() && bytes[1] == 0.toByte() && bytes[2] == 1.toByte()
+            ) return true
+            return false
+        }
+
         /**
          * 把编码器输出归一化成 Annex-B：
          * 已带起始码（00 00 00 01 或 00 00 01）原样返回；否则按 4 字节
@@ -914,13 +959,7 @@ class ReverseScreenStreamer(
          * ROM 上的形态未经本机验证，两种都兜住。
          */
         fun normalizeNals(bytes: ByteArray): ByteArray {
-            if (bytes.size >= 4 &&
-                bytes[0] == 0.toByte() && bytes[1] == 0.toByte() &&
-                bytes[2] == 0.toByte() && bytes[3] == 1.toByte()
-            ) return bytes
-            if (bytes.size >= 3 &&
-                bytes[0] == 0.toByte() && bytes[1] == 0.toByte() && bytes[2] == 1.toByte()
-            ) return bytes
+            if (hasAnnexBPrefix(bytes)) return bytes
             val out = ByteArrayOutputStream(bytes.size + 16)
             var off = 0
             while (off + 4 <= bytes.size) {

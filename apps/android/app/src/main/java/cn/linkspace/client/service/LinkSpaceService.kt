@@ -402,18 +402,7 @@ class LinkSpaceService private constructor(private val appContext: Context) {
                 handleOffer(transferId, files, from)
             }
 
-            Protocol.TYPE_CLIPBOARD_SHARE -> {
-                // 范围门禁：剪贴板会经过密码与令牌，没有 clipboard 授权
-                // 的对端既不能读也不能写本机剪贴板
-                if (!trust.hasScope(from, "clipboard")) {
-                    Log.w(TAG, "拒绝未授权设备的 clipboard.share: $from")
-                    return
-                }
-                val kind = payload.optString("kind", "text")
-                if (kind != "text") return
-                Log.i(TAG, "收到 clipboard.share，${payload.optString("text").length} 字符")
-                clipboard?.receive(payload.optString("text"))
-            }
+            Protocol.TYPE_CLIPBOARD_SHARE -> handleClipboardShare(from, payload)
 
             Protocol.TYPE_TRANSFER_CANCEL -> {
                 // 只能取消本任务对端发来的取消：不核对来源的话，
@@ -751,19 +740,58 @@ class LinkSpaceService private constructor(private val appContext: Context) {
         clipboard?.poll()
     }
 
-    /** 只发给持有 clipboard 授权的对端，不做全量广播 */
+    /**
+     * 处理收到的 clipboard.share（入站服务与出站控制连接共用）：
+     * - 校验 clipboard 授权与 text 类型；
+     * - 剪贴板同步开关关闭时不写入；
+     * - 界面在前台（clipboard != null）时走 ClipboardSync.receive（含回环抑制）；
+     * - 界面在后台（如用户在 Chrome 内接受远控，onPause 停了剪贴板读取轮询）时，
+     *   写系统剪贴板不受 Android 10+ 后台读取限制，按 512 KiB 上限校验后投递主线程写入；
+     *   回前台 enableClipboardSync 时 start() 会重读基线，不会触发回环。
+     */
+    private fun handleClipboardShare(from: String, payload: JSONObject) {
+        if (!trust.hasScope(from, "clipboard")) {
+            Log.w(TAG, "拒绝未授权设备的 clipboard.share: $from")
+            return
+        }
+        val kind = payload.optString("kind", "text")
+        if (kind != "text") return
+        val text = payload.optString("text")
+        Log.i(TAG, "收到 clipboard.share，${text.length} 字符")
+        if (!_clipboardEnabled.value) return
+        val sync = clipboard
+        if (sync != null) {
+            sync.receive(text)
+            return
+        }
+        if (text.isEmpty()) return
+        if (text.toByteArray(Charsets.UTF_8).size > 512 * 1024) {
+            Log.w(TAG, "远端剪贴板内容超过上限 512 KiB，已丢弃")
+            return
+        }
+        mainHandler.post {
+            runCatching {
+                val cm = appContext.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                cm?.setPrimaryClip(ClipData.newPlainText("LinkSpace", text))
+            }.onFailure {
+                Log.w(TAG, "后台写入剪贴板失败: ${it.message}")
+            }
+        }
+    }
+
+    /** 只发给持有 clipboard 授权的对端（覆盖入站与主动连出的控制连接），不做全量广播 */
     private fun broadcastClipboard(text: String) {
-        val srv = server ?: return
+        val peerIds = LinkedHashSet<String>()
+        server?.connectedPeerIds()?.let { peerIds.addAll(it) }
+        outbound?.peerId?.let { peerIds.add(it) }
+        if (peerIds.isEmpty()) return
         var sent = 0
-        srv.connectedPeerIds().forEach { peerId ->
+        peerIds.forEach { peerId ->
             if (!trust.hasScope(peerId, "clipboard")) return@forEach
-            srv.sendControlTo(
-                peerId,
-                envelope(Protocol.TYPE_CLIPBOARD_SHARE, peerId) {
-                    put("kind", "text")
-                    put("text", text)
-                }
-            )
+            sendControlMessage(peerId, Protocol.TYPE_CLIPBOARD_SHARE) {
+                put("kind", "text")
+                put("text", text)
+            }
             sent++
         }
         if (sent > 0) Log.i(TAG, "剪贴板已同步到 $sent 台设备")
@@ -1345,6 +1373,7 @@ class LinkSpaceService private constructor(private val appContext: Context) {
                     Protocol.TYPE_INPUT_EVENT -> controlledInput.onEvent(from, payload)
                     Protocol.TYPE_INPUT_TEXT -> controlledInput.onText(from, payload)
                     Protocol.TYPE_SCREEN_PASTE -> controlledInput.onScreenPaste(from, payload)
+                    Protocol.TYPE_CLIPBOARD_SHARE -> handleClipboardShare(from, payload)
                     // ---------- 反向投屏（4.7，线 2 W6）：桌面看平板画面 ----------
                     // 与 input 会话解耦：不查活动 input 会话，只认已配对连接
                     Protocol.TYPE_SCREEN_STREAM_REQUEST -> reverseScreen.onRequest(from, payload)

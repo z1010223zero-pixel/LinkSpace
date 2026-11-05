@@ -538,6 +538,22 @@ export function registerIpc(
       reverseWindows.open(peerId, reverseWindows.statusSnapshot().displayName || peerId)
       return { ok: true as const }
     }
+    if (!host.isConnected(peerId)) {
+      const svc = runtime.discovered.find(
+        (d) => d.idPrefix === peerId || peerId.startsWith(d.idPrefix)
+      )
+      if (svc) {
+        try {
+          await host.connect(svc)
+          for (let i = 0; i < 20; i++) {
+            if (host.isConnected(peerId)) break
+            await new Promise((r) => setTimeout(r, 100))
+          }
+        } catch (err) {
+          log.warn(`尝试连接对端 ${peerId} 失败: ${String(err)}`)
+        }
+      }
+    }
     const width = typeof scaleWidth === 'number' ? scaleWidth : 1920
     const r = host.requestReverseScreenStream(peerId, width)
     if (!r.ok) return fail(reverseStartGuidance(r.error))

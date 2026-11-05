@@ -551,6 +551,8 @@ export class ScreenStreamReceiver {
   private expectedWidth = 0
   private expectedHeight = 0
   private frameBuf = Buffer.alloc(0)
+  private pendingChunks: Buffer[] = []
+  private pendingBytes = 0
   private droppingToKeyframe = false
   private bytesReceived = 0
   private framesDecoded = 0
@@ -559,6 +561,14 @@ export class ScreenStreamReceiver {
   private lastError: string | null = null
   private stderrTail: string[] = []
   private onFrameRef: ((frame: ReverseStreamFrame) => void) | null = null
+  /**
+   * 临时落盘（排障用，勿提交）：LINKSPACE_REVERSE_TEE=<路径> 时，把喂给
+   * ffmpeg 的原始 Annex-B 字节原样写盘；平时不写盘。命名与推流侧的
+   * LINKSPACE_STREAM_TEE 对齐。落盘发生在 writeChunk，即解码器实际
+   * 收到的数据（含背压重同步后截断的块，不含被丢弃的块）。
+   */
+  private teeStream: import('node:fs').WriteStream | null = null
+  private teeBytes = 0
 
   get running(): boolean {
     return this.proc != null
@@ -584,7 +594,16 @@ export class ScreenStreamReceiver {
       '-hide_banner', '-loglevel', 'error',
       '-fflags', 'nobuffer',
       '-flags', 'low_delay',
+      // 裸 H.264 Annex-B 无容器时间戳：显式指定 -f h264 与最小探测窗口，
+      // 避免 avformat_find_stream_info 阻塞吞流（与 Android StreamDecoder 同根因）；
+      // -vsync 0（passthrough）关闭 rawvideo 默认 CFR 时间戳同步——MediaCodec
+      // 裸流无 VUI timing_info 时后续帧 PTS 恒为初值，CFR 会将第 2 帧起全部判为
+      // 重复时间戳静默丢弃（真机表现为 framesDecoded 恒为 1、bytesReceived 持续增长）。
+      '-probesize', '32',
+      '-analyzeduration', '0',
+      '-f', 'h264',
       '-i', 'pipe:0',
+      '-vsync', '0',
       '-f', 'rawvideo',
       '-pix_fmt', 'rgba',
       'pipe:1'
@@ -620,6 +639,24 @@ export class ScreenStreamReceiver {
       log.warn(`[screen-stream] 接收端 ffmpeg 启动失败: ${String(err)}`)
     })
     this.proc = proc
+    // 临时落盘（排障用，勿提交）：只在环境变量开启时写盘
+    const teePath = process.env.LINKSPACE_REVERSE_TEE
+    if (teePath) {
+      try {
+        this.teeStream = createWriteStream(teePath)
+        this.teeBytes = 0
+        log.info(`[screen-stream] 反向接收字节落盘: ${teePath}`)
+      } catch (err) {
+        log.warn(`[screen-stream] 反向落盘打不开 ${teePath}: ${String(err)}`)
+      }
+    }
+    if (this.pendingChunks.length > 0) {
+      const queued = this.pendingChunks.splice(0, this.pendingChunks.length)
+      this.pendingBytes = 0
+      for (const chunk of queued) {
+        this.feed(chunk)
+      }
+    }
   }
 
   /**
@@ -628,7 +665,16 @@ export class ScreenStreamReceiver {
    */
   feed(data: Buffer): void {
     const proc = this.proc
-    if (!proc || proc.stdin.destroyed) return
+    if (!proc) {
+      // 二进制帧可能先于 screen.stream.start 到达：暂存首帧 SPS/PPS/IDR，
+      // 等 start() 起好 ffmpeg 后立刻冲入，避免丢掉首个关键帧。
+      if (this.pendingBytes + data.length <= RECEIVER_BACKLOG_CAP) {
+        this.pendingChunks.push(data)
+        this.pendingBytes += data.length
+      }
+      return
+    }
+    if (proc.stdin.destroyed) return
     this.bytesReceived += data.length
     if (this.droppingToKeyframe) {
       const spsAt = findSps(data)
@@ -653,6 +699,11 @@ export class ScreenStreamReceiver {
 
   private writeChunk(proc: ChildProcessWithoutNullStreams, data: Buffer): void {
     if (data.length === 0) return
+    // 临时落盘（排障用，勿提交）：记解码器实际收到的数据
+    if (this.teeStream) {
+      this.teeBytes += data.length
+      this.teeStream.write(data)
+    }
     try {
       proc.stdin.write(data)
     } catch {
@@ -694,6 +745,15 @@ export class ScreenStreamReceiver {
   }
 
   stop(): void {
+    this.pendingChunks = []
+    this.pendingBytes = 0
+    // 临时落盘（排障用，勿提交）：流停即收尾落盘文件
+    if (this.teeStream) {
+      const t = this.teeStream
+      this.teeStream = null
+      log.info(`[screen-stream] 反向接收落盘结束，共 ${this.teeBytes} 字节`)
+      t.end()
+    }
     if (!this.proc) return
     const p = this.proc
     this.proc = null
