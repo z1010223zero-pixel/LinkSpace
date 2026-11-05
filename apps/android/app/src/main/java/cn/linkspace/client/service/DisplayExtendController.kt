@@ -51,10 +51,6 @@ class DisplayExtendController(
     /** 正在扩展到谁，未扩展时为 null */
     val extendingTo: String? get() = active?.peerId
 
-    /** 指定对端是否有正在进行或挂起中的扩展屏会话 */
-    fun isPeerInSession(peerId: String): Boolean =
-        active?.peerId == peerId || pending?.peerId == peerId
-
     /** 活动会话的虚拟显示器矩形，未建立时为 null */
     val virtualScreen: VirtualScreen? get() = active?.virtualScreen
 

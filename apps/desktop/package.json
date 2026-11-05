@@ -74,8 +74,11 @@
         "to": "winhelper"
       },
       {
-        "from": "../../native/dd-capture/x64/Release/dd-capture.exe",
-        "to": "native/dd-capture/dd-capture.exe"
+        "from": "../../native/dd-capture/x64/Release",
+        "to": "native/dd-capture",
+        "filter": [
+          "dd-capture.exe"
+        ]
       }
     ],
     "win": {

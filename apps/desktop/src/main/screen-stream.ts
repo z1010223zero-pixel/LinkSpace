@@ -883,15 +883,14 @@ export class ScreenStreamReceiver {
 /** 接收端 stdin 背压上限（与 Android StreamDecoder BACKLOG_CAP 同值） */
 const RECEIVER_BACKLOG_CAP = 3 * 1024 * 1024
 
-/** 在 Annex-B 字节块里找 SPS 起始码（兼容 3 字节 00 00 01 与 4 字节 00 00 00 01 + NAL type 7），找不到返回 -1 */
+/** 在 Annex-B 字节块里找 SPS 起始码（兼容 00 00 00 01 与 00 00 01 + NAL type 7），找不到返回 -1 */
 function findSps(data: Buffer): number {
   for (let i = 0; i + 3 < data.length; i++) {
-    if (data[i] === 0 && data[i + 1] === 0) {
-      if (data[i + 2] === 1) {
-        if ((data[i + 3]! & 0x1f) === 7) return i
-      } else if (data[i + 2] === 0 && i + 4 < data.length && data[i + 3] === 1) {
-        if ((data[i + 4]! & 0x1f) === 7) return i
+    if (data[i] === 0 && data[i + 1] === 0 && data[i + 2] === 1) {
+      if ((data[i + 3]! & 0x1f) === 7) {
+        return i > 0 && data[i - 1] === 0 ? i - 1 : i
       }
+      i += 2
     }
   }
   return -1

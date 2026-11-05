@@ -223,6 +223,13 @@ class LinkSpaceService private constructor(private val appContext: Context) {
         val type = msg.optString("type")
         val from = ctx.peerId
         val payload = msg.optJSONObject("payload") ?: JSONObject()
+        // 前置门禁（审查 P0）：未完成 device.announce（含 TLS 证书指纹核验）的连接，
+        // 拒绝处理任何业务控制消息，防止攻击者跳过 announce 冒用已信任 peerId 触发免确认远控或剪贴板同步。
+        if (type != Protocol.TYPE_ANNOUNCE && type != Protocol.TYPE_HEARTBEAT && !ctx.isAnnounced) {
+            Log.w(TAG, "拒绝未完成 device.announce 的控制消息: type=$type from=$from，断开连接")
+            ctx.close()
+            return
+        }
         when (type) {
             Protocol.TYPE_ANNOUNCE -> {
                 val claimedFp = normalizeFingerprint(payload.optString("fingerprint"))
@@ -240,7 +247,7 @@ class LinkSpaceService private constructor(private val appContext: Context) {
                 if (known != null) {
                     if (actualFp == null || actualFp != normalizeFingerprint(known)) {
                         Log.w(TAG, "对端 $from 指纹与信任清单不符（或未出示证书），断开连接")
-                        server?.sendControlTo(from, pairError(from, "设备指纹与已存记录不符，请撤销后重新配对"))
+                        ctx.send(pairError(from, "设备指纹与已存记录不符，请撤销后重新配对"))
                         ctx.close()
                         return
                     }
@@ -327,13 +334,9 @@ class LinkSpaceService private constructor(private val appContext: Context) {
                 }
                 trust.revoke(from)
                 _trusted.value = trust.list()
-                if (input.isPeerInSession(from)) {
-                    input.stop("trust revoked")
-                }
+                input.onPeerDisconnected(from)
                 controlledInput.onTrustRevoked(from)
-                if (displayExtend.isPeerInSession(from)) {
-                    displayExtend.stop("trust revoked")
-                }
+                displayExtend.onPeerDisconnected(from)
                 reverseScreen.onTrustRevoked(from)
                 taskMap.values
                     .filter { it.peerId == from && it.state !in listOf(TransferTask.COMPLETED, TransferTask.FAILED, TransferTask.CANCELLED) }
@@ -627,32 +630,37 @@ class LinkSpaceService private constructor(private val appContext: Context) {
     }
 
     fun revokeTrust(deviceId: String) {
-        // 1. 发送 pair.revoke 通知对端
-        server?.sendControlTo(
-            deviceId,
-            envelope(Protocol.TYPE_PAIR_REVOKE, deviceId) {
-                put("deviceId", deviceIdPrefix)
-            }
-        )
-        // 2. 撤销信任列表
-        trust.revoke(deviceId)
+        val changed = trust.revoke(deviceId)
         _trusted.value = trust.list()
-        // 3. 级联终止 4 个会话状态机
-        if (input.isPeerInSession(deviceId)) {
-            input.stop("trust revoked")
+        if (!changed) return
+        // 通知对端本机已撤销信任（与桌面端 pairing.ts revoke 语义对齐）
+        sendControlMessage(deviceId, Protocol.TYPE_PAIR_REVOKE) {
+            put("deviceId", deviceIdPrefix)
         }
+        // 安全红线 §6：撤销信任必须级联断开全部活动会话、取消挂起传输并关闭连接
+        input.onPeerDisconnected(deviceId)
         controlledInput.onTrustRevoked(deviceId)
-        if (displayExtend.isPeerInSession(deviceId)) {
-            displayExtend.stop("trust revoked")
-        }
+        displayExtend.onPeerDisconnected(deviceId)
         reverseScreen.onTrustRevoked(deviceId)
-        // 4. 取消未完成传输
         taskMap.values
-            .filter { it.peerId == deviceId && it.state !in listOf(TransferTask.COMPLETED, TransferTask.FAILED, TransferTask.CANCELLED) }
+            .filter {
+                it.peerId == deviceId &&
+                    it.state != TransferTask.COMPLETED &&
+                    it.state != TransferTask.FAILED &&
+                    it.state != TransferTask.CANCELLED
+            }
             .forEach { cancelTransfer(it.id) }
-        // 5. 关闭底层连接
+        val stalePairings = pendingMap.values.filter { it.peerId == deviceId }
+        if (stalePairings.isNotEmpty()) {
+            stalePairings.forEach { pendingMap.remove(it.id) }
+            _pendingPairings.value = pendingMap.values.toList()
+        }
+        announcedConnections.remove(deviceId)
         server?.closePeer(deviceId)
-        Log.i(TAG, "已撤销对 $deviceId 的信任，清理会话并断开连接")
+        if (outbound?.peerId == deviceId) {
+            closeOutbound()
+        }
+        Log.i(TAG, "已撤销对 $deviceId 的信任并级联清理全部会话与连接")
     }
 
     // ---------- 信任设备清单（Bug 2：确认框“以后不再询问”） ----------

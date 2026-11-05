@@ -237,6 +237,8 @@ export class Host {
   private forwardCursorTimer: NodeJS.Timeout | null = null
   /** 正向推流码率自适应积压采样定时器（避免换档叠加泄漏） */
   private forwardBacklogTimer: NodeJS.Timeout | null = null
+  /** 最近一次虚拟显示器异步销毁 Promise，供 stop() 退出前等待完成 */
+  private pendingExtendDestroy: Promise<void> | null = null
   /** 锁屏暂停的正向投屏（解锁后按原样重起）；无暂停时 null */
   private pausedForwardStream: {
     peerId: string
@@ -1479,13 +1481,21 @@ export class Host {
             ok: false as const,
             reason: 'virtual display unavailable'
           },
-        destroyVirtualDisplay: () => this.opts.extendDestroyVirtualDisplay?.(),
+        destroyVirtualDisplay: () => {
+          const r = this.opts.extendDestroyVirtualDisplay?.()
+          if (r && typeof (r as Promise<void>).then === 'function') {
+            this.pendingExtendDestroy = (r as Promise<void>).catch(() => {}).finally(() => {
+              this.pendingExtendDestroy = null
+            })
+          }
+        },
         send: sendTo,
         log: (msg) => log.info(msg),
         onChanged: () => {
-          if (!this.extendCoordinator?.activeSession && this.screenStream.running && this.forwardStreamRegion) {
-            log.info('[screen-stream] 扩展屏会话结束，停止对应推流')
-            this.stopForwardStream()
+          if (!this.extendCoordinator?.activeSession && this.screenStream.source === STREAM_SOURCE_VIRTUAL_DISPLAY) {
+            this.screenStream.stop()
+            this.clearForwardStreamState()
+            this.pausedForwardStream = null
           }
           this.emit('extendChanged')
         },
@@ -2133,7 +2143,11 @@ export class Host {
     // 扩展屏会话同样先收尾：虚拟显示器随之销毁，不留残留设备
     this.extendController?.stop('app shutdown')
     this.extendCoordinator?.terminate()
-    this.clearReverseStreamReconnectTimer()
+    if (this.pendingExtendDestroy) {
+      await this.pendingExtendDestroy
+    }
+    this.screenStream.stop()
+    this.clearForwardStreamState()
     this.reverseStreamReceiver.stop()
     this.reverseStreamPeerId = null
     this.stopForwardStream()

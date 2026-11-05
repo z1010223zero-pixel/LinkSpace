@@ -710,22 +710,27 @@ async function testVddVirtualDisplayManager(): Promise<void> {
     check('VDD 会话前已启用时 destroy 后 inactive', !m.active)
   }
 
-  // 4b. 节点预先已启用但首轮无差分，500ms 后自动重启节点刷新基线
+  // 4b. 会话前设备已启用且虚拟屏已在初始列表中（无新增差分）：500ms 后自动重启节点刷新基线挑出虚拟屏
   {
     const { driver, calls } = makeFakeVddDriver({ deviceEnabled: true })
-    const m = new VddVirtualDisplayManager({
-      driver,
-      appearTimeoutMs: 2500,
-      listDisplays: () => {
-        // 在驱动被自动重启（setEnabled 包含 true）后返回新显示器
-        return calls.setEnabled.includes(true) ? after : before
+    let curEnabled = true
+    const driverWithToggle: VddDriverLike = {
+      ...driver,
+      setDeviceEnabled: async (e) => {
+        curEnabled = e
+        return driver.setDeviceEnabled(e)
       }
+    }
+    const m = new VddVirtualDisplayManager({
+      driver: driverWithToggle,
+      listDisplays: () => (curEnabled ? after : before),
+      appearTimeoutMs: 3000
     })
-    const r = await m.create({ width: 1920, height: 1080 })
-    check('VDD 节点预先已启用首轮无差分时 500ms 自动重启节点并成功创建', r.ok)
-    check('VDD 自动重启节点触发了 disable 与 enable', calls.setEnabled.includes(false) && calls.setEnabled.includes(true))
+    const r = await m.create({ width: 2560, height: 1440 })
+    check('VDD 预先已启用且无初始差分时自动重启节点成功', r.ok && r.screen.w === 2560)
+    check('VDD 自动重启节点调用了 disable 再 enable', calls.setEnabled.length === 2 && calls.setEnabled[0] === false && calls.setEnabled[1] === true)
     await m.destroy()
-    check('VDD destroy 返回 Promise<void> 且正常完成', !m.active)
+    check('VDD 自动重启节点后 destroy 恢复禁用', calls.setEnabled.length === 3 && calls.setEnabled[2] === false)
   }
 
   // 5. destroy 无活动时是安全空操作

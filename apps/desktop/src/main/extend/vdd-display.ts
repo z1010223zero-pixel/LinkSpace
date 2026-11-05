@@ -149,7 +149,7 @@ export class VddVirtualDisplayManager {
 
       const wasEnabled = st.deviceEnabled
       this.enabledByUs = !wasEnabled
-      const before = this.listDisplays()
+      let before = this.listDisplays()
       if (!wasEnabled) {
         const enabled = await this.driver.setDeviceEnabled(true)
         if (!enabled.ok) {
@@ -162,8 +162,10 @@ export class VddVirtualDisplayManager {
       }
 
       // 等新显示器出现：创建前后差分，按最接近请求尺寸挑一块。
+      // 若会话前节点已处于启用状态（如刚完成驱动安装或上次异常退出残留），
+      // 虚拟显示器已经在 before 快照中，首轮差分若为空则自动重启一次节点刷新基线，避免空等 30s 超时。
       const start = Date.now()
-      let retriedToggle = false
+      let retoggled = false
       for (;;) {
         const after = this.listDisplays()
         const fresh = after.filter((r) => !before.some((b) => sameRect(b, r)))
@@ -177,13 +179,19 @@ export class VddVirtualDisplayManager {
           )
           return { ok: true, screen: { ...chosen } }
         }
-        if (wasEnabled && !retriedToggle && Date.now() - start >= 500) {
-          retriedToggle = true
-          log.info('[vdd-display] 节点预先已启用但首轮无差分，500ms 后自动重启节点刷新基线')
-          await this.driver.setDeviceEnabled(false)
-          await new Promise((r) => setTimeout(r, 200))
-          await this.driver.setDeviceEnabled(true)
-          this.enabledByUs = true
+        if (wasEnabled && !retoggled && Date.now() - start >= 500) {
+          retoggled = true
+          log.info('[vdd-display] 节点预先已启用且未检测到新增显示器，重启节点以刷新差分基线')
+          const disabled = await this.driver.setDeviceEnabled(false)
+          if (disabled.ok) {
+            await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS))
+            before = this.listDisplays()
+            const reenabled = await this.driver.setDeviceEnabled(true)
+            if (!reenabled.ok) {
+              return { ok: false, reason: `重新启用 VDD 设备失败：${reenabled.detail}` }
+            }
+            this.enabledByUs = true
+          }
         }
         if (Date.now() - start >= this.appearTimeoutMs) {
           // 失败不留残留：本次会话启用了节点则恢复回禁用；会话前已启用的不动。
@@ -205,23 +213,25 @@ export class VddVirtualDisplayManager {
    * 启用的保持启用；清掉 screen。无活动显示器时是安全空操作。
    * 返回 Promise<void>，确保退出或结束清理时能等待禁用落定。
    */
-  async destroy(): Promise<void> {
-    if (!this.screen && !this.enabledByUs) return
+  destroy(): Promise<void> {
+    if (!this.screen && !this.enabledByUs) return Promise.resolve()
     const shouldDisable = this.enabledByUs
     this.screen = null
     this.enabledByUs = false
     if (!shouldDisable) {
       log.info('[vdd-display] 虚拟显示器已释放（设备节点会话前已启用，保持启用）')
-      return
+      return Promise.resolve()
     }
-    try {
-      const r = await this.driver.setDeviceEnabled(false)
-      if (r.ok) log.info('[vdd-display] VDD 设备节点已禁用（本次会话启用过，现恢复）')
-      else log.warn(`[vdd-display] VDD 设备节点恢复禁用失败：${r.detail}`)
-    } catch (err) {
-      log.warn(`[vdd-display] VDD 设备节点恢复禁用异常：${String(err)}`)
-    }
-    log.info('[vdd-display] 虚拟显示器已销毁')
+    log.info('[vdd-display] 虚拟显示器销毁中（设备节点恢复禁用信号已发）')
+    return this.driver.setDeviceEnabled(false).then(
+      (r) => {
+        if (r.ok) log.info('[vdd-display] VDD 设备节点已禁用（本次会话启用过，现恢复）')
+        else log.warn(`[vdd-display] VDD 设备节点恢复禁用失败：${r.detail}`)
+      },
+      (err) => {
+        log.warn(`[vdd-display] VDD 设备节点恢复禁用异常：${String(err)}`)
+      }
+    )
   }
 
   /** 创建失败路径：把本次会话启用过的节点恢复回禁用（尽力而为，不抛错） */

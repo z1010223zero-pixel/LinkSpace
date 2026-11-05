@@ -57,7 +57,8 @@ class StreamDecoder(
 
     private val stopped = AtomicBoolean(false)
     private val pipe = LiveByteStream()
-    private val avioScratch = ByteArray(256 * 1024)
+    /** 实例独占 AVIO 读回调缓冲（消除静态共享缓冲在换档/重连时的跨线程竞态） */
+    private val avioScratch = ByteArray(64 * 1024)
 
     /** 解码输出的实际分辨率（触控映射基准） */
     @Volatile
@@ -307,9 +308,10 @@ class StreamDecoder(
             while (i + 3 < off) {
                 if (all[i] == 0x00.toByte() && all[i + 1] == 0x00.toByte() && all[i + 2] == 0x01.toByte()) {
                     if ((all[i + 3].toInt() and 0x1f) == 7) {
-                        lastSps = if (i > 0 && all[i - 1] == 0x00.toByte()) i - 1 else i // 保留 4 字节起始码前导 00
+                        // 兼容 4 字节起始码（00 00 00 01）：保留前导 00
+                        lastSps = if (i > 0 && all[i - 1] == 0x00.toByte()) i - 1 else i
                     }
-                    i += 3
+                    i += 4
                 } else {
                     i++
                 }

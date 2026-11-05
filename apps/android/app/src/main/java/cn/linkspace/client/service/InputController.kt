@@ -49,10 +49,6 @@ class InputController(
     /** 正在控制的对端，未控制时为 null */
     val controllingPeer: String? get() = active?.peerId
 
-    /** 指定对端是否有正在进行或挂起中的控制会话 */
-    fun isPeerInSession(peerId: String): Boolean =
-        active?.peerId == peerId || pending?.peerId == peerId
-
     /**
      * 请求控制对端。结果经 onSessionActive / onSessionEnded 回调。
      * 已有挂起或活动会话时直接拒绝本次请求。

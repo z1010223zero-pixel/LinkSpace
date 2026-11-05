@@ -357,13 +357,13 @@ class TransferServer(
                 override fun onMessage(text: String) = onControlMessage(conn, text, tlsFp)
                 override fun onClosed() {
                     controlConns.remove(conn)
-                    controlAnnounced.remove(conn)
                     // 对端断连：把它留下的待确认配对请求清掉，否则会变成
                     // 永远展示在界面上、提交也不会成功的僵尸条目
                     val peer = controlPeerIds.remove(conn)
                     controlFingerprints.remove(conn)
                     controlSeenIds.remove(conn)
-                    if (peer != null) controlClosedHandler?.invoke(peer)
+                    val wasAnnounced = controlAnnounced.remove(conn)
+                    if (peer != null && wasAnnounced) controlClosedHandler?.invoke(peer)
                 }
             }
             controlConns.add(conn)
@@ -569,18 +569,23 @@ class TransferServer(
         internal val conn: WebSocketConnection,
         private val announcedSet: MutableSet<WebSocketConnection>
     ) {
-        /** 主动掐断这条连接（指纹不符、配对码穷举等场景） */
-        fun close() {
-            runCatching { conn.close() }
-        }
+        /** 该连接是否已完成 device.announce 及证书指纹核验 */
+        val isAnnounced: Boolean get() = announcedSet.contains(conn)
 
-        /** 标记该连接已通过 device.announce 的 TLS 证书指纹核验 */
+        /** 标记该连接已通过 device.announce 指纹核验 */
         fun markAnnounced() {
             announcedSet.add(conn)
         }
 
-        val isAnnounced: Boolean
-            get() = conn in announcedSet
+        /** 直接向当前连接发送消息（供 announce 阶段报错使用） */
+        fun send(obj: JSONObject) {
+            runCatching { conn.send(obj.toString()) }
+        }
+
+        /** 主动掐断这条连接（指纹不符、配对码穷举等场景） */
+        fun close() {
+            runCatching { conn.close() }
+        }
     }
 
     /** 上层注入的控制消息处理器 */
