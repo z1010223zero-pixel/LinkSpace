@@ -72,6 +72,10 @@
       {
         "from": "resources/winhelper",
         "to": "winhelper"
+      },
+      {
+        "from": "../../native/dd-capture/x64/Release/dd-capture.exe",
+        "to": "native/dd-capture/dd-capture.exe"
       }
     ],
     "win": {

@@ -263,6 +263,27 @@ async function main(): Promise<void> {
     check('开启后的新复制正常同步', sent.length === 1 && sent[0] === '开启后的新复制')
   }
 
+  // ---------- 14. markRemoteWrite 抑制回推（如 screen.paste） ----------
+  console.log('\n14. markRemoteWrite 防止远端写入文本被 poll 回推')
+  {
+    const io = makeIo('初始内容')
+    const sent: string[] = []
+    const clock = makeClock()
+    const sync = new ClipboardSync({ io, send: (t) => sent.push(t), now: clock.now })
+    sync.start()
+    const pasteText = '远端粘贴过来的中文内容'
+    io.value = pasteText
+    sync.markRemoteWrite(pasteText)
+    sync.poll()
+    check('markRemoteWrite 后立即 poll 不产生回推', sent.length === 0, sent.join('|'))
+    clock.advance(600)
+    sync.poll()
+    check('抑制窗口过后由于内容未变仍然不回推', sent.length === 0, sent.join('|'))
+    io.value = '用户后续新的复制'
+    sync.poll()
+    check('后续新复制正常同步', sent.length === 1 && sent[0] === '用户后续新的复制')
+  }
+
   console.log(`\n=== 结果：${failures === 0 ? '全部通过' : `${failures} 项失败`} ===\n`)
   process.exit(failures === 0 ? 0 : 1)
 }

@@ -710,6 +710,24 @@ async function testVddVirtualDisplayManager(): Promise<void> {
     check('VDD 会话前已启用时 destroy 后 inactive', !m.active)
   }
 
+  // 4b. 节点预先已启用但首轮无差分，500ms 后自动重启节点刷新基线
+  {
+    const { driver, calls } = makeFakeVddDriver({ deviceEnabled: true })
+    const m = new VddVirtualDisplayManager({
+      driver,
+      appearTimeoutMs: 2500,
+      listDisplays: () => {
+        // 在驱动被自动重启（setEnabled 包含 true）后返回新显示器
+        return calls.setEnabled.includes(true) ? after : before
+      }
+    })
+    const r = await m.create({ width: 1920, height: 1080 })
+    check('VDD 节点预先已启用首轮无差分时 500ms 自动重启节点并成功创建', r.ok)
+    check('VDD 自动重启节点触发了 disable 与 enable', calls.setEnabled.includes(false) && calls.setEnabled.includes(true))
+    await m.destroy()
+    check('VDD destroy 返回 Promise<void> 且正常完成', !m.active)
+  }
+
   // 5. destroy 无活动时是安全空操作
   {
     const { driver, calls } = makeFakeVddDriver({})

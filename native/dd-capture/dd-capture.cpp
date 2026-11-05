@@ -1,4 +1,4 @@
-﻿// dd-capture.cpp — Desktop Duplication 持续取帧 → 原始 BGRA 写 stdout
+// dd-capture.cpp — Desktop Duplication 持续取帧 → 原始 BGRA 写 stdout
 //
 // 线 3（3.2-1）：把帧源从 gdigrab 换成虚拟显示器的 DD 帧。用法：
 //   dd-capture --rect <x> <y> <w> <h> [--fps <n>] [--frames <n>]
@@ -67,6 +67,7 @@ std::vector<OutputRef> EnumerateOutputs()
         ComPtr<IDXGIOutput> output;
         for (UINT o = 0; ; ++o)
         {
+            output.Reset();
             // 注意：EnumOutputs 失败不只有 NOT_FOUND——SSH 会话里会返回
             // DXGI_ERROR_NOT_CURRENTLY_AVAILABLE（0x887A0022），此时
             // output 仍是空指针；旧写法只判 NOT_FOUND，进循环体调
@@ -192,6 +193,8 @@ int main(int argc, char** argv)
 
     const size_t rowBytes = (size_t)rw * 4;
     long frames = 0;
+    ComPtr<ID3D11Texture2D> staging;
+    D3D11_TEXTURE2D_DESC stagingDesc{};
     for (;;)
     {
         DXGI_OUTDUPL_FRAME_INFO info{};
@@ -210,14 +213,17 @@ int main(int argc, char** argv)
 
         D3D11_TEXTURE2D_DESC td{};
         tex->GetDesc(&td);
-        D3D11_TEXTURE2D_DESC sd = td;
-        sd.Usage = D3D11_USAGE_STAGING;
-        sd.BindFlags = 0;
-        sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-        sd.MiscFlags = 0;
-        ComPtr<ID3D11Texture2D> staging;
-        hr = device->CreateTexture2D(&sd, nullptr, &staging);
-        if (FAILED(hr)) { dup->ReleaseFrame(); continue; }
+        if (!staging || stagingDesc.Width != td.Width || stagingDesc.Height != td.Height || stagingDesc.Format != td.Format)
+        {
+            stagingDesc = td;
+            stagingDesc.Usage = D3D11_USAGE_STAGING;
+            stagingDesc.BindFlags = 0;
+            stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+            stagingDesc.MiscFlags = 0;
+            staging.Reset();
+            hr = device->CreateTexture2D(&stagingDesc, nullptr, &staging);
+            if (FAILED(hr)) { dup->ReleaseFrame(); continue; }
+        }
         ctx->CopyResource(staging.Get(), tex.Get());
         D3D11_MAPPED_SUBRESOURCE map{};
         hr = ctx->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &map);

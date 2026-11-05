@@ -163,6 +163,7 @@ export class VddVirtualDisplayManager {
 
       // 等新显示器出现：创建前后差分，按最接近请求尺寸挑一块。
       const start = Date.now()
+      let retriedToggle = false
       for (;;) {
         const after = this.listDisplays()
         const fresh = after.filter((r) => !before.some((b) => sameRect(b, r)))
@@ -175,6 +176,14 @@ export class VddVirtualDisplayManager {
               (fresh.length > 1 ? `（同批新出现 ${fresh.length} 块，按最接近请求尺寸挑）` : '')
           )
           return { ok: true, screen: { ...chosen } }
+        }
+        if (wasEnabled && !retriedToggle && Date.now() - start >= 500) {
+          retriedToggle = true
+          log.info('[vdd-display] 节点预先已启用但首轮无差分，500ms 后自动重启节点刷新基线')
+          await this.driver.setDeviceEnabled(false)
+          await new Promise((r) => setTimeout(r, 200))
+          await this.driver.setDeviceEnabled(true)
+          this.enabledByUs = true
         }
         if (Date.now() - start >= this.appearTimeoutMs) {
           // 失败不留残留：本次会话启用了节点则恢复回禁用；会话前已启用的不动。
@@ -194,10 +203,9 @@ export class VddVirtualDisplayManager {
   /**
    * 销毁虚拟显示器：只有本次会话是我们启用了节点时才禁用它；会话前已
    * 启用的保持启用；清掉 screen。无活动显示器时是安全空操作。
-   * 同步返回，不等禁用命令落定——调用方（会话结束路径）不应被销毁阻塞；
-   * 禁用失败只记日志，不抛错。
+   * 返回 Promise<void>，确保退出或结束清理时能等待禁用落定。
    */
-  destroy(): void {
+  async destroy(): Promise<void> {
     if (!this.screen && !this.enabledByUs) return
     const shouldDisable = this.enabledByUs
     this.screen = null
@@ -206,16 +214,14 @@ export class VddVirtualDisplayManager {
       log.info('[vdd-display] 虚拟显示器已释放（设备节点会话前已启用，保持启用）')
       return
     }
-    void this.driver.setDeviceEnabled(false).then(
-      (r) => {
-        if (r.ok) log.info('[vdd-display] VDD 设备节点已禁用（本次会话启用过，现恢复）')
-        else log.warn(`[vdd-display] VDD 设备节点恢复禁用失败：${r.detail}`)
-      },
-      (err) => {
-        log.warn(`[vdd-display] VDD 设备节点恢复禁用异常：${String(err)}`)
-      }
-    )
-    log.info('[vdd-display] 虚拟显示器销毁中（设备节点恢复禁用信号已发）')
+    try {
+      const r = await this.driver.setDeviceEnabled(false)
+      if (r.ok) log.info('[vdd-display] VDD 设备节点已禁用（本次会话启用过，现恢复）')
+      else log.warn(`[vdd-display] VDD 设备节点恢复禁用失败：${r.detail}`)
+    } catch (err) {
+      log.warn(`[vdd-display] VDD 设备节点恢复禁用异常：${String(err)}`)
+    }
+    log.info('[vdd-display] 虚拟显示器已销毁')
   }
 
   /** 创建失败路径：把本次会话启用过的节点恢复回禁用（尽力而为，不抛错） */

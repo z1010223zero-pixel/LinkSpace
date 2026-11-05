@@ -49,6 +49,11 @@ class TransferServer(
     private val cancelled = ConcurrentHashMap.newKeySet<String>()
     private val controlConns = java.util.Collections.synchronizedSet(mutableSetOf<WebSocketConnection>())
     /**
+     * 已通过 device.announce 的 TLS 证书指纹核验的 WebSocket 连接门禁集合。
+     * 未在集合内的连接，拒绝一切非心跳业务消息且不纳入 sendControlTo / connectedPeerIds 路由。
+     */
+    private val controlAnnounced = java.util.Collections.synchronizedSet(mutableSetOf<WebSocketConnection>())
+    /**
      * WebSocket 连接 → 对端设备 ID。**首条消息（announce）时固定**，
      * 之后该连接上任何 `from` 与之不符的消息一律丢弃——否则一条连接
      * 可以先冒用 A 建立身份、再换 B 的 id 操作 A 的任务。
@@ -132,6 +137,7 @@ class TransferServer(
         synchronized(controlConns) {
             controlConns.toList().forEach { runCatching { it.close() } }
             controlConns.clear()
+            controlAnnounced.clear()
         }
         controlPeerIds.clear()
         controlFingerprints.clear()
@@ -351,6 +357,7 @@ class TransferServer(
                 override fun onMessage(text: String) = onControlMessage(conn, text, tlsFp)
                 override fun onClosed() {
                     controlConns.remove(conn)
+                    controlAnnounced.remove(conn)
                     // 对端断连：把它留下的待确认配对请求清掉，否则会变成
                     // 永远展示在界面上、提交也不会成功的僵尸条目
                     val peer = controlPeerIds.remove(conn)
@@ -559,12 +566,21 @@ class TransferServer(
     class ControlContext(
         val peerId: String,
         val tlsFingerprint: String?,
-        internal val conn: WebSocketConnection
+        internal val conn: WebSocketConnection,
+        private val announcedSet: MutableSet<WebSocketConnection>
     ) {
         /** 主动掐断这条连接（指纹不符、配对码穷举等场景） */
         fun close() {
             runCatching { conn.close() }
         }
+
+        /** 标记该连接已通过 device.announce 的 TLS 证书指纹核验 */
+        fun markAnnounced() {
+            announcedSet.add(conn)
+        }
+
+        val isAnnounced: Boolean
+            get() = conn in announcedSet
     }
 
     /** 上层注入的控制消息处理器 */
@@ -574,6 +590,15 @@ class TransferServer(
         val obj = runCatching { JSONObject(text) }.getOrNull() ?: return
         val from = obj.optString("from")
         if (from.isEmpty()) return
+        val type = obj.optString("type")
+
+        // 门禁：连接未通过 device.announce 的 TLS 证书指纹核验前，拒绝一切非心跳业务消息
+        val isAnnounced = conn in controlAnnounced
+        if (!isAnnounced && type != Protocol.TYPE_ANNOUNCE && type != Protocol.TYPE_HEARTBEAT) {
+            Log.w(TAG, "连接尚未通过 device.announce 身份声明与证书指纹核验，拒绝消息 type=$type from=$from")
+            return
+        }
+
         // 协议 §3 语义校验：v 可处理、to 为本机或空（心跳广播）、
         // ts 在 ±60s 窗口。任一项失败即断开——这是对畸形/重放消息的
         // 统一防线，桌面端 control/node.ts 同规则
@@ -600,12 +625,12 @@ class TransferServer(
         if (registered == null) {
             controlPeerIds[conn] = from
             controlFingerprints[conn] = tlsFp
-            ctx = ControlContext(from, tlsFp, conn)
+            ctx = ControlContext(from, tlsFp, conn, controlAnnounced)
         } else if (registered != from) {
             Log.w(TAG, "连接身份漂移（$registered → $from），丢弃消息")
             return
         } else {
-            ctx = ControlContext(registered, controlFingerprints[conn], conn)
+            ctx = ControlContext(registered, controlFingerprints[conn], conn, controlAnnounced)
         }
         // id 去重（协议 §3）：同一连接上同一 id 只处理一次；空 id 视为畸形。
         val id = obj.optString("id")
@@ -631,7 +656,7 @@ class TransferServer(
     fun sendControl(obj: JSONObject) {
         val text = obj.toString()
         synchronized(controlConns) {
-            controlConns.toList().forEach { it.send(text) }
+            controlConns.filter { it in controlAnnounced }.forEach { it.send(text) }
         }
     }
 
@@ -645,7 +670,7 @@ class TransferServer(
         val text = obj.toString()
         synchronized(controlConns) {
             controlConns.toList().forEach { conn ->
-                if (controlPeerIds[conn] == peerId) conn.send(text)
+                if (conn in controlAnnounced && controlPeerIds[conn] == peerId) conn.send(text)
             }
         }
     }
@@ -662,7 +687,7 @@ class TransferServer(
     /** 当前已建立控制连接且已声明身份的对端 ID */
     fun connectedPeerIds(): Set<String> {
         synchronized(controlConns) {
-            return controlConns.mapNotNull { controlPeerIds[it] }.toSet()
+            return controlConns.filter { it in controlAnnounced }.mapNotNull { controlPeerIds[it] }.toSet()
         }
     }
 

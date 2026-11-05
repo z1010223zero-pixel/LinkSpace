@@ -107,7 +107,7 @@ export interface HostOptions {
     preferred: ExtendPreferredSize | null
   ) => Promise<{ ok: true; screen: { x: number; y: number; w: number; h: number } } | { ok: false; reason: string }>
   /** 虚拟显示器销毁出口。缺省为空操作 */
-  extendDestroyVirtualDisplay?: () => void
+  extendDestroyVirtualDisplay?: () => void | Promise<void>
   /** 当前物理光标位置（虚拟屏坐标），用于正向投屏实时推送 screen.cursor */
   inputCursorPos?: () => { x: number; y: number } | null
   /** 唤醒休眠/熄屏的显示器（被控会话开始时自动点亮屏幕） */
@@ -235,6 +235,8 @@ export class Host {
   private forwardStreamStarted = false
   /** 正向投屏实时推送鼠标坐标的定时器（16ms 轮询变化即发 screen.cursor） */
   private forwardCursorTimer: NodeJS.Timeout | null = null
+  /** 正向推流码率自适应积压采样定时器（避免换档叠加泄漏） */
+  private forwardBacklogTimer: NodeJS.Timeout | null = null
   /** 锁屏暂停的正向投屏（解锁后按原样重起）；无暂停时 null */
   private pausedForwardStream: {
     peerId: string
@@ -1405,6 +1407,7 @@ export class Host {
         return
       }
       clipboard.writeText(text)
+      this.clipboardSync?.markRemoteWrite(text)
       log.info(`[screen.paste] 已写入剪贴板（${text.length} 字符）并注入 Ctrl+V`)
       // Ctrl+V 走与对端事件完全相同的注入路径（已过会话校验与解码）
       this.inputCoordinator?.onEvent(peerId, {
@@ -1479,7 +1482,13 @@ export class Host {
         destroyVirtualDisplay: () => this.opts.extendDestroyVirtualDisplay?.(),
         send: sendTo,
         log: (msg) => log.info(msg),
-        onChanged: () => this.emit('extendChanged'),
+        onChanged: () => {
+          if (!this.extendCoordinator?.activeSession && this.screenStream.running && this.forwardStreamRegion) {
+            log.info('[screen-stream] 扩展屏会话结束，停止对应推流')
+            this.stopForwardStream()
+          }
+          this.emit('extendChanged')
+        },
         onRequest: (req) => {
           // 走查自动批准：LINKSPACE_AUTO_APPROVE=1 时跳过人工确认（与
           // input 会话同口径，仅显式环境变量开启，真机走查用）。
@@ -1542,19 +1551,25 @@ export class Host {
     try {
       let streamBytesSent = 0
       let sentHash = createHash('sha256')
-      let sentCarry = Buffer.alloc(0)
+      let bytesInCurrentMb = 0
+      let mbCount = 0
       const onChunk = (chunk: Buffer): void => {
         streamBytesSent += chunk.length
-        // 端到端取证：按精确 1MB 分段哈希（两侧对齐），定位字节损坏段
-        // （真机绿块排障 2026-10-31：软解也花 → 先证明字节本身是否一致）
-        let buf = Buffer.concat([sentCarry, chunk])
-        while (buf.length >= 1_048_576) {
-          sentHash.update(buf.subarray(0, 1_048_576))
-          log.info(`[screen-stream] 发送MB#${Math.floor(streamBytesSent / 1e6)} sha=${sentHash.digest('hex').slice(0, 16)}`)
-          sentHash = createHash('sha256')
-          buf = buf.subarray(1_048_576)
+        // 端到端取证：按精确 1MB 分段哈希（两侧对齐），零拷贝流式更新（消除 Buffer.concat）
+        let offset = 0
+        while (offset < chunk.length) {
+          const needed = 1_048_576 - bytesInCurrentMb
+          const take = Math.min(chunk.length - offset, needed)
+          sentHash.update(chunk.subarray(offset, offset + take))
+          bytesInCurrentMb += take
+          offset += take
+          if (bytesInCurrentMb === 1_048_576) {
+            mbCount++
+            log.info(`[screen-stream] 发送MB#${mbCount} sha=${sentHash.digest('hex').slice(0, 16)}`)
+            sentHash = createHash('sha256')
+            bytesInCurrentMb = 0
+          }
         }
-        sentCarry = buf
         conn.sendBinary(chunk)
       }
       // 流跑起来后的收尾：码率自适应探针 + screen.stream.start。
@@ -1570,11 +1585,18 @@ export class Host {
         // 换档在 screen-stream 内部同步重启 ffmpeg（stop+start 同 tick，
         // 本探针不会插进间隙）；推流停止（会话结束/对端断开/手动）后
         // running=false，探针自停车并复位档位
+        if (this.forwardBacklogTimer) {
+          clearInterval(this.forwardBacklogTimer)
+          this.forwardBacklogTimer = null
+        }
         let lastProbeBytes = 0
         let probeTick = 0
-        const backlogProbe = setInterval(() => {
+        this.forwardBacklogTimer = setInterval(() => {
           if (!this.screenStream.running) {
-            clearInterval(backlogProbe)
+            if (this.forwardBacklogTimer) {
+              clearInterval(this.forwardBacklogTimer)
+              this.forwardBacklogTimer = null
+            }
             this.screenStreamCurrentTier = 0
             this.streamCongestionScore = 0
             return
@@ -1678,6 +1700,19 @@ export class Host {
       clearInterval(this.forwardCursorTimer)
       this.forwardCursorTimer = null
     }
+    if (this.forwardBacklogTimer) {
+      clearInterval(this.forwardBacklogTimer)
+      this.forwardBacklogTimer = null
+    }
+  }
+
+  /** 停止正向推流并清理状态 */
+  stopForwardStream(): void {
+    if (this.screenStream.running) {
+      this.screenStream.stop()
+    }
+    this.clearForwardStreamState()
+    this.pausedForwardStream = null
   }
 
   /**
@@ -2101,6 +2136,7 @@ export class Host {
     this.clearReverseStreamReconnectTimer()
     this.reverseStreamReceiver.stop()
     this.reverseStreamPeerId = null
+    this.stopForwardStream()
     this.clipboardSync?.stop()
     this.discovery?.stop()
     this.control?.stop()

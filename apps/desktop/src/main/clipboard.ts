@@ -122,4 +122,14 @@ export class ClipboardSync {
     this.lastSeen = text
     this.suppressUntil = this.now() + SUPPRESS_MS
   }
+
+  /**
+   * 标记远端通过非剪贴板通道（如 screen.paste）写入了本机剪贴板：
+   * 更新基线并启动抑制窗口，防止 poll() 将该写入误判为本机本地复制并回推
+   */
+  markRemoteWrite(text: string): void {
+    if (typeof text !== 'string' || !text) return
+    this.lastSeen = text
+    this.suppressUntil = this.now() + SUPPRESS_MS
+  }
 }

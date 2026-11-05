@@ -246,14 +246,6 @@ export class PairingCoordinator {
       scope: entry.scope
     }
     p.conn.send('pair.approve', approveMsg)
-    // 接收方自己也要记下对方身份
-    this.trust.grant({
-      deviceId: p.peerId,
-      displayName: p.displayName,
-      deviceType: p.deviceType,
-      fingerprint: presentedFp,
-      scope: this.grantScope()
-    })
     log.info(`已与 ${p.peerId} 建立信任（用户确认配对码）`)
     this.uiPaired?.forEach((cb) => cb(this.trust.list().find((e) => e.deviceId === p.peerId)!))
     return { ok: true }
@@ -481,7 +473,7 @@ export class PairingCoordinator {
         scope: this.trust.scopeOf(peer.deviceId)
       })
       conn.send('pair.approve', {
-        deviceId: peer.deviceId,
+        deviceId: this.opts.deviceId,
         displayName: this.opts.displayName,
         deviceType: this.opts.deviceType,
         fingerprint: this.opts.selfFingerprint(),

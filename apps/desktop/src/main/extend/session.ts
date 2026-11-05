@@ -75,7 +75,7 @@ export interface ExtendCoordinatorCallbacks {
     preferred: ExtendPreferredSize | null
   ) => Promise<{ ok: true; screen: { x: number; y: number; w: number; h: number } } | { ok: false; reason: string }>
   /** 销毁当前虚拟显示器（SWD 销毁）。无虚拟显示器时是安全空操作 */
-  destroyVirtualDisplay: () => void
+  destroyVirtualDisplay: () => void | Promise<void>
   /** 给对端发消息。对端不在线时静默丢弃 */
   send: (peerId: string, type: string, payload: Record<string, unknown>) => void
   log?: (msg: string) => void

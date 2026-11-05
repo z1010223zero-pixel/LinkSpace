@@ -61,3 +61,8 @@ apps/android/local.properties
 # linkspace-rootdev.exe build output in native/winhelper (not committed;
 # the distributable copy lives in apps/desktop/resources/winhelper/)
 native/winhelper/*.exe
+
+# dd-capture 预编译二进制（打包资源 extraResources 依赖）
+!native/dd-capture/x64/
+!native/dd-capture/x64/Release/
+!native/dd-capture/x64/Release/dd-capture.exe

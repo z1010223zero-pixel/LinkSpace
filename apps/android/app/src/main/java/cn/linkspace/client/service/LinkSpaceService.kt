@@ -248,6 +248,7 @@ class LinkSpaceService private constructor(private val appContext: Context) {
                 } else {
                     Log.i(TAG, "对端声明身份: $from")
                 }
+                ctx.markAnnounced()
                 // 回应自己的身份，让对方知道我们是谁（每连接只回一次）
                 if (announcedConnections.add(from)) {
                     server?.sendControlTo(
@@ -326,8 +327,18 @@ class LinkSpaceService private constructor(private val appContext: Context) {
                 }
                 trust.revoke(from)
                 _trusted.value = trust.list()
+                if (input.isPeerInSession(from)) {
+                    input.stop("trust revoked")
+                }
                 controlledInput.onTrustRevoked(from)
+                if (displayExtend.isPeerInSession(from)) {
+                    displayExtend.stop("trust revoked")
+                }
                 reverseScreen.onTrustRevoked(from)
+                taskMap.values
+                    .filter { it.peerId == from && it.state !in listOf(TransferTask.COMPLETED, TransferTask.FAILED, TransferTask.CANCELLED) }
+                    .forEach { cancelTransfer(it.id) }
+                server?.closePeer(from)
                 Log.i(TAG, "对端撤销了信任: $from")
             }
 
@@ -616,8 +627,32 @@ class LinkSpaceService private constructor(private val appContext: Context) {
     }
 
     fun revokeTrust(deviceId: String) {
+        // 1. 发送 pair.revoke 通知对端
+        server?.sendControlTo(
+            deviceId,
+            envelope(Protocol.TYPE_PAIR_REVOKE, deviceId) {
+                put("deviceId", deviceIdPrefix)
+            }
+        )
+        // 2. 撤销信任列表
         trust.revoke(deviceId)
         _trusted.value = trust.list()
+        // 3. 级联终止 4 个会话状态机
+        if (input.isPeerInSession(deviceId)) {
+            input.stop("trust revoked")
+        }
+        controlledInput.onTrustRevoked(deviceId)
+        if (displayExtend.isPeerInSession(deviceId)) {
+            displayExtend.stop("trust revoked")
+        }
+        reverseScreen.onTrustRevoked(deviceId)
+        // 4. 取消未完成传输
+        taskMap.values
+            .filter { it.peerId == deviceId && it.state !in listOf(TransferTask.COMPLETED, TransferTask.FAILED, TransferTask.CANCELLED) }
+            .forEach { cancelTransfer(it.id) }
+        // 5. 关闭底层连接
+        server?.closePeer(deviceId)
+        Log.i(TAG, "已撤销对 $deviceId 的信任，清理会话并断开连接")
     }
 
     // ---------- 信任设备清单（Bug 2：确认框“以后不再询问”） ----------

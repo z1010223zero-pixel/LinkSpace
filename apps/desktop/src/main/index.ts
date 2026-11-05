@@ -236,7 +236,7 @@ function createWindow(): void {
   mainWindow.on('ready-to-show', () => mainWindow?.show())
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url)
+    if (/^https?:/i.test(url)) void shell.openExternal(url)
     return { action: 'deny' }
   })
 
@@ -518,8 +518,12 @@ app.on('before-quit', (event) => {
   adapter
     .stopAll()
     .catch((err) => log.error(`清理会话失败: ${String(err)}`))
-    .finally(() => {
-      void host.stop()
+    .finally(async () => {
+      try {
+        await host.stop()
+      } catch (err) {
+        log.error(`清理 host 失败: ${String(err)}`)
+      }
       app.exit(0)
     })
 })

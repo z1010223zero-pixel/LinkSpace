@@ -409,10 +409,17 @@ export class ScreenStreamService {
     this.onChunkRef = onChunk
     // 排障旁路：把实际推流的字节原样落盘（LINKSPACE_STREAM_TEE=<路径>），
     // 与平板收到的字节（sha256 分段一致）构成三方对账
+    if (this.teeStream) {
+      try {
+        this.teeStream.end()
+      } catch {
+        /* ignore */
+      }
+      this.teeStream = null
+    }
     const teePath = process.env.LINKSPACE_STREAM_TEE
-    let teeStream: import('node:fs').WriteStream | null = null
     if (teePath) {
-      teeStream = createWriteStream(teePath)
+      this.teeStream = createWriteStream(teePath)
       log.info(`[screen-stream] 推流字节落盘: ${teePath}`)
     }
     const proc = spawn(ffmpegPath, args, { windowsHide: true })
@@ -432,13 +439,21 @@ export class ScreenStreamService {
       log.warn(`[screen-stream] ffmpeg: ${line}`)
     })
     proc.stdout.on('data', (chunk: Buffer) => {
-      teeStream?.write(chunk)
+      this.teeStream?.write(chunk)
       // 交给宿主以 WS 二进制帧发出；连接已断（会话结束）时 stop 会被
       // 钩子调用，这里只在还活着时发
       if (this.proc === proc) onChunk(chunk)
     })
     proc.on('exit', (code) => {
       log.info(`[screen-stream] ffmpeg 退出（code=${code}）`)
+      if (this.teeStream) {
+        try {
+          this.teeStream.end()
+        } catch {
+          /* ignore */
+        }
+        this.teeStream = null
+      }
       if (this.proc === proc) {
         this.proc = null
         this.onEnded?.()
@@ -492,6 +507,7 @@ export class ScreenStreamService {
   private ddProc: ChildProcessWithoutNullStreams | null = null
   private ddReadyTimer: NodeJS.Timeout | null = null
   private encoder: StreamEncoder = 'libx264'
+  private teeStream: import('node:fs').WriteStream | null = null
 
   /** 当前推流帧源（宿主锁屏恢复、状态查询用） */
   get source(): ScreenStreamSource {
@@ -505,6 +521,14 @@ export class ScreenStreamService {
 
   stop(): void {
     this.clearDdReadyTimer()
+    if (this.teeStream) {
+      try {
+        this.teeStream.end()
+      } catch {
+        /* ignore */
+      }
+      this.teeStream = null
+    }
     const dd = this.ddProc
     this.ddProc = null
     if (dd && !dd.killed) dd.kill()
@@ -663,6 +687,14 @@ export class ScreenStreamReceiver {
     })
     proc.on('exit', (code) => {
       log.info(`[screen-stream] 接收端 ffmpeg 退出（code=${code}）`)
+      if (this.teeStream) {
+        try {
+          this.teeStream.end()
+        } catch {
+          /* ignore */
+        }
+        this.teeStream = null
+      }
       if (this.proc === proc) {
         this.proc = null
         this.onEnded?.()
@@ -851,12 +883,15 @@ export class ScreenStreamReceiver {
 /** 接收端 stdin 背压上限（与 Android StreamDecoder BACKLOG_CAP 同值） */
 const RECEIVER_BACKLOG_CAP = 3 * 1024 * 1024
 
-/** 在 Annex-B 字节块里找 SPS 起始码（00 00 00 01 + NAL type 7），找不到返回 -1 */
+/** 在 Annex-B 字节块里找 SPS 起始码（兼容 3 字节 00 00 01 与 4 字节 00 00 00 01 + NAL type 7），找不到返回 -1 */
 function findSps(data: Buffer): number {
-  for (let i = 0; i + 4 < data.length; i++) {
-    if (data[i] === 0 && data[i + 1] === 0 && data[i + 2] === 0 && data[i + 3] === 1) {
-      if ((data[i + 4]! & 0x1f) === 7) return i
-      i += 4
+  for (let i = 0; i + 3 < data.length; i++) {
+    if (data[i] === 0 && data[i + 1] === 0) {
+      if (data[i + 2] === 1) {
+        if ((data[i + 3]! & 0x1f) === 7) return i
+      } else if (data[i + 2] === 0 && i + 4 < data.length && data[i + 3] === 1) {
+        if ((data[i + 4]! & 0x1f) === 7) return i
+      }
     }
   }
   return -1

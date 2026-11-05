@@ -157,7 +157,7 @@ export class ReverseWindowManager {
       if (/^https?:/i.test(url)) void shell.openExternal(url)
     })
     win.webContents.setWindowOpenHandler(({ url }) => {
-      void shell.openExternal(url)
+      if (/^https?:/i.test(url)) void shell.openExternal(url)
       return { action: 'deny' }
     })
     const hash = `#/reverse-stream?peer=${encodeURIComponent(peerId)}&name=${encodeURIComponent(displayName)}`

@@ -3,7 +3,9 @@ package cn.linkspace.client.service
 import android.graphics.Bitmap
 import android.util.Log
 import org.bytedeco.ffmpeg.avcodec.AVCodecContext
+import org.bytedeco.ffmpeg.avcodec.AVPacket
 import org.bytedeco.ffmpeg.avformat.AVFormatContext
+import org.bytedeco.ffmpeg.avformat.AVIOContext
 import org.bytedeco.ffmpeg.avformat.Read_packet_Pointer_BytePointer_int
 import org.bytedeco.ffmpeg.avformat.Seek_Pointer_long_int
 import org.bytedeco.ffmpeg.avutil.AVDictionary
@@ -55,6 +57,7 @@ class StreamDecoder(
 
     private val stopped = AtomicBoolean(false)
     private val pipe = LiveByteStream()
+    private val avioScratch = ByteArray(256 * 1024)
 
     /** 解码输出的实际分辨率（触控映射基准） */
     @Volatile
@@ -80,6 +83,9 @@ class StreamDecoder(
         var ic: AVFormatContext? = null
         var ctx: AVCodecContext? = null
         var swsCtx: SwsContext? = null
+        var avioCtx: AVIOContext? = null
+        var pkt: AVPacket? = null
+        var frame: AVFrame? = null
         try {
             avutil.av_log_set_level(avutil.AV_LOG_ERROR)
             val fmt = avformat.av_find_input_format("h264")
@@ -118,6 +124,7 @@ class StreamDecoder(
                 BytePointer(ioBuffer), ioBuffer.capacity(), 0, null, readCb,
                 null as org.bytedeco.ffmpeg.avformat.Write_packet_Pointer_BytePointer_int?, seekCb
             )
+            avioCtx = avio
             formatCtx.pb(avio)
             val opts = AVDictionary()
             avutil.av_dict_set(opts, "fflags", "nobuffer", 0)
@@ -144,8 +151,10 @@ class StreamDecoder(
             avcodec.avcodec_open2(codecCtx, codec, null as AVDictionary?)
             Log.i(TAG, "avcodec_open2 完成（${codecCtx.width()}x${codecCtx.height()}）")
 
-            val pkt = avcodec.av_packet_alloc()
-            val frame = avutil.av_frame_alloc()
+            pkt = avcodec.av_packet_alloc()
+            frame = avutil.av_frame_alloc()
+            val localPkt = pkt ?: throw IllegalStateException("av_packet_alloc 失败")
+            val localFrame = frame ?: throw IllegalStateException("av_frame_alloc 失败")
             val bmpRing = arrayOfNulls<Bitmap>(2)
             var ringIdx = 0
             var rgbaBuf: ByteBuffer? = null
@@ -155,12 +164,12 @@ class StreamDecoder(
             var rendered = 0L
 
             fun drainAndRender() {
-                while (avcodec.avcodec_receive_frame(codecCtx, frame) >= 0) {
-                    val w = frame.width()
-                    val h = frame.height()
-                    val pixFmt = frame.format()
+                while (avcodec.avcodec_receive_frame(codecCtx, localFrame) >= 0) {
+                    val w = localFrame.width()
+                    val h = localFrame.height()
+                    val pixFmt = localFrame.format()
                     if (w <= 0 || h <= 0) {
-                        avutil.av_frame_unref(frame)
+                        avutil.av_frame_unref(localFrame)
                         continue
                     }
                     if (w != outWidth || h != outHeight || bmpRing[0] == null) {
@@ -179,7 +188,7 @@ class StreamDecoder(
                     }
                     // 仅当管道内真的堆积超过 64KB（多帧未读）时才跳过渲染追赶最新包
                     if (rendered > 0L && pipe.backlog() > 64 * 1024L) {
-                        avutil.av_frame_unref(frame)
+                        avutil.av_frame_unref(localFrame)
                         continue
                     }
                     val buf = rgbaBuf ?: return
@@ -197,8 +206,8 @@ class StreamDecoder(
                     if (sCtx != null && dstPtr != null) {
                         swscale.sws_scale(
                             sCtx,
-                            frame.data(),
-                            frame.linesize(),
+                            localFrame.data(),
+                            localFrame.linesize(),
                             0,
                             h,
                             dstData,
@@ -212,14 +221,14 @@ class StreamDecoder(
                         Log.i(TAG, "已解码渲染 $rendered 帧")
                     }
                     onFrame(bitmap)
-                    avutil.av_frame_unref(frame)
+                    avutil.av_frame_unref(localFrame)
                 }
             }
 
             var readCalls = 0L
             var lastStat = System.currentTimeMillis()
             while (!stopped.get()) {
-                val ret = avformat.av_read_frame(formatCtx, pkt)
+                val ret = avformat.av_read_frame(formatCtx, localPkt)
                 readCalls++
                 val nowMs = System.currentTimeMillis()
                 if (nowMs - lastStat > 10000) {
@@ -227,10 +236,10 @@ class StreamDecoder(
                     lastStat = nowMs
                 }
                 if (ret < 0) break // EOF 或错误：推流端收尾/断流
-                if (avcodec.avcodec_send_packet(codecCtx, pkt) >= 0) {
+                if (avcodec.avcodec_send_packet(codecCtx, localPkt) >= 0) {
                     drainAndRender()
                 }
-                avcodec.av_packet_unref(pkt)
+                avcodec.av_packet_unref(localPkt)
             }
             onEnded("投屏结束")
         } catch (e: InterruptedException) {
@@ -245,8 +254,11 @@ class StreamDecoder(
         } finally {
             Log.i(TAG, "解码线程退出 (stopped=${stopped.get()})")
             runCatching { swsCtx?.let { swscale.sws_freeContext(it) } }
+            runCatching { pkt?.let { avcodec.av_packet_free(it) } }
+            runCatching { frame?.let { avutil.av_frame_free(it) } }
             runCatching { ctx?.let { avcodec.avcodec_free_context(it) } }
             runCatching { ic?.let { avformat.avformat_close_input(it) } }
+            runCatching { avioCtx?.let { avformat.avio_context_free(it) } }
         }
     }
 
@@ -294,8 +306,10 @@ class StreamDecoder(
             var i = 0
             while (i + 3 < off) {
                 if (all[i] == 0x00.toByte() && all[i + 1] == 0x00.toByte() && all[i + 2] == 0x01.toByte()) {
-                    if ((all[i + 3].toInt() and 0x1f) == 7) lastSps = i // SPS
-                    i += 4
+                    if ((all[i + 3].toInt() and 0x1f) == 7) {
+                        lastSps = if (i > 0 && all[i - 1] == 0x00.toByte()) i - 1 else i // 保留 4 字节起始码前导 00
+                    }
+                    i += 3
                 } else {
                     i++
                 }
@@ -369,9 +383,6 @@ class StreamDecoder(
 
     companion object {
         private const val TAG = "LinkSpace/Stream"
-
-        /** AVIO 回调共享缓冲 */
-        private val avioScratch = ByteArray(256 * 1024)
 
         /** 管道积压上限：超过即丢到最近关键帧（约 0.5s 码率，避免积压出秒级画面延迟） */
         private const val BACKLOG_CAP = 512L * 1024
