@@ -10,6 +10,7 @@ dist/
 build/
 out/
 release/
+release_dist/
 *.tsbuildinfo
 
 # 原生构建
