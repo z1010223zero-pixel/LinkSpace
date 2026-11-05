@@ -4,6 +4,7 @@
   "private": true,
   "description": "LinkSpace 桌面端 —— 局域网多设备协作工作空间",
   "author": "LinkSpace",
+  "license": "Apache-2.0",
   "main": "./out/main/index.js",
   "scripts": {
     "dev": "node scripts/dev.mjs",

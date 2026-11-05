@@ -4,10 +4,13 @@
 
 **让电脑、手机和平板像同一个工作空间中的不同终端一样无缝协作。**
 
+[English](README_EN.md) | [简体中文](README.md)
+
 [![Platform Windows](https://img.shields.io/badge/Platform-Windows%2010%2F11-0078D6?logo=windows)](apps/desktop)
 [![Platform Android](https://img.shields.io/badge/Platform-Android%208.0+-3DDC84?logo=android)](apps/android)
 [![Zero Cloud](https://img.shields.io/badge/Cloud-Zero%20Cloud%20%7C%20LAN--First-blue)]()
 [![Security](https://img.shields.io/badge/Security-mDNS%20%2B%20TLS%20%2B%20TOFU-green)]()
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
 </div>
 
@@ -165,4 +168,4 @@ graph LR
 
 ## 📄 开源许可证
 
-本项目基于商业友好且合规的开源许可证规范开发，详情请参阅 [LICENSE](docs/license-inventory.md)。
+本项目基于 [Apache License 2.0](LICENSE) 开源许可证分发与使用。第三方依赖合规清单请参阅 [Third-Party Licenses](docs/license-inventory.md)。
