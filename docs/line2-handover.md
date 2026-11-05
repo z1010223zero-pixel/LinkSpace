@@ -157,7 +157,7 @@ git log --oneline -1   # 应为 a9436b1
 ### 3.1 人工走查 2.6（真机：联想小新平板 Pro GT）——下一步第一优先
 
 - **底版**：任务清单 2.6 + W7 新增 7 条 + mvp-acceptance.md 第 10 组 10.1–10.16。**2026-11-03 已跑部分**（见 §2 新增小节与任务清单 ⑭）：通过 10.1 单击、10.4 拖拽/滑动、10.6 右键返回、10.7 中键 Home、键盘英文、B2、C、剪贴板双向同步、断开恢复；B1 混合/未定论（纯文本字段待复测）；Ctrl+V 粘贴失败（组合键不触发）。**剩余未跑**：双击/长按/滚轮/回车/组合键（除 Ctrl+A/V 外）/特殊字符、切窗口不乱、断网/息屏/重启/长挂机恢复、多设备不串流、换分辨率档位、退后台录屏。
-- **新发现的重大阻塞项（2026-11-03）**：反向流画面冻结——反向窗口 canvas 只解出首帧（framesDecoded 恒为 1），bytesReceived 持续增长到 102MB；桌面 ffmpeg 无报错、droppedBytes=0。定位方法：给桌面 receiver 加临时环境变量门控的 h264 落盘（不提交），重编桌面、重建反向流、抓流后离线 ffprobe/ffmpeg 解码，定故障在平板编码输出还是桌面 ffmpeg。**此 bug 下 2.6 手势仍可用平板截屏验证，不必等修好。**
+- **反向流画面冻结已修（2026-11-05，见 §5）**，不再是阻塞项。联调时重点复测：1080p 长时间画面是否花屏/积压丢帧（`reverse-stream:status` 看 `keyframeResyncs` 与 `droppedBytes` 是否持续增长）、1440p 档位、右键返回/中键 Home、Ctrl+V 组合键（不要先用粘贴回退通道预置剪贴板）、息屏/断网/重启后的恢复。
 - **先走的顺序**：W5 的注入落点（单击/双击/长按/拖拽/滑动/右键返回/中键 Home/滚轮）→ W7 的画面窗口（入口出现、确认框、系统录屏授权框、换档位、断开/关窗口）→ 中文输入三通道（B1 候选栏跟随是最大不确定性：平板自带输入法是否响应 `sendKeyEvent` 组字；**B1 复测换纯文本字段，别再用 URL 地址栏**）→ W6 的码率自适应与延迟 → 断网/息屏/重启/长挂机 → 多设备不串流。
 - **真机调试现成工具**（见 `docs/agent-division.md` §3.1，仍有效）：
   - 平板无线调试端口随重连变化：`adb connect <ip>:<当前端口>`。
@@ -258,7 +258,8 @@ ANDROID_HOME=/data/home/android-sdk GRADLE_USER_HOME=/data/home/.gradle \
 | **`screen.stream.stop` 方向位已实现** | 2026-11-03 合进分支（`9488134`）：stop 加 `direction`，协议 §4.7 已登记；并发停流行为待 2.6 真机走查 | 已实现，见 §2 新增 |
 | **左右键已映射** | 2026-11-03 合进分支（`b175615`）：右键返回、中键 Home；真机语义待 2.6 走查 | 已实现，见 §2 新增 |
 | **h264_mf 注释与 libx264 代码漂移——已核实（2026-11-03，`87aa546`）** | 真机 A/B：libx264 画面干净锐利、无绿块、无下半帧全零；h264_mf 能出流、无绿块，但同等设置下明显比 libx264 软。2026-10-31 记录称“MF 全绿、libx264 下半帧全零”在当前构建上双向均未复现，该记录作废；代码默认 libx264 是对的，注释已改一致；h264_mf 只留作排障覆盖（`LINKSPACE_STREAM_ENCODER=h264_mf`） |
-| **反向流画面冻结（新发现的重大阻塞项，2026-11-03）** | 反向窗口 canvas 只解出首帧（framesDecoded 恒为 1），bytesReceived 持续增长到 102MB；桌面 ffmpeg 无报错、droppedBytes=0。故障在平板编码输出还是桌面 ffmpeg 未定位，需 h264 落盘 + 离线解码定论。输入通道独立可用，手势改用平板截屏验证 |
+| **反向流画面冻结——已修（2026-11-05，`59e761a`，真机复测）** | 根因两处：① 桌面 ffmpeg 读裸 Annex-B 缺 `-f h264 -probesize 32 -vsync 0`，MediaCodec 裸流无 VUI timing，默认 CFR 把第 2 帧起全判成重复时间戳丢弃（framesDecoded 恒为 1）；② 平板端 `screen.stream.start` 与首帧 SPS/PPS/IDR 的先后时序，已改为先发 start 再启动编码输出线程。另补 NAL 起始码规范化、`KEY_REPEAT_PREVIOUS_FRAME_AFTER` / `KEY_MAX_FPS_TO_ENCODER` / 关 B 帧。真机实测 framesDecoded 持续增长（1000+ 帧）。**仍有未解决的画质问题**：1080p 下曾见 `error while decoding MB` 与接收端积压丢帧（keyframeResyncs=55、droppedBytes≈49MB）；`6e75c8f` 已把切帧改成每帧只拷贝一次（原每块 Buffer.concat），是否消除待真机复测 |\n| **换分辨率会杀掉流——已修（2026-11-05，`59e761a`）** | Android 14 下同一个 MediaProjection 只允许一次 `createVirtualDisplay`，换档时重建 VirtualDisplay 抛 `SecurityException`、流中断。已改为 VirtualDisplay 由 `ReverseScreenStreamer` 持有，换档只 `setSurface` + `resize`；720p↔1080p 切换真机验证通过。**1440p 档位未验证**（测试脚本曾写错，实际发的仍是 720p） |\n| **Ctrl+V / 修饰键——已修，但组合键本身未单独验证** | 改动：Win 端屏蔽 Electron 默认菜单、跳过重复的 0xA0..0xA5 轮询；Android 端补 Ctrl/Shift/Alt 的 META 位与 VK 映射；反向会话期间不再外发全局键鼠。真机验证时粘贴文本是经 `sendReversePaste` 回退通道写入的，**不能证明 Ctrl+V 组合键注入本身生效** |
+| **右键返回 / 中键 Home——未确证** | 真机试发后焦点落到桌面，但没有核对是哪个键造成的，视为未验证 |
 | **前台服务停止超时根因——已修（2026-11-03，`126012d`）** | `LinkSpaceForegroundService` 是 START_STICKY 且永不停，系统后台重起后限时要求停止 → `ForegroundServiceDidNotStopInTimeException` → 进程被杀 → 无障碍服务跟着死、dumpsys 进 Crashed 列表。已修为 START_NOT_STICKY + onTaskRemoved 停服务 + null-intent 守卫 + onDestroy 停前台；平板复核 dumpsys 三项标准（Bound 含服务、Crashed 为空、accessibility_enabled=1）已通过 |
 | **无障碍假阳性检测——已修（2026-11-03，`126012d`）** | 应用横条只读已启用列表判断，无障碍服务崩了也显示“已开启”。`isEnabled()` 改以实际绑定状态为准（`instance != null` 或 `AccessibilityManager.getEnabledAccessibilityServiceList` 含本服务）。每次重装 APK、重启应用或系统杀进程后，都要重新核对 dumpsys 的真实绑定状态，不要只信应用横条 |
 | **平板端口是临时双栈通配符（2026-11-03 已核实）** | TransferServer 用端口 0（临时）+ 通配符绑定，走 IPv6 `::` 双栈；/proc/net/tcp（IPv4 表）里没有是正常的，/proc/net/tcp6 里有 `::` 监听；端口每次服务重起都变（39547 是重启前的旧端口）。日志已改印实际绑定地址 |
