@@ -22,7 +22,7 @@ import { fingerprintOfCert, type DeviceCert } from './transfer/identity'
 import type { DiscoveredService } from './discovery'
 import type { PendingPairing } from './pairing'
 import { decodeInputEvents, decodeScreenSize, mapPoint, MAX_INPUT_TEXT_BYTES, segmentInputText, utf8ByteLength, type InputEvent, type MouseButton } from './input/protocol'
-import { resolveStreamStopDirection } from './screen-stream'
+import { resolveStreamStopDirection, ScreenStreamReceiver } from './screen-stream'
 import { InputSessionCoordinator, InputController } from './input/session'
 import { EdgeSwitcher, type EdgeLayout } from './input/edge'
 import { InputLayoutStore } from './input/layout'
@@ -1060,6 +1060,46 @@ async function testE2e(): Promise<void> {
     await waitFor(() => (A.reverseInputStatus().state === 'failed' ? true : undefined))
     check('平板拒绝后状态为 failed', A.reverseInputStatus().state === 'failed')
     check('拒绝原因带回窗口', (A.reverseInputStatus().error ?? '').includes('拒绝'))
+
+    // 反向流接收端切帧：块边界与帧边界完全不对齐时，输出帧数与内容仍须正确
+    // （splitFrames 改为块列表累积后，防止回归成丢帧/错位）
+    {
+      const rx = new ScreenStreamReceiver()
+      const W = 6
+      const H = 4
+      const frameSize = W * H * 4
+      const frames: Array<{ w: number; h: number; first: number; last: number }> = []
+      const r = rx as unknown as {
+        expectedWidth: number
+        expectedHeight: number
+        onFrameRef: ((f: { width: number; height: number; data: Buffer }) => void) | null
+        frameChunks: Buffer[]
+        frameBytes: number
+        splitFrames: () => void
+      }
+      r.expectedWidth = W
+      r.expectedHeight = H
+      r.onFrameRef = (f) =>
+        frames.push({ w: f.width, h: f.height, first: f.data[0], last: f.data[f.data.length - 1] })
+      // 5 帧，帧 i 全部填充字节 i+1；以 7/1/50/33 字节的不规则块喂入
+      const all = Buffer.concat([1, 2, 3, 4, 5].map((i) => Buffer.alloc(frameSize, i)))
+      const sizes = [7, 1, 50, 33]
+      let off = 0
+      let k = 0
+      while (off < all.length) {
+        const n = Math.min(sizes[k++ % sizes.length], all.length - off)
+        r.frameChunks.push(all.subarray(off, off + n))
+        r.frameBytes += n
+        off += n
+        r.splitFrames()
+      }
+      check('不规则分块仍切出 5 帧', frames.length === 5, String(frames.length))
+      check(
+        '每帧内容按序且不串帧',
+        frames.every((f, i) => f.first === i + 1 && f.last === i + 1 && f.w === W && f.h === H)
+      )
+      check('切帧后无残留字节', r.frameBytes === 0 && r.frameChunks.length === 0)
+    }
 
     // ---------- 7. 撤销信任掐断会话 ----------
     console.log('\n7. 撤销信任立即掐断')

@@ -550,7 +550,13 @@ export class ScreenStreamReceiver {
   private proc: ChildProcessWithoutNullStreams | null = null
   private expectedWidth = 0
   private expectedHeight = 0
-  private frameBuf = Buffer.alloc(0)
+  private frameChunks: Buffer[] = []
+  private frameBytes = 0
+
+  private resetFrameBuf(): void {
+    this.frameChunks = []
+    this.frameBytes = 0
+  }
   private pendingChunks: Buffer[] = []
   private pendingBytes = 0
   private droppingToKeyframe = false
@@ -587,7 +593,7 @@ export class ScreenStreamReceiver {
   start(ffmpegPath: string, onFrame: (frame: ReverseStreamFrame) => void): void {
     if (this.proc) this.stop()
     this.onFrameRef = onFrame
-    this.frameBuf = Buffer.alloc(0)
+    this.resetFrameBuf()
     this.droppingToKeyframe = false
     this.stderrTail = []
     const args = [
@@ -624,7 +630,8 @@ export class ScreenStreamReceiver {
     })
     proc.stdout.on('data', (chunk: Buffer) => {
       if (this.proc !== proc) return
-      this.frameBuf = Buffer.concat([this.frameBuf, chunk])
+      this.frameChunks.push(chunk)
+      this.frameBytes += chunk.length
       this.splitFrames()
     })
     proc.on('exit', (code) => {
@@ -718,7 +725,7 @@ export class ScreenStreamReceiver {
     const changed = this.expectedWidth !== 0 && this.expectedHeight !== 0
     this.expectedWidth = width
     this.expectedHeight = height
-    this.frameBuf = Buffer.alloc(0)
+    this.resetFrameBuf()
     if (changed) log.info(`[screen-stream] 接收端帧尺寸变化 → ${width}x${height}（帧缓冲已重置）`)
     this.onSize?.(width, height)
   }
@@ -728,19 +735,36 @@ export class ScreenStreamReceiver {
     const onFrame = this.onFrameRef
     if (!onFrame) return
     if (this.expectedWidth === 0 || this.expectedHeight === 0) {
-      if (this.frameBuf.length > 16 * 1024 * 1024) {
+      if (this.frameBytes > 16 * 1024 * 1024) {
         log.warn('[screen-stream] 接收端尺寸未知且缓冲超 16MB，丢弃缓冲等 start 消息')
-        this.frameBuf = Buffer.alloc(0)
+        this.resetFrameBuf()
       }
       return
     }
     const frameSize = this.expectedWidth * this.expectedHeight * 4
     if (frameSize <= 0) return
-    while (this.frameBuf.length >= frameSize) {
-      const frame = this.frameBuf.subarray(0, frameSize)
-      this.frameBuf = this.frameBuf.subarray(frameSize)
+    // 每帧只拷贝一次：块列表累积，凑够一帧再一次性组装。
+    // 此前每个 stdout 小块都 Buffer.concat 整段缓冲（1080p 帧约 9MB、30fps 约 276MB/s），
+    // 反复拷贝拖慢 ffmpeg 的 stdout 消费，进而撑爆 stdin 积压触发丢帧花屏。
+    while (this.frameBytes >= frameSize) {
+      const frame = Buffer.allocUnsafe(frameSize)
+      let filled = 0
+      while (filled < frameSize) {
+        const head = this.frameChunks[0]
+        const need = frameSize - filled
+        if (head.length <= need) {
+          head.copy(frame, filled)
+          filled += head.length
+          this.frameChunks.shift()
+        } else {
+          head.copy(frame, filled, 0, need)
+          filled += need
+          this.frameChunks[0] = head.subarray(need)
+        }
+      }
+      this.frameBytes -= frameSize
       this.framesDecoded++
-      onFrame({ width: this.expectedWidth, height: this.expectedHeight, data: Buffer.from(frame) })
+      onFrame({ width: this.expectedWidth, height: this.expectedHeight, data: frame })
     }
   }
 
