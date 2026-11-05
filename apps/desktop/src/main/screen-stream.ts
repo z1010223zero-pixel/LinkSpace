@@ -145,13 +145,24 @@ function buildEncodeArgs(scaleWidth: number, encoder: StreamEncoder, tier: numbe
   const tierBps = TIERS[tier]?.bps ?? null
   const bps = Math.min(tierBps ?? presetBps, presetBps)
   if (bps > 0) {
-    const frameBps = Math.round(bps / fps)
-    args.push('-b:v', String(bps), '-maxrate', String(bps), '-bufsize', String(frameBps))
+    if (encoder === 'libx264') {
+      // 画质稳定性（2026-11-05 A/B 实测）：原先 -b:v=maxrate + bufsize=单帧(bps/fps)，
+      // 每个 IDR 远大于一帧的 VBV，被迫狠压量化 → 每秒一次 IDR 模糊（PSNR 约 40dB，
+      // 相邻 P 帧 50~60dB），再逐帧变清晰，肉眼就是「模糊一下清晰一下」。
+      // 改为封顶 CRF：画质恒定，码率只在画面变化时按需上涨并被 maxrate 封顶；
+      // bufsize 取 ~125ms 码率，足够容纳 IDR，最坏排空延迟仍在百毫秒量级。
+      const bufBits = Math.max(Math.round(bps * 0.125), 400_000)
+      args.push('-crf', '20', '-maxrate', String(bps), '-bufsize', String(bufBits))
+    } else {
+      const frameBps = Math.round(bps / fps)
+      args.push('-b:v', String(bps), '-maxrate', String(bps), '-bufsize', String(frameBps))
+    }
   }
-  // GOP 30（1s 一个 IDR，丢帧后 1s 内自愈）；开启 low_delay 与包级即时冲刷
+  // GOP 60（2s 一个 IDR：IDR 频率减半，周期性画质波动与带宽尖峰随之减半；
+  // 流走 TCP/WebSocket 不丢包，积压丢帧自愈靠 SPS 重同步，不依赖短 GOP）；开启 low_delay 与包级即时冲刷
   args.push(
     '-bf', '0',
-    '-g', '30',
+    '-g', '60',
     '-flags', 'low_delay',
     '-fflags', 'nobuffer',
     '-flush_packets', '1',

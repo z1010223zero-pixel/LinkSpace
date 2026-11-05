@@ -187,8 +187,9 @@ class StreamDecoder(
                         onSize(w, h)
                         Log.i(TAG, "FFmpeg 软解就绪: ${w}x${h}")
                     }
-                    // 仅当管道内真的堆积超过 64KB（多帧未读）时才跳过渲染追赶最新包
-                    if (rendered > 0L && pipe.backlog() > 64 * 1024L) {
+                    // 仅当管道内真的堆积超过 192KB（多帧未读）时才跳过渲染追赶最新包；
+                    // 阈值须高于单个 IDR 的体积，否则每个关键帧后都会误丢几帧
+                    if (rendered > 0L && pipe.backlog() > 192 * 1024L) {
                         avutil.av_frame_unref(localFrame)
                         continue
                     }
