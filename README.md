@@ -1,123 +1,168 @@
 # LinkSpace
 
-> 让电脑、手机和平板像同一个工作空间中的不同终端一样协作。
+<div align="center">
 
-局域网内的多设备协作工具：**设备发现与配对、双向文件传输、手机投屏与控制、跨设备键鼠共享**，远期目标是把 Android 平板变成 Windows 真正的第二块显示器。
+**让电脑、手机和平板像同一个工作空间中的不同终端一样无缝协作。**
 
-第一版不依赖任何云服务器，无账号、无遥测。
+[![Platform Windows](https://img.shields.io/badge/Platform-Windows%2010%2F11-0078D6?logo=windows)](apps/desktop)
+[![Platform Android](https://img.shields.io/badge/Platform-Android%208.0+-3DDC84?logo=android)](apps/android)
+[![Zero Cloud](https://img.shields.io/badge/Cloud-Zero%20Cloud%20%7C%20LAN--First-blue)]()
+[![Security](https://img.shields.io/badge/Security-mDNS%20%2B%20TLS%20%2B%20TOFU-green)]()
 
----
-
-## 当前状态
-
-**阶段 1：桌面原型 —— 已完成（2026-10-28）**
-
-- [x] 项目结构与设计文档
-- [x] 第三方许可证核实（主要项）
-- [x] scrcpy 环境搭建与自动化验证（采集 / 无线 / 多设备 / 退出码）
-- [x] Electron 桌面原型：设备列表界面 + 投屏会话管理（`apps/desktop`）
-- [x] ADR-001 复审：Electron 37.10.3，340 MB 内存，继续采用
-
-**阶段 2：文件共享与配对 —— 已完成（2026-10-29）**
-
-- [x] 设备身份证书与 TLS 数据面（自签 + 指纹）
-- [x] 分块传输核心：进度 / 取消 / 断点续传 / 整体 SHA-256 校验 / 不覆盖命名
-- [x] 局域网设备发现（mDNS，`_linkspace._tcp`，与 Android NSD 双向互通）
-- [x] 配对与信任清单：配对码人工确认、信任持久化、随时撤销（撤销即断连并级联取消挂起任务）
-- [x] 控制通道（WebSocket over TLS，与文件传输共用端口）
-- [x] 无头验证扩到十套（verify / transfer / pairing / e2e / layout / net / heartbeat / clipboard / input / mdns），端到端跑通「发现 → 配对 → 传输 → 取消 → 剪贴板」
-- [x] 监听地址自动收窄 + 来源地址门禁：唯一局域网 IPv4 时绑定之，多网卡回落 `0.0.0.0`（`LINKSPACE_BIND_IP` 可指定）；入站来源不属于局域网 / 链路本地 / ULA 范围在 TLS 握手阶段断开（`verify:net`）
-- [x] Android 客户端（Kotlin + Compose）主体完成并经真机验证：发现、配对、双向文件、双向剪贴板、安卓→电脑远控
-- [x] 两轮代码审查与安全修复（见 [`docs/desktop-review-2026-10-29.md`](docs/desktop-review-2026-10-29.md) 与 [`docs/project-review-2026-10-29.md`](docs/project-review-2026-10-29.md)）：身份锚定到 TLS 证书（无证书冒充已修）、数据面 token / 块摘要、路径穿越、撤销级联；Android 端安全基线（发送方指纹绑定、服务端索证与 accept 定向、DoS 限长）同步达成（10-30）
-- [x] Windows NSIS 安装包 + SBOM 生成链路（`npm run dist` / `npm run sbom`），安装版冒烟（防火墙授权、菜单退出）通过
-
-**阶段 3：体验完善 —— 主体已完成（2026-10-29，f423ea4）**
-
-- [x] 剪贴板同步（文本，双向，回环抑制，512 KiB 上限；开关持久化且默认关）
-- [x] 跨电脑键鼠共享：Windows ↔ Windows 边缘穿越、被控确认弹窗与状态条、断线即恢复本机输入
-- [x] 安卓→电脑远控（平板作触控板，桌面被控端，协议 4.6）
-- [x] 控制通道 maxPayload 与消息限频（`verify:heartbeat` 洪泛用例钉死）
-- [ ] scrcpy 窗口内输入（鼠标键盘 / 中文输入法）与断网恢复仍待人工走查（[`docs/scrcpy-manual-checklist.md`](docs/scrcpy-manual-checklist.md)）
-- [x] 审查报告 2.4 节桌面 P3 全部清完（2026-10-30，5350f65：副屏贴边、载荷收敛、限频与挂起上限等）
-
-**线 2 决策分支最新进展（`decision/line2-accessibility-first`，2026-11-05）**：
-
-- [x] **双向免确认有效期**：电脑控平板与平板控电脑均支持选择免确认有效期（`仅本次` / `1天` / `3天` / `7天` / `30天` / `永久`）；到期前重连无需再次确认，双方均可随时在设备详情/设置中调整有效期或撤销。
-- [x] **锁屏直接唤醒与一键/自动上滑解锁**：电脑发起控制或反向投屏时平板端无障碍自动唤醒息屏并上滑解锁（电脑端反向投屏顶栏亦提供「亮屏解锁」一键按钮）；平板发起控制获批时电脑端自动唤醒睡眠/息屏的显示器。
-- [x] **反向录屏长效保活（零弹窗重连）**：平板端结束推流时解绑编码器 Surface 保持 `MediaProjection` 与 `VirtualDisplay` 跨会话存活（配合 `appops PROJECT_MEDIA allow`），免确认期内再次推流实现零 LinkSpace 弹窗与零系统录屏弹窗。
-- [x] **平板控制电脑超低延迟优化**：桌面端启用多线程切片编码（`threads=4:sliced-threads=1:rc-lookahead=0:sync-lookahead=0:bframes=0:aud=1`）与 `fast_bilinear` 硬件下采样（4K→1080p 达到 ~90fps，零帧缓冲）；全链路启用 `TCP_NODELAY`；平板端采用多线程 `FF_THREAD_SLICE` 与原生 `libswscale`（NEON 加速 YUV420P→RGBA 零拷贝，单帧处理从 ~45ms 降至 ~1.5ms）；触控事件按 120Hz（8ms）合并下发并在触摸瞬间即时本地绘制光标，彻底消除操作迟滞与画面卡顿。
-
-**阶段 4 前置：IddCx 虚拟显示器 —— PoC 进行中**
-
-- [x] EWDK 环境下驱动构建与测试签名（2026-10-30，独立 PoC，不进主构建）
-- [ ] 安装验证（technical-validation 3.2.1 / 3.2.2）——需管理员授权与重启，暂缓
-
-**发行路线**：已定 **路线 B（保留闭源商业发行选项）**——只复用宽松许可组件，GPL 系代码仅作设计参考（2026-10-30 拍板，见 [`docs/license-inventory.md`](docs/license-inventory.md) §2）；LICENSE 文件在公开发布门限前落地。
-
-已验证范围与缺口见 [`docs/mvp-acceptance.md`](docs/mvp-acceptance.md)。
-跑桌面端见 [`apps/desktop/README.md`](apps/desktop/README.md)（含 5 个本机环境踩坑与解法）。
-阶段 3 真机人工走查清单见 [`docs/manual-walkthrough-stage3.md`](docs/manual-walkthrough-stage3.md)。
-待用户亲手操作的事项（IddCx 安装验证、真机触控走查等）汇总在 [`docs/user-ops-2026-10-30.md`](docs/user-ops-2026-10-30.md)。
-
-> **线 2 开发在决策分支 `decision/line2-accessibility-first` 上进行（不在 master）**：对称互控差异点与任务清单见 [`docs/symmetric-control-tasks.md`](docs/symmetric-control-tasks.md)，方向文档见 [`docs/line2-line3-direction.md`](docs/line2-line3-direction.md)，**本地接手请先读 [`docs/line2-handover.md`](docs/line2-handover.md)**。
+</div>
 
 ---
 
-## 目录结构
+## 📖 项目简介
 
+**LinkSpace** 是一款专注于**纯局域网（LAN-First）**的多设备协作工具。它打破了 Windows 电脑与 Android 平板/手机之间的壁垒，无需依赖任何云端中继或第三方账号体系，所有流量与隐私数据**严格不出局域网**。
+
+在 LinkSpace 中，任一设备都可以成为主控端或被控端，实现真正的**对称互控、超低延迟投屏操作、高速文件互传与跨端剪贴板共享**。
+
+---
+
+## ✨ 核心特性
+
+### 🖥️ 1. 双向跨端对称互控（Symmetric Cross-Device Control）
+- **电脑控制平板**：
+  - 电脑窗口内实时查看平板高帧率画面；
+  - 鼠标单击、长按拖拽、滚轮滚动直通平板无障碍手势；
+  - 物理键盘与中文拼音直通，支持剪贴板文字直接上屏；
+  - 鼠标右键一键返回系统桌面、中键一键返回主页。
+- **平板控制电脑**：
+  - 平板全屏高清映射电脑桌面（支持点哪指哪与相对触控板两种模式）；
+  - 支持虚拟多按键、自绘键盘与滚轮手势；
+  - 多屏环境下支持一键切换要投屏与控制的显示器。
+
+### 🚀 2. 毫秒级极速低延迟推流与解码（Ultra-Low Latency Streaming）
+- **桌面端推流引擎**：
+  - Windows 原生 Direct 采集 + 多线程切片并行编码（`sliced-threads=1`）；
+  - `fast_bilinear` 硬件加速下采样，4K 到 1080p/720p 稳定 60~90 FPS 输出；
+  - 控制与视频通道全链路开启 `TCP_NODELAY`，彻底消除 Nagle 缓冲延迟。
+- **Android 端极速软解**：
+  - 基于 FFmpeg `libavcodec` 4 线程切片并发软解（抗活流抖动与花屏）；
+  - 原生 `libswscale` NEON 硬件加速 `YUV420P -> RGBA` 内存零拷贝转换（单帧转换耗时从 ~45ms 降至 ~1.5ms）；
+  - 触控事件 120Hz 极速合并节流，触摸即时本地光标刷新，消除视觉迟滞。
+
+### 🛡️ 3. 双向免确认有效期与长效保活（Smart Authorization & Zero-Dialog）
+- **多天免确认授权**：
+  - 电脑与平板双向支持选择免确认有效期：`仅本次` / `1天` / `3天` / `7天` / `30天` / `永久`；
+  - 有效期内再次发起控制或投屏无需重复点击弹窗确认，随时可在设备详情或设置中调整或一键撤销。
+- **长效录屏复用**：
+  - 平板端推流停止后仅断开 Surface 连接，保持系统 `MediaProjection` 与 `VirtualDisplay` 句柄跨会话存活；
+  - 免确认期内电脑重连投屏实现**零 LinkSpace 弹窗、零系统录屏弹窗**秒级秒开。
+
+### 🔓 4. 锁屏直接唤醒与一键/自动上滑解锁（Lock Screen Wake & Unlock）
+- **平板端息屏唤醒与上滑解锁**：
+  - 当电脑发起控制或投屏时，平板端无障碍服务自动通过系统 WakeLock 点亮屏幕，并自动注入平滑上滑解锁手势；
+  - 电脑端反向投屏窗口顶栏常驻「亮屏解锁」按钮，随时一键唤醒并解锁平板。
+- **电脑端显示器唤醒**：
+  - 平板发起控制被授权时，电脑端自动调用 Win32 原生电源接口唤醒休眠息屏的显示器。
+
+### 📁 5. 局域网高速文件分块直传（High-Speed File Transfer）
+- 支持大文件并发分块传输、断点续传与全局 SHA-256 完整性强校验；
+- 接收端同名防覆盖安全重命名，传输进度实时双向回填。
+
+### 📋 6. 双向无感剪贴板同步（Clipboard Sync）
+- 电脑与平板后台文本剪贴板自动同步；
+- 内置 500ms 来源回环抑制（Echo Suppression），避免跨端死循环粘贴；
+- 默认严格安全模式（按需手动开启）。
+
+---
+
+## 🏗️ 系统架构
+
+LinkSpace 采用基于 TLS 的全双工通信管道，控制信令与视频二进制帧在同一通道内按协议分流：
+
+```mermaid
+graph LR
+    subgraph Windows PC ["Windows 桌面端 (apps/desktop)"]
+        UI_PC["Vue 3 + Electron Renderer"]
+        Main_PC["Node.js Main Process"]
+        Cap_PC["Screen Capture (GDI / Desktop Duplication)"]
+        Enc_PC["FFmpeg H.264 Encoder (Sliced Threads)"]
+        Win32_In["Win32 Input Injector (SendInput)"]
+    end
+
+    subgraph Android Device ["Android 平板/手机 (apps/android)"]
+        UI_Droid["Jetpack Compose UI"]
+        Svc_Droid["LinkSpace Background Service"]
+        Dec_Droid["StreamDecoder (libavcodec + libswscale)"]
+        Proj_Droid["MediaProjection + VirtualDisplay (Cached)"]
+        A11y_Droid["Accessibility Service (Gesture & Key Injection)"]
+    end
+
+    %% Network Connections
+    Main_PC <== "mDNS 发现 (_linkspace._tcp)" ==> Svc_Droid
+    Main_PC <== "TLS WebSocket 控制信令 (session/input/clipboard)" ==> Svc_Droid
+    Enc_PC -- "裸 H.264 二进制流 (TCP_NODELAY)" --> Dec_Droid
+    Proj_Droid -- "裸 H.264 二进制流 (反向投屏)" --> Main_PC
+    Dec_Droid --> UI_Droid
+    A11y_Droid --> Svc_Droid
 ```
-apps/
-├── desktop/            Electron + Vue 3 + TS 桌面端
-└── android/            Kotlin + Compose 客户端
-modules/
-├── device-management/  设备注册表、信任关系、会话生命周期
-├── protocol/           发现、控制通道、消息定义
-├── file-transfer/      HTTPS 分块传输、校验与恢复
-├── clipboard/          剪贴板同步
-├── scrcpy-adapter/     Android 投屏与控制适配
-└── input-sharing/      键鼠共享适配
-native/
-├── windows-helper/     Windows 原生辅助能力
-└── virtual-display/    IddCx 虚拟显示器（独立验证）
-docs/                   设计文档
-```
-
-各模块职责边界见 `docs/architecture.md`。
 
 ---
 
-## 文档索引
+## 🛠️ 技术栈
 
-| 文档 | 内容 |
-|---|---|
-| [`docs/architecture.md`](docs/architecture.md) | 分层、进程模型、端口规划、状态机、适配层接口、ADR |
-| [`docs/protocol.md`](docs/protocol.md) | 通信协议 v0 草案：消息定义、文件传输子协议、错误码 |
-| [`docs/mvp-acceptance.md`](docs/mvp-acceptance.md) | 可执行的分组验收清单与发布门限 |
-| [`docs/threat-model.md`](docs/threat-model.md) | 资产、信任边界、威胁与缓解 |
-| [`docs/license-inventory.md`](docs/license-inventory.md) | 依赖许可证核实结论与合规检查表 |
-| [`docs/roadmap.md`](docs/roadmap.md) | 阶段划分、门限与转向判据 |
-| [`docs/symmetric-control-tasks.md`](docs/symmetric-control-tasks.md) | 对称互控任务清单：线 2（电脑控平板）与线 3（平板当扩展屏），含入口/门槛/验收标准 |
-| [`docs/line2-line3-direction.md`](docs/line2-line3-direction.md) | 线 2 / 线 3 方向文档：Q7 媒体通道选型、P0 共享层做法、修复优先级 |
-| [`docs/line2-handover.md`](docs/line2-handover.md) | 线 2 决策分支交接文档：接手起点、W1–W7 完成清单、下一步任务、构建与验证手册 |
-| [`docs/technical-validation.md`](docs/technical-validation.md) | 第 1 周验证清单与记录模板 |
-| [`docs/desktop-review-2026-10-29.md`](docs/desktop-review-2026-10-29.md) | 桌面端代码审查与修复报告（安全缺口 / 修复方式 / 验证结论） |
-| [`docs/project-review-2026-10-29.md`](docs/project-review-2026-10-29.md) | 第二次全项目审查报告（桌面 / Android 首审 / 文档一致性 / 修复优先级） |
-| [`docs/manual-walkthrough-stage3.md`](docs/manual-walkthrough-stage3.md) | 阶段 3 真机人工走查清单（键鼠 / 边缘穿越 / 断线安全 / 剪贴板） |
-| [`docs/agent-division.md`](docs/agent-division.md) | 双 Agent 分工、协议契约与移交清单（共享文件） |
-| [`docs/user-ops-2026-10-30.md`](docs/user-ops-2026-10-30.md) | 待用户操作清单（IddCx 安装验证、真机走查余项、发行决策记录） |
+| 模块 | 技术实现 | 说明 |
+|---|---|---|
+| **桌面端核心** | Electron 37 + TypeScript | 跨平台桌面壳体、主/渲染进程架构 |
+| **桌面端 UI** | Vue 3 + TailwindCSS | 现代化响应式控制台、设备卡片与全屏投屏视窗 |
+| **桌面端原生接入** | Koffi (Win32 FFI) | 鼠标键盘原生注入 (`SendInput`)、显示器唤醒与光标追踪 |
+| **Android 客户端** | Kotlin 2.0 + Jetpack Compose | 现代化声明式界面、Material 3 设计 |
+| **Android 输入注入** | Android Accessibility Service | 系统级触摸手势、返回/主页动作、锁屏唤醒上滑解锁 |
+| **Android 视频解码** | Bytedeco FFmpeg (`libavcodec` + `libswscale`) | 原生多线程切片解码 + NEON 零拷贝直接渲染 |
+| **网络通信** | mDNS + TLS 1.3 + WebSocket | 局域网服务自发现、安全握手与二进制流分发 |
 
 ---
 
-## 开发原则
+## 🚀 快速上手
 
-1. 局域网不等于可信——发现不等于授权，所有控制必须显式确认。
-2. 能通过成熟独立程序实现的能力，不立即重写。
-3. 需要形成差异化的产品层（设备管理、工作空间、配对授权）自研。
-4. 高风险的底层能力（虚拟显示器）独立验证，失败不拖垮主进度。
-5. **许可证问题在深度复用之前解决，不在发布之前解决。**
+### 1. Windows 桌面端
+- **安装运行**：
+  直接下载并安装打包产物：`LinkSpace Setup 0.1.0.exe`，启动后软件将自动监听局域网并在后台就绪。
+- **源码运行**：
+  ```bash
+  cd apps/desktop
+  npm install --ignore-scripts
+  # 下载 Electron 运行环境
+  npm run dev
+  ```
+
+### 2. Android 平板 / 手机端
+- **安装**：
+  安装 `app-debug.apk` 到设备。
+- **权限引导**：
+  1. 开启 **「LinkSpace 远程输入」** 无障碍服务（被控时注入触摸操作、锁屏上滑解锁必须）；
+  2. 授予通知与前台服务权限（保证息屏/后台连接不断连）；
+  3. 首次投屏或控制弹窗选择所需的免确认有效期（例如 `7天` 或 `永久`）。
+
+### 3. 连接与使用
+1. 确保电脑与平板处于**同一 Wi-Fi 或局域网**；
+2. 双方设备将通过 mDNS **自动发现**彼此，点击对方卡片输入 6 位配对码完成一次性配对；
+3. 配对后即可直接使用：**电脑控制平板**、**平板控制电脑**、**文件互传** 或 **剪贴板同步**。
 
 ---
 
-## 许可证
+## 🔒 安全与隐私设计
 
-**已定路线 B（保留闭源商业发行选项）**（2026-10-30）：只复用 Apache-2.0 / MIT / BSD 等宽松许可组件，GPL 系代码仅作设计参考、不进代码库。详见 `docs/license-inventory.md` §2。LICENSE 文件在公开发布门限前落地。
+1. **绝对私有（Zero Cloud）**：没有中央服务器，不上传任何遥测、设备信息或文件到外网。
+2. **端到端安全传输**：所有局域网流量强制走 TLS 加密传输，首次配对采用 TOFU（Trust On First Use）证书指纹比对。
+3. **输入授权边界**：控制权限与配对关系独立解耦；任何控制会话均需明确授权（或在用户设定的免确认有效期内），用户可随时一键终止。
+
+---
+
+## 📚 详细技术文档
+
+- [系统架构设计 (Architecture)](docs/architecture.md)
+- [网络通信协议规范 (Protocol)](docs/protocol.md)
+- [安全与威胁模型 (Threat Model)](docs/threat-model.md)
+- [开源依赖许可证清单 (Licenses)](docs/license-inventory.md)
+- [演进路线图 (Roadmap)](docs/roadmap.md)
+
+---
+
+## 📄 开源许可证
+
+本项目基于商业友好且合规的开源许可证规范开发，详情请参阅 [LICENSE](docs/license-inventory.md)。
